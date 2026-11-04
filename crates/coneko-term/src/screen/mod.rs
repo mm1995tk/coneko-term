@@ -67,6 +67,8 @@ pub struct Screen {
     pub cursor_blinking: bool,
     /// カーソルを表示するか。
     pub cursor_visible: bool,
+    /// 挿入モード（IRM）。字を書くとき、右のセルを押し出す。
+    pub insert_mode: bool,
 }
 
 impl Screen {
@@ -87,6 +89,7 @@ impl Screen {
             cursor_shape: CursorShape::default(),
             cursor_blinking: false,
             cursor_visible: true,
+            insert_mode: false,
         }
     }
 
@@ -189,6 +192,10 @@ impl Screen {
     /// 字を 1 つ、カーソルの位置に書く。結合文字は直前の字につく。制御文字は無視する。
     pub fn print(&mut self, c: char) {
         let Some(width) = c.width() else { return };
+        // 折り返し待ちなら、字は次の行（空）に書かれるので、押し出すものは無い。
+        if self.insert_mode && width > 0 && !self.cursor().pending_wrap {
+            self.insert_cells(width);
+        }
         let (pen, wrap) = (self.pen, self.wraparound);
         self.buf_mut().print(c, width, &pen, wrap);
     }
