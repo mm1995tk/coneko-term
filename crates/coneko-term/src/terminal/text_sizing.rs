@@ -10,6 +10,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::screen::cell::MAX_SCALE;
 use crate::screen::{Align, SizedBlock};
 
 /// 字の最大バイト数。
@@ -45,7 +46,7 @@ pub(super) fn parse(data: &[u8]) -> Option<Parsed> {
     for pair in meta.split(':').filter(|p| !p.is_empty()) {
         let (key, value) = pair.split_once('=')?;
         let (slot, min, max) = match key {
-            "s" => (&mut s, 1, 7),
+            "s" => (&mut s, 1, MAX_SCALE),
             "w" => (&mut w, 0, 7),
             "n" => (&mut n, 0, 15),
             "d" => (&mut d, 0, 15),
@@ -62,8 +63,10 @@ pub(super) fn parse(data: &[u8]) -> Option<Parsed> {
     if d != 0 && d <= n {
         return None;
     }
-    if d == 0 {
+    // 分母が 0 か分子が 0 なら、分数の大きさは無いのと同じ（字が見えなくなるのを避ける）
+    if d == 0 || n == 0 {
         n = 0;
+        d = 0;
     }
     let (vertical, horizontal) = (align(v)?, align(h)?);
     if s == 1 && w == 0 && d == 0 {
@@ -149,9 +152,6 @@ mod tests {
             (b[0].vertical, b[0].horizontal),
             (Align::Center, Align::End)
         );
-        assert_eq!(b[0].font_scale(), 0.5);
-        // s=2 の半分
-        assert_eq!(blocks("s=2:n=1:d=2;a")[0].font_scale(), 1.0);
     }
 
     #[test]
@@ -192,5 +192,7 @@ mod tests {
         assert_eq!(blocks("s=2:z=9;a")[0].scale, 2);
         // n だけ（d が 0）は分数の大きさにならない
         assert_eq!(parse(b"n=1;a"), Some(Parsed::Plain("a".into())));
+        // 分子が 0 でも同じ
+        assert_eq!(parse(b"n=0:d=2;a"), Some(Parsed::Plain("a".into())));
     }
 }

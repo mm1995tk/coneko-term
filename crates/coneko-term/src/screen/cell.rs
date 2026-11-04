@@ -90,6 +90,9 @@ pub struct Attrs {
     pub underline: Underline,
 }
 
+/// 複数のセルにまたがる字の大きさ `s` の最大（四角の最大の高さ）。
+pub(crate) const MAX_SCALE: u8 = 7;
+
 /// 寄せ方（kitty の text sizing の `v`・`h`）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -123,18 +126,6 @@ pub struct SizedBlock {
     pub vertical: Align,
     /// 横の寄せ方（分数の大きさのときだけ効く）。
     pub horizontal: Align,
-}
-
-impl SizedBlock {
-    /// 字を描く大きさの倍率（`scale` に分数を掛けたもの）。
-    pub fn font_scale(&self) -> f64 {
-        let s = f64::from(self.scale);
-        if self.denominator > self.numerator {
-            s * f64::from(self.numerator) / f64::from(self.denominator)
-        } else {
-            s
-        }
-    }
 }
 
 /// セルの中身。

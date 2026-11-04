@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::cell::{Attrs, Cell, Content, SizedBlock};
+use super::cell::{Attrs, Cell, Content, SizedBlock, MAX_SCALE};
 use crate::graphics::Placement;
 
 mod reflow;
@@ -263,6 +263,7 @@ impl Buffer {
                     self.lines.pop_front();
                     self.trimmed += 1;
                 }
+                self.repair_sized_top();
             } else {
                 let (t, b) = (self.idx(top), self.idx(bottom));
                 self.lines.remove(t);
@@ -382,7 +383,7 @@ impl Buffer {
                 self.cursor.pending_wrap = false;
             }
         }
-        self.skip_block_tails(pen, wraparound);
+        self.skip_block_tails(pen);
         if width == 2 && self.cursor.x + 1 >= self.cols {
             // 行末に全角の字が入りきらない（xterm.js と同じ）
             if self.cols < 2 {
@@ -434,7 +435,11 @@ impl Buffer {
     fn clear_sized_from(&mut self, y: usize, x: usize) {
         if self.line(y).sized {
             for x in x..self.cols {
-                self.clear_sized_at(y, x);
+                let tall = matches!(&self.line(y).cells[x].content,
+                    Content::Sized { block, .. } if block.scale > 1);
+                if tall {
+                    self.clear_sized_at(y, x);
+                }
             }
         }
     }
@@ -473,9 +478,10 @@ impl Buffer {
     }
 
     /// カーソルが、複数のセルにまたがる字の 2 行目より下の行の上にあるとき、その行のぶんを
-    /// 飛び越える（OSC 66 の仕様。DECAWM に関わらない）。行末まで飛び越えたら折り返す。
-    fn skip_block_tails(&mut self, pen: &Attrs, wraparound: bool) {
-        for _ in 0..64 {
+    /// 飛び越える（OSC 66 の仕様。DECAWM に関わらず、行末まで飛び越えたら折り返す）。
+    fn skip_block_tails(&mut self, pen: &Attrs) {
+        // 1 回ごとに右へ進むか次の行へ移るので終わる。念のための上限。
+        for _ in 0..self.cols * usize::from(MAX_SCALE) {
             let (x, y) = (self.cursor.x, self.cursor.y);
             if self.cursor.pending_wrap || !self.line(y).sized {
                 return;
@@ -489,13 +495,10 @@ impl Buffer {
             let nx = x + usize::from(block.cols - dx);
             if nx < self.cols {
                 self.cursor.x = nx;
-            } else if wraparound {
+            } else {
                 self.cursor.x = self.cols - 1;
                 self.cursor.pending_wrap = true;
                 self.wrap_to_next_line(pen);
-            } else {
-                self.cursor.x = self.cols - 1;
-                return;
             }
         }
     }
@@ -514,11 +517,11 @@ impl Buffer {
                 self.cursor.pending_wrap = false;
             }
         }
-        self.skip_block_tails(pen, wraparound);
+        self.skip_block_tails(pen);
         if self.cursor.x + cols > self.cols {
             if wraparound {
                 self.wrap_to_next_line(pen);
-                self.skip_block_tails(pen, wraparound);
+                self.skip_block_tails(pen);
             }
             self.cursor.x = self.cursor.x.min(self.cols - cols);
         }
@@ -568,9 +571,21 @@ impl Buffer {
     /// `top..=bottom` の行（見えている画面の行番号）とその近くで、欠けた複数のセルにまたがる字を
     /// 消す。スクロールや行の挿入・削除などで四角が切れたときに呼ぶ。
     fn repair_sized(&mut self, top: usize, bottom: usize) {
-        let lo = self.idx(top).saturating_sub(7);
-        let hi = (self.idx(bottom) + 7).min(self.lines.len() - 1);
+        let lo = self.idx(top).saturating_sub(usize::from(MAX_SCALE));
+        let hi = (self.idx(bottom) + usize::from(MAX_SCALE)).min(self.lines.len() - 1);
         self.repair_sized_abs(lo, hi);
+    }
+
+    /// 行 `y` の、切れた 1 行の四角を消す（ICH・DCH のあと）。
+    fn repair_line_sized(&mut self, y: usize) {
+        let i = self.idx(y);
+        self.repair_sized_abs(i, i);
+    }
+
+    /// 先頭の行を捨てて、四角の上の行だけがなくなったかもしれないとき、残りの欠片を消す。
+    fn repair_sized_top(&mut self) {
+        let hi = usize::from(MAX_SCALE).min(self.lines.len() - 1);
+        self.repair_sized_abs(0, hi);
     }
 
     fn repair_sized_abs(&mut self, lo: usize, hi: usize) {
@@ -696,6 +711,7 @@ impl Buffer {
             line.cells.insert(x, Cell::blank(erase));
         }
         line.fix_wide();
+        self.repair_line_sized(y);
     }
 
     /// カーソルの位置から `n` 個のセルを消し、右のセルを詰める（DCH）。
@@ -710,6 +726,7 @@ impl Buffer {
         line.cells.drain(x..x + n);
         line.cells.resize(cols, Cell::blank(erase));
         line.fix_wide();
+        self.repair_line_sized(y);
     }
 
     /// 全部のセルを `c` で埋める（DECALN）。
@@ -733,17 +750,16 @@ impl Buffer {
         let n = self.scrollback_len();
         self.lines.drain(..n);
         self.trimmed += n as u64;
+        self.repair_sized_top();
     }
 
     /// 大きさを変える。主画面は折り返した行を組み直す（`reflow`）。代替画面は組み直さず、はみ出した
     /// 列を切り詰める（xterm.js と同じ）。
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.resize_rows(rows);
-        if cols != self.cols {
-            self.degrade_sized();
-        }
         let mut reflowed = false;
         if cols != self.cols {
+            self.degrade_sized();
             if self.reflow_enabled {
                 self.reflow(cols);
                 reflowed = true;

@@ -261,3 +261,46 @@ fn resizing_rows_cuts_nothing_in_half() {
         );
     }
 }
+
+#[test]
+fn dch_and_ich_keep_one_row_blocks_that_are_not_cut() {
+    // w=2 の 1 行の四角は、ふつうの全角の字のようにずれる
+    let mut t = term(3, 20);
+    w(&mut t, "ab\x1b]66;w=2;X\x07\x1b[1;1H\x1b[P");
+    assert!(is_piece(&t, 1, 0, "X", 0, 0));
+    assert!(is_piece(&t, 2, 0, "X", 1, 0));
+    w(&mut t, "\x1b[1;1H\x1b[@");
+    assert!(is_piece(&t, 2, 0, "X", 0, 0));
+    assert!(is_piece(&t, 3, 0, "X", 1, 0));
+    // 境で切れると消える
+    let mut t = term(3, 20);
+    w(&mut t, "\x1b]66;w=2;X\x07\x1b[1;2H\x1b[@");
+    assert!(t.screen().row(0).cells().iter().all(|c| !c.is_sized()));
+}
+
+#[test]
+fn skipping_lower_rows_ignores_decawm() {
+    let mut t = term(5, 20);
+    w(&mut t, "\x1b]66;s=2;a\x07\x1b[?7l\x1b[2;1Hz");
+    assert!(is_piece(&t, 0, 1, "a", 0, 1));
+    assert_eq!(t.screen().row(1).cells()[2].text(), "z");
+}
+
+#[test]
+fn dropping_top_rows_does_not_leave_lower_halves() {
+    let mut t = Terminal::with_screen(crate::screen::Screen::with_scrollback(3, 10, 1));
+    w(&mut t, "\x1b[2;1H\x1b]66;s=2;a\x07\x1b[3;1H");
+    let sized = |t: &Terminal| {
+        let s = t.screen();
+        (0..s.scrollback_len())
+            .map(|i| s.scrollback_row(i))
+            .chain((0..3).map(|y| s.row(y)))
+            .flat_map(|l| l.cells())
+            .filter(|c| c.is_sized())
+            .count()
+    };
+    assert_eq!(sized(&t), 4);
+    // 3 回送ると、四角の上の行が（スクロールバックの上限で）捨てられる。残りの行も消える
+    w(&mut t, "\n\n\n");
+    assert_eq!(sized(&t), 0);
+}
