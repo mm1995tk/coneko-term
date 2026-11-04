@@ -16,6 +16,10 @@
 //! PTY に書く。キーボード（#9）とマウス（#10）のバイト列も、[`Terminal::queue_output`] で
 //! 同じ出口に入れる。呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
+//! # 画像（kitty graphics）
+//!
+//! APC で送られた画像は [`crate::graphics`] が受け取って持つ。返事は同じ出口に入る。
+//!
 //! # モード
 //!
 //! DECSET・DECRST と SM・RM は [`Modes`]（[`Terminal::modes`]）と [`Screen`] の公開の項目が
@@ -40,6 +44,7 @@ mod theme;
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
 pub use theme::{Rgb, Theme};
 
+use crate::graphics::{Graphics, Image};
 use crate::mouse::{self, MouseAction, MouseButton, MouseEvent};
 use crate::parser::{Params, Parser, Perform};
 use crate::screen::{CursorShape, Screen};
@@ -165,6 +170,8 @@ struct State {
     output: Vec<u8>,
     /// 呼ぶ側が拾う OSC の番号。
     osc_handlers: Vec<u32>,
+    /// kitty graphics で受け取った画像。
+    graphics: Graphics,
 }
 
 impl Terminal {
@@ -189,6 +196,7 @@ impl Terminal {
                 theme: Theme::default(),
                 output: Vec::new(),
                 osc_handlers: Vec::new(),
+                graphics: Graphics::default(),
             },
         }
     }
@@ -259,6 +267,36 @@ impl Terminal {
     /// 同じ出口から出す。
     pub fn queue_output(&mut self, bytes: &[u8]) {
         self.state.output.extend_from_slice(bytes);
+    }
+
+    /// 受け取った画像を ID で引く（kitty graphics の `i=`）。
+    pub fn image(&self, id: u32) -> Option<&Image> {
+        self.state.graphics.get(id)
+    }
+
+    /// 受け取った画像を番号で引く（`I=`）。同じ番号の画像が複数あるときは、いちばん新しいもの。
+    pub fn image_by_number(&self, number: u32) -> Option<&Image> {
+        self.state.graphics.get_by_number(number)
+    }
+
+    /// 持っている画像を古い順に。
+    pub fn images(&self) -> impl Iterator<Item = &Image> {
+        self.state.graphics.iter()
+    }
+
+    /// 持っている画像のバイト列の合計。
+    pub fn image_bytes(&self) -> usize {
+        self.state.graphics.bytes()
+    }
+
+    /// 画像の合計の大きさの上限（バイト）。既定は [`crate::graphics::DEFAULT_QUOTA`]。
+    pub fn image_quota(&self) -> usize {
+        self.state.graphics.quota()
+    }
+
+    /// 画像の合計の大きさの上限を変える。超えている分は、古い画像から捨てる。
+    pub fn set_image_quota(&mut self, bytes: usize) {
+        self.state.graphics.set_quota(bytes);
     }
 
     /// マウスの報告が有効か（`CSI ? 9 h`、`1000`、`1002`、`1003` のどれか）。
@@ -490,6 +528,7 @@ impl State {
         self.saved_charsets = None;
         self.last_char = None;
         self.modes = Modes::default();
+        self.graphics.clear();
     }
 
     /// 主画面と代替画面を切り替える。カーソルの位置は引き継ぐ（xterm.js と同じ）。
@@ -875,5 +914,9 @@ impl Perform for State {
 
     fn osc_dispatch(&mut self, data: &[u8], bell_terminated: bool) {
         self.osc(data, bell_terminated);
+    }
+
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        self.graphics.apc(data, &mut self.output);
     }
 }
