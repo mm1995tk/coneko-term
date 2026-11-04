@@ -34,7 +34,7 @@ term.write("hello\r\n", () => console.log("処理し終えた"));
 ```ts
 const term = new Terminal({ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, lineHeight: 1 });
 await document.fonts.load("15px 'JetBrains Mono'"); // 省いてもよい: フォントを読み終えたときにセルの大きさを測り直す
-term.open(pane); // フォーカスを受ける要素を作り、canvas とスクロールバーを入れる
+term.open(pane); // canvas・スクロールバー・見えない textarea（フォーカスを受ける）を入れた要素を作る
 term.fit(); // `pane` の大きさから列と行の数を出す（xterm.js の FitAddon と同じく、スクロールバーの幅を引く）
 term.onCellSizeChange(() => term.fit()); // フォントを読み終えた、devicePixelRatio が変わった
 ```
@@ -44,6 +44,17 @@ term.onCellSizeChange(() => term.fit()); // フォントを読み終えた、dev
 ## マウスと選択
 
 `open()` がマウスを受けます。アプリがマウスの報告（モード 9、1000、1002、1003。書き方は既定・SGR 1006・ピクセル単位の SGR 1016）を頼むと、押した・離した・動かした・ホイールを `onData` から出します（xterm.js 6.0.0 と同じ。既定の書き方では、列か行が 223 を超える位置は送りません。1005 と 1015 は xterm.js が対応しないので既定の書き方として扱います）。Shift を押していれば、報告せずに選択します。報告が無効なら、ホイールは表示位置を動かし、代替画面では上下の矢印キーを送ります。ドラッグで範囲、ダブルクリックで単語（`wordSeparator` で区切りを変えられます）、トリプルクリックで行を選び、折り返した行は改行を入れずにつなぎます。`getSelection()`、`hasSelection()`、`getSelectionRange()`、`selectAll()`、`clearSelection()`、`onSelectionChange` が使え、要素は `copy` イベントに選択の字を渡します（xterm.js と同じ）。選択の色は `theme.selectionBackground` です。DOM が無いときは `handleMouse()` と `handleWheel()` を自分で呼びます。
+
+## キーボード・IME・貼り付け
+
+`open(host)` は、要素の中に見えない `textarea` を置きます。`focus()` はこれにフォーカスします。キー・IME の字・貼り付けは、問い合わせへの返事と同じ出口（`onData`）から出ます。キーのバイト列は xterm.js 6.0.0 と同じです（`evaluateKeyboardEvent` は `Keyboard.ts` の移植で、外にも出しています）。
+
+- Enter、Backspace、Tab、Shift+Tab、Esc、矢印（DECCKM で `CSI` と `SS3` を切り替える）、Home、End、PageUp、PageDown、Insert、Delete、F1〜F12、修飾キー付き（`CSI 1;m X`）、Ctrl+字、Alt を ESC の前置きにする。Shift+PageUp・Shift+PageDown は表示位置を動かします。
+- macOS の Option は字を打つキーとして扱います（`macOptionIsMeta: false`。xterm.js と同じ）。`true` にすると ESC の前置きにします。Cmd を押したキーは送りません（アプリのショートカットに任せる）。
+- IME: 変換している間は送らず、確定した字を送ります。変換中の字はカーソルの位置に見せます。
+- `paste` イベントを受けます。`term.paste(text)` でも同じことができます。改行は `\r` にそろえ、bracketed paste（2004）が有効なら `ESC [200~` と `ESC [201~` で囲みます。
+- フォーカスの報告（1004）が有効なら、`textarea` がフォーカスを得たときと失ったときに `CSI I` と `CSI O` を送ります。
+- `attachCustomKeyEventHandler(fn)` はキーのイベントを先に見ます。`false` を返したキーは処理しません。`scrollOnUserInput`（既定は true）は、入力したら一番下へ戻します。
 
 ## 開発
 

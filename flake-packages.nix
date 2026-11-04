@@ -60,6 +60,8 @@ let
         ./tsconfig.json
         ./tsconfig.test.json
         ./src/index.ts
+        ./src/input.ts
+        ./src/keyboard.ts
         ./src/memory.ts
         ./src/renderer.ts
         ./src/selection.ts
