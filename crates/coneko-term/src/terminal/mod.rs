@@ -2,7 +2,7 @@
 //! 画面（[`crate::screen`]）を動かす。
 //!
 //! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、OSC 8（リンク）を
-//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）、OSC 22（mouse pointer shapes）、OSC 7501（Program Status Protocol）。kitty の miscellaneous protocol extensions のうち、
+//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）、OSC 22（mouse pointer shapes）、OSC 21（color control）と色の積み重ね（`CSI # P`・`CSI # Q`・`CSI # R`、OSC 30001、OSC 30101）、OSC 7501（Program Status Protocol）。kitty の miscellaneous protocol extensions のうち、
 //! モードの保存と復元（`CSI ? s`・`CSI ? r`）、SGR 221・222、マウスが窓から出た報告（[`Terminal::report_mouse_leave`]）、
 //! `CSI 22 J` も扱う。知らないシーケンスは捨てる。
 //!
@@ -40,6 +40,9 @@
 //! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合。
 
 mod clipboard;
+mod color_control;
+#[cfg(test)]
+mod color_control_tests;
 mod dnd;
 #[cfg(test)]
 mod dnd_tests;
@@ -77,6 +80,7 @@ pub use clipboard::{
     ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest, ClipboardWrite,
     ClipboardWriteError,
 };
+pub use color_control::Colors;
 pub use dnd::{
     DndError, DndEvent, DndLocation, DndOperation, DndOperations, DragEntryForm, DragEntryKey,
     DragImage, DragImageFormat, DragOffer, DropForm, DropRequest,
@@ -256,6 +260,12 @@ struct State {
     /// kitty keyboard protocol のフラグの積み重ね。主画面（0）と代替画面（1）で別々。
     keyboard_flags: [KeyboardFlagStack; 2],
     theme: Theme,
+    /// いまの色（OSC 4・10・11・12・21 で変わる。既定は `theme`）。
+    colors: Colors,
+    /// 色の積み重ね（XTPUSHCOLORS・OSC 30001）。
+    color_stack: color_control::ColorStack,
+    /// 色が変わって、呼ぶ側がまだ見ていない。
+    colors_changed: bool,
     /// PTY へ送るバイト列。
     output: Vec<u8>,
     /// 呼ぶ側が拾う OSC の番号。
@@ -300,6 +310,9 @@ impl Terminal {
                 modes: Modes::default(),
                 keyboard_flags: Default::default(),
                 theme: Theme::default(),
+                colors: Colors::from_theme(&Theme::default()),
+                color_stack: Default::default(),
+                colors_changed: false,
                 output: Vec::new(),
                 osc_handlers: Vec::new(),
                 graphics: Graphics::default(),
@@ -832,14 +845,26 @@ impl Terminal {
         self.state.drop_finished_program_status();
     }
 
-    /// 色の問い合わせに返すテーマ。
+    /// いまの色（プログラムが OSC 4・10・11・12・21 で変えたものを含む）。描画はこれを使う。
+    pub fn colors(&self) -> &Colors {
+        &self.state.colors
+    }
+
+    /// 前に呼んでから色が変わったか。呼ぶと印を消す。
+    pub fn take_colors_changed(&mut self) -> bool {
+        std::mem::take(&mut self.state.colors_changed)
+    }
+
+    /// 色の既定になるテーマ。
     pub fn theme(&self) -> &Theme {
         &self.state.theme
     }
 
     /// 色の問い合わせに返すテーマを変える。
     pub fn set_theme(&mut self, theme: Theme) {
+        self.state.colors = Colors::from_theme(&theme);
         self.state.theme = theme;
+        self.state.colors_changed = true;
     }
 
     /// ウィンドウがフォーカスを得た・失ったことを知らせる。フォーカスの報告（`CSI ? 1004 h`）が
@@ -1131,6 +1156,8 @@ impl State {
         self.saved_modes.clear();
         let gone = self.program_status.clear(None);
         self.push_program_status(gone);
+        self.color_stack.clear();
+        self.set_colors(Colors::from_theme(&self.theme));
         self.flush_dnd();
     }
 
@@ -1380,6 +1407,12 @@ impl State {
             }
             (Some(b'?'), [], b's') => self.save_modes(params),
             (Some(b'?'), [], b'r') => self.restore_modes(params),
+            (None, [b'#'], b'P') => self.push_colors(first as usize),
+            (None, [b'#'], b'Q') => self.pop_colors(first as usize),
+            (None, [b'#'], b'R') => {
+                let (idx, count) = self.color_stack.report();
+                self.reply(&format!("\x1b[{idx};{count}#Q"));
+            }
             (Some(b'>'), [], b'u') => self.active_keyboard_flags_mut().push(first),
             (Some(b'<'), [], b'u') => {
                 let n = if first == 0 { 1 } else { first as usize };
@@ -1428,16 +1461,28 @@ impl State {
         self.reply(&format!("\x1b]{ps};{rgb}{st}"));
     }
 
-    /// 色の問い合わせ。`?` の指定にだけ返事し、色を変える指定は無視する。
-    fn osc_color_query(&mut self, cmd: &[u8], rest: &str, bell: bool) {
+    fn set_colors(&mut self, colors: Colors) {
+        if self.colors != colors {
+            self.colors = colors;
+            self.colors_changed = true;
+        }
+    }
+
+    /// OSC 4・10・11・12。`?` は問い合わせ、色の指定は書き込み。
+    fn osc_color(&mut self, cmd: &[u8], rest: &str, bell: bool) {
+        let mut colors = self.colors.clone();
         if cmd == b"4" {
             let mut it = rest.split(';');
             while let (Some(idx), Some(spec)) = (it.next(), it.next()) {
-                if let (Ok(i), "?") = (idx.parse::<u8>(), spec) {
-                    let color = self.theme.palette(i);
+                let Ok(i) = idx.parse::<u8>() else { continue };
+                if spec == "?" {
+                    let color = colors.palette[i as usize];
                     self.reply_color(&format!("4;{i}"), color, bell);
+                } else if let Some(c) = color_control::parse_color(spec) {
+                    colors.palette[i as usize] = c;
                 }
             }
+            self.set_colors(colors);
             return;
         }
         // 10・11・12。続く指定は、次の番号（11・12）に当たる。
@@ -1451,14 +1496,59 @@ impl State {
             if ps > 12 {
                 break;
             }
+            let slot = match ps {
+                10 => &mut colors.foreground,
+                11 => &mut colors.background,
+                _ => &mut colors.cursor,
+            };
             if spec == "?" {
-                let color = match ps {
-                    10 => self.theme.foreground,
-                    11 => self.theme.background,
-                    _ => self.theme.cursor,
-                };
+                let color = *slot;
                 self.reply_color(&ps.to_string(), color, bell);
+            } else if let Some(c) = color_control::parse_color(spec) {
+                *slot = c;
             }
+        }
+        self.set_colors(colors);
+    }
+
+    /// OSC 104（引数なしは 256 色すべて）・110・111・112。色を既定に戻す。
+    fn osc_color_reset(&mut self, cmd: &[u8], rest: &str) {
+        let defaults = Colors::from_theme(&self.theme);
+        let mut colors = self.colors.clone();
+        match cmd {
+            b"104" if rest.is_empty() => colors.palette = defaults.palette,
+            b"104" => {
+                for i in rest.split(';').filter_map(|s| s.parse::<u8>().ok()) {
+                    colors.palette[i as usize] = defaults.palette[i as usize];
+                }
+            }
+            b"110" => colors.foreground = defaults.foreground,
+            b"111" => colors.background = defaults.background,
+            _ => colors.cursor = defaults.cursor,
+        }
+        self.set_colors(colors);
+    }
+
+    /// OSC 21（kitty の color control）。
+    fn osc_color_control(&mut self, rest: &str, bell: bool) {
+        let defaults = Colors::from_theme(&self.theme);
+        let mut colors = self.colors.clone();
+        let reply = color_control::osc21(&mut colors, &defaults, rest);
+        self.set_colors(colors);
+        if let Some(body) = reply {
+            let st = if bell { "\x07" } else { "\x1b\\" };
+            self.reply(&format!("\x1b]21;{body}{st}"));
+        }
+    }
+
+    fn push_colors(&mut self, n: usize) {
+        let current = self.colors.clone();
+        self.color_stack.push(&current, n);
+    }
+
+    fn pop_colors(&mut self, n: usize) {
+        if let Some(c) = self.color_stack.pop(n) {
+            self.set_colors(c);
         }
     }
 
@@ -1473,6 +1563,15 @@ impl State {
             let rest = data.get(end + 1..).unwrap_or(&[]).to_vec();
             self.events.push(Event::Osc { ident, data: rest });
             return;
+        }
+        match data {
+            b"30001" => return self.push_colors(0),
+            b"30101" => return self.pop_colors(0),
+            b"104" | b"110" | b"111" | b"112" => {
+                let cmd = data.to_vec();
+                return self.osc_color_reset(&cmd, "");
+            }
+            _ => {}
         }
         let Some(sep) = data.iter().position(|&b| b == b';') else {
             return;
@@ -1538,7 +1637,15 @@ impl State {
             }
             cmd @ (b"4" | b"10" | b"11" | b"12") => {
                 let rest = text();
-                self.osc_color_query(cmd, &rest, bell);
+                self.osc_color(cmd, &rest, bell);
+            }
+            cmd @ (b"104" | b"110" | b"111" | b"112") => {
+                let rest = text();
+                self.osc_color_reset(cmd, &rest);
+            }
+            b"21" => {
+                let rest = text();
+                self.osc_color_control(&rest, bell);
             }
             _ => {}
         }

@@ -1096,6 +1096,37 @@ impl WasmTerminal {
         self.term.set_theme(theme);
     }
 
+    /// 前に呼んでから色が変わったか（プログラムが OSC 4・10・11・12・21 で変えた、テーマを変えた、
+    /// 積み重ねから戻した）。呼ぶと印を消す。
+    pub fn colors_changed(&mut self) -> bool {
+        self.term.take_colors_changed()
+    }
+
+    /// いまの色。並びは、文字・背景・カーソルの RGB（9 バイト）、続けて `cursor_text`・
+    /// `selection_background`・`selection_foreground` を 1 つ 4 バイト（設定されていれば 1、R、G、B。
+    /// 動的なら 0 が 4 つ）、続けて 256 色の RGB（768 バイト）。
+    pub fn colors(&self) -> Vec<u8> {
+        let c = self.term.colors();
+        let mut out = Vec::with_capacity(9 + 12 + 768);
+        for rgb in [c.foreground, c.background, c.cursor] {
+            out.extend_from_slice(&rgb);
+        }
+        for opt in [
+            c.cursor_text,
+            c.selection_background,
+            c.selection_foreground,
+        ] {
+            match opt {
+                Some(rgb) => out.extend_from_slice(&[1, rgb[0], rgb[1], rgb[2]]),
+                None => out.extend_from_slice(&[0; 4]),
+            }
+        }
+        for rgb in c.palette {
+            out.extend_from_slice(&rgb);
+        }
+        out
+    }
+
     /// ウィンドウのフォーカスの出入りを知らせる。
     pub fn set_focus(&mut self, focused: bool) {
         self.term.set_focus(focused);

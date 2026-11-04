@@ -72,6 +72,7 @@ function extendedPaletteColor(index: number): string {
 /** 色の語（`RowView.cells` の色の並び）から作る、描画に使う色の表。 */
 export class Palette {
   private colors: string[];
+  /** `ansi` は先頭の 16 色か、256 色すべて。 */
   constructor(
     ansi: readonly string[],
     readonly foreground: string,
@@ -79,9 +80,11 @@ export class Palette {
     readonly cursor: string,
     /** 選択範囲の色。半透明でよい（CSS の色）。 */
     readonly selection: string = "#ffffff4d",
+    /** ブロックカーソルの下の字の色。省略したら背景の色。 */
+    readonly cursorText: string = background,
   ) {
     this.colors = [...ansi];
-    for (let i = 16; i < 256; i++) this.colors.push(extendedPaletteColor(i));
+    for (let i = ansi.length; i < 256; i++) this.colors.push(extendedPaletteColor(i));
   }
 
   /** パレットの `index` 番の色。 */
@@ -598,7 +601,7 @@ export class CanvasRenderer {
     if (cursorKind === 3) return [bg, fg];
     const cursorBg =
       cursorKind === 0 ? palette.cursor : palette.resolve(cursorWord, true);
-    let text = palette.background;
+    let text = palette.cursorText;
     if (textKind === 3) text = bg;
     else if (textKind !== 0) text = palette.resolve(textWord, false);
     return [text, cursorBg];
@@ -660,7 +663,7 @@ export class CanvasRenderer {
       if (flags & 16) [fg, bg] = [bg, fg];
       if (x === blockX) {
         bg = palette.cursor;
-        fg = palette.background;
+        fg = palette.cursorText;
       } else if (extraBlocks.has(x)) {
         [fg, bg] = this.extraBlockColors(fg, bg);
       }
