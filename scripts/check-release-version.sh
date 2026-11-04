@@ -9,7 +9,7 @@ set -eu
 cd "$(dirname "$0")/.."
 
 cargo_version=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml)
-npm_version=$(sed -n 's/^  "version": "\(.*\)",/\1/p' package.json)
+npm_version=$(node -p "require('./package.json').version")
 
 echo "Cargo.toml   : ${cargo_version}"
 echo "package.json : ${npm_version}"
