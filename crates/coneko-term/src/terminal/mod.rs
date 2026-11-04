@@ -387,6 +387,13 @@ impl Terminal {
         self.state.graphics.bytes()
     }
 
+    /// 画像 `id` のいまのコマの表示時間が過ぎたと知らせ、次のコマへ進める。進んだら `true`。
+    /// 止まっているとき、画像が無いとき、最後のコマで次を待つときは `false`。
+    /// 時計は持たないので、いつ呼ぶかは呼ぶ側が決める（表示時間は [`crate::graphics::Animation::gaps`]）。
+    pub fn animation_step(&mut self, id: u32) -> bool {
+        self.state.graphics.step_animation(id)
+    }
+
     /// 画像の合計の大きさの上限（バイト）。既定は [`crate::graphics::DEFAULT_QUOTA`]。
     pub fn image_quota(&self) -> usize {
         self.state.graphics.quota()

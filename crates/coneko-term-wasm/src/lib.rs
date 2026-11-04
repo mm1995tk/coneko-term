@@ -676,6 +676,115 @@ impl WasmTerminal {
             .map(|i| i.data.clone())
             .unwrap_or_default()
     }
+
+    /// 画像のアニメーションの状態 `[コマの数, いまのコマ（1 始まり）, 再生の状態（1 止まっている、
+    /// 2 回す・最後で待つ、3 回す）, いまのコマの表示時間（ミリ秒。負は見せずに飛ばす）, 操作の数]`。
+    /// 画像が無ければ空。操作の数が 0 なら、コマを足していない（ふつうの画像）。
+    pub fn animation_info(&self, id: u32) -> Vec<f64> {
+        use coneko_term::graphics::PlayState;
+        match self.term.image(id) {
+            None => Vec::new(),
+            Some(i) => {
+                let a = &i.animation;
+                vec![
+                    a.frame_count() as f64,
+                    f64::from(a.current),
+                    match a.state {
+                        PlayState::Stopped => 1.0,
+                        PlayState::Loading => 2.0,
+                        PlayState::Running => 3.0,
+                    },
+                    f64::from(a.current_gap()),
+                    a.ops.len() as f64,
+                ]
+            }
+        }
+    }
+
+    /// いまのコマの表示時間が過ぎたと知らせる。次のコマへ進んだら `true`。時計は描く側が持つ。
+    pub fn animation_step(&mut self, id: u32) -> bool {
+        self.term.animation_step(id)
+    }
+
+    /// コマを作る `index` 番目（0 始まり）の操作。無ければ空。並びは次のとおり:
+    /// - データを置く: `[0, 作るコマ, 下地の種類（0 そのコマ自身、1 別のコマ、2 1 色）, 下地の値
+    ///   （コマの番号、または 0xRRGGBBAA）, x, y, 幅, 高さ, 置き換えか, 形式（0 RGB、1 RGBA、2 PNG）,
+    ///   圧縮されているか]`
+    /// - 四角を重ねる: `[1, 元のコマ, 先のコマ, 元の x, 元の y, 先の x, 先の y, 幅, 高さ, 置き換えか]`
+    pub fn frame_op(&self, id: u32, index: usize) -> Vec<f64> {
+        use coneko_term::graphics::{FrameBase, FrameOp, ImageFormat};
+        let Some(op) = self.term.image(id).and_then(|i| i.animation.ops.get(index)) else {
+            return Vec::new();
+        };
+        match op {
+            FrameOp::Load {
+                target,
+                base,
+                x,
+                y,
+                width,
+                height,
+                overwrite,
+                format,
+                compressed,
+                ..
+            } => {
+                let (kind, value) = match base {
+                    FrameBase::Edit => (0, 0),
+                    FrameBase::Frame(n) => (1, *n),
+                    FrameBase::Color(c) => (2, *c),
+                };
+                vec![
+                    0.0,
+                    f64::from(*target),
+                    f64::from(kind),
+                    f64::from(value),
+                    f64::from(*x),
+                    f64::from(*y),
+                    f64::from(*width),
+                    f64::from(*height),
+                    f64::from(u8::from(*overwrite)),
+                    match format {
+                        ImageFormat::Rgb => 0.0,
+                        ImageFormat::Rgba => 1.0,
+                        _ => 2.0,
+                    },
+                    f64::from(u8::from(*compressed)),
+                ]
+            }
+            FrameOp::Compose {
+                src,
+                dst,
+                src_x,
+                src_y,
+                dst_x,
+                dst_y,
+                width,
+                height,
+                overwrite,
+            } => vec![
+                1.0,
+                f64::from(*src),
+                f64::from(*dst),
+                f64::from(*src_x),
+                f64::from(*src_y),
+                f64::from(*dst_x),
+                f64::from(*dst_y),
+                f64::from(*width),
+                f64::from(*height),
+                f64::from(u8::from(*overwrite)),
+            ],
+        }
+    }
+
+    /// `frame_op` の「データを置く」操作のバイト列（圧縮も PNG もそのまま）。無ければ空。
+    pub fn frame_op_data(&self, id: u32, index: usize) -> Vec<u8> {
+        use coneko_term::graphics::FrameOp;
+        match self.term.image(id).and_then(|i| i.animation.ops.get(index)) {
+            Some(FrameOp::Load { data, .. }) => data.clone(),
+            _ => Vec::new(),
+        }
+    }
 }
 
 impl WasmTerminal {
@@ -774,5 +883,30 @@ mod image_tests {
         assert_eq!(t.image_data(7), vec![0; 6]);
         assert!(t.image_info(8).is_empty());
         assert!(t.image_data(8).is_empty());
+    }
+
+    #[test]
+    fn animation_is_exported() {
+        let mut t = WasmTerminal::new(5, 20, 10);
+        t.write(b"\x1b_Ga=t,f=32,s=1,v=1,i=1;AAAAAA==\x1b\\");
+        assert_eq!(t.animation_info(1), vec![1.0, 1.0, 1.0, 0.0, 0.0]);
+        assert!(t.animation_info(2).is_empty());
+        t.write(b"\x1b_Ga=f,f=32,s=1,v=1,i=1,z=25;/wAA/w==\x1b\\");
+        t.write(b"\x1b_Ga=c,i=1,r=1,c=2\x1b\\");
+        t.write(b"\x1b_Ga=a,i=1,s=3\x1b\\");
+        assert_eq!(t.animation_info(1), vec![2.0, 1.0, 3.0, 0.0, 2.0]);
+        assert_eq!(
+            t.frame_op(1, 0),
+            vec![0.0, 2.0, 2.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(t.frame_op_data(1, 0), vec![0xff, 0, 0, 0xff]);
+        assert_eq!(
+            t.frame_op(1, 1),
+            vec![1.0, 1.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0]
+        );
+        assert!(t.frame_op_data(1, 1).is_empty());
+        assert!(t.frame_op(1, 2).is_empty());
+        assert!(t.animation_step(1));
+        assert_eq!(t.animation_info(1), vec![2.0, 2.0, 3.0, 25.0, 2.0]);
     }
 }

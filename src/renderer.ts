@@ -151,6 +151,8 @@ export interface RenderEnv {
   cancelFrame(id: number): void;
   /** 画像を読み解く道具。省くとブラウザーの機能を使う。 */
   imageDecoder?: ImageDecoder;
+  /** いまの時刻（ミリ秒）。アニメーションのコマを進めるのに使う。省くと `performance.now()`。 */
+  now?(): number;
 }
 
 /** ブラウザーの `devicePixelRatio` と `requestAnimationFrame` を使う、既定の `RenderEnv`。 */
@@ -211,6 +213,8 @@ export class CanvasRenderer {
   private layers: ImageLayers = { under: [], below: [], above: [] };
   /** 直前のフレームで描いた画像の印。変わったら全部を描き直す。 */
   private lastImageKey = "";
+  /** 直前のフレームで、回している画像があったか（あれば次のフレームも描く）。 */
+  private animating = false;
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -366,6 +370,7 @@ export class CanvasRenderer {
     const rows = new Set<number>();
     let full = this.needsFull || offset !== this.lastOffset;
     // 画像の置き場所や中身が変わったら、全部を描き直す
+    this.animating = false;
     if (this.collectImages(offset)) full = true;
     // 過去の行を見ているときは、書き込みでずれる行を全部描き直す
     if (offset > 0 && dirty.length > 0) full = true;
@@ -386,6 +391,8 @@ export class CanvasRenderer {
         if (y < src.rows) this.drawRow(y, offset);
       }
     }
+    // アニメーションを回している間は、止まるまで毎フレーム時刻を確かめる
+    if (this.animating) this.requestRender();
   }
 
   /**
@@ -407,13 +414,19 @@ export class CanvasRenderer {
       const placed = parsePlacements(flat)
         .filter((p) => p.row + offset < src.rows && p.row + offset + p.rows > 0)
         .sort((a, b) => a.z - b.z || a.imageId - b.imageId);
+      const ticked = new Set<number>();
+      const now = (this.env.now ?? (() => performance.now()))();
       for (const p of placed) {
+        if (!ticked.has(p.imageId)) {
+          ticked.add(p.imageId);
+          if (cache.tick(p.imageId, now)) this.animating = true;
+        }
         const image = cache.get(p.imageId);
         if (!image) continue;
         const layer =
           p.z < Z_UNDER_BACKGROUND ? layers.under : p.z < 0 ? layers.below : layers.above;
         layer.push({ p, image });
-        key += `${p.imageId}:${p.row}:${p.col}:${p.srcX}:${p.srcY}:${p.srcW}:${p.srcH}:${p.offsetX}:${p.offsetY}:${p.cols}:${p.rows}:${p.z}:${p.native}:${p.destW}:${p.destH};`;
+        key += `${p.imageId}:${p.row}:${p.col}:${p.srcX}:${p.srcY}:${p.srcW}:${p.srcH}:${p.offsetX}:${p.offsetY}:${p.cols}:${p.rows}:${p.z}:${p.native}:${p.destW}:${p.destH}@${cache.version(p.imageId)};`;
       }
     } else {
       this.imageCache?.sync();
