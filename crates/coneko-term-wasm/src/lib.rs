@@ -1105,6 +1105,11 @@ impl WasmTerminal {
         ]
     }
 
+    /// OSC 22 で決まった、いまのポインターの形（CSS の `cursor` の値）。決まっていなければ空。
+    pub fn pointer_shape(&self) -> Option<String> {
+        self.term.pointer_shape().map(str::to_owned)
+    }
+
     /// 追加のカーソル（kitty の multiple cursors protocol）。`[x, y, 形]` の並び（上の行から、
     /// 左の列の順）。形は 0 ブロック 1 下線 2 縦棒 3 主のカーソルに従う。
     pub fn extra_cursors(&self) -> Vec<u32> {

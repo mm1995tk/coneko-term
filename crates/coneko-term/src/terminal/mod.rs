@@ -2,7 +2,7 @@
 //! 画面（[`crate::screen`]）を動かす。
 //!
 //! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、OSC 8（リンク）を
-//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）。知らないシーケンスは捨てる。
+//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）、OSC 22（mouse pointer shapes）。知らないシーケンスは捨てる。
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
@@ -46,6 +46,9 @@ mod multi_cursor;
 #[cfg(test)]
 mod multi_cursor_tests;
 mod notification;
+mod pointer_shape;
+#[cfg(test)]
+mod pointer_shape_tests;
 mod sgr;
 #[cfg(test)]
 mod tests;
@@ -248,6 +251,8 @@ struct State {
     dnd: dnd::Dnd,
     /// kitty の file transfer protocol（OSC 5113）の、セッションごとの quiet。
     file_transfer: file_transfer::FileTransfer,
+    /// kitty の mouse pointer shapes（OSC 22）の、主画面と代替画面の形の積み重ね。
+    pointer_shapes: pointer_shape::PointerShapes,
 }
 
 impl Terminal {
@@ -278,6 +283,7 @@ impl Terminal {
                 clipboard: Default::default(),
                 dnd: Default::default(),
                 file_transfer: Default::default(),
+                pointer_shapes: Default::default(),
             },
         }
     }
@@ -726,6 +732,14 @@ impl Terminal {
         self.state.graphics.set_cell_size(width, height);
     }
 
+    /// OSC 22 で決まった、いまのポインターの形（CSS の `cursor` の値）。今の画面のもので、
+    /// 決まっていなければ `None`（形は呼ぶ側の自由）。
+    pub fn pointer_shape(&self) -> Option<&'static str> {
+        self.state
+            .pointer_shapes
+            .current(self.state.screen.is_alt_screen())
+    }
+
     /// マウスの報告が有効か（`CSI ? 9 h`、`1000`、`1002`、`1003` のどれか）。
     pub fn mouse_reporting(&self) -> bool {
         self.state.modes.mouse_protocol != MouseProtocol::None
@@ -1049,6 +1063,7 @@ impl State {
         self.clipboard.clear();
         self.dnd.reset();
         self.file_transfer.clear();
+        self.pointer_shapes.clear();
         self.flush_dnd();
     }
 
@@ -1350,6 +1365,13 @@ impl State {
                 }
                 None => {}
             },
+            b"22" => {
+                let alt = self.screen.is_alt_screen();
+                if let Some(reply) = self.pointer_shapes.osc(alt, &data[sep + 1..]) {
+                    let st = if bell { "\x07" } else { "\x1b\\" };
+                    self.reply(&format!("\x1b]{reply}{st}"));
+                }
+            }
             b"72" => {
                 self.dnd.osc(&data[sep + 1..]);
                 self.flush_dnd();
