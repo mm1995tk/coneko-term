@@ -413,7 +413,7 @@ export class CanvasRenderer {
         const layer =
           p.z < Z_UNDER_BACKGROUND ? layers.under : p.z < 0 ? layers.below : layers.above;
         layer.push({ p, image });
-        key += `${p.imageId}:${p.row}:${p.col}:${p.srcX}:${p.srcY}:${p.srcW}:${p.srcH}:${p.offsetX}:${p.offsetY}:${p.cols}:${p.rows}:${p.z}:${p.native};`;
+        key += `${p.imageId}:${p.row}:${p.col}:${p.srcX}:${p.srcY}:${p.srcW}:${p.srcH}:${p.offsetX}:${p.offsetY}:${p.cols}:${p.rows}:${p.z}:${p.native}:${p.destW}:${p.destH};`;
       }
     } else {
       this.imageCache?.sync();
@@ -441,8 +441,12 @@ export class CanvasRenderer {
       // 隣の行と継ぎ目が出ないよう、置く場所は整数のデバイスピクセルにする
       const dx = Math.round(p.col * this.cellW + p.offsetX);
       const dy = Math.round((p.row + offset) * this.cellH + p.offsetY);
-      const dw = Math.round(p.native ? srcW : p.cols * this.cellW);
-      const dh = Math.round(p.native ? srcH : p.rows * this.cellH);
+      const dw = Math.round(
+        p.destW > 0 ? p.destW : p.native ? srcW : p.cols * this.cellW,
+      );
+      const dh = Math.round(
+        p.destH > 0 ? p.destH : p.native ? srcH : p.rows * this.cellH,
+      );
       if (dw <= 0 || dh <= 0) continue;
       const x0 = Math.max(dx, 0);
       const x1 = Math.min(dx + dw, limit);
@@ -611,7 +615,10 @@ export class CanvasRenderer {
           cp & CLUSTER_FLAG
             ? row.cluster(cp & ~CLUSTER_FLAG)
             : String.fromCodePoint(cp);
-        ctx.fillText(text, left, top + this.baseline);
+        // Unicode placeholder の字は描かない（画像が代わりに描かれる）
+        if (text.codePointAt(0) !== 0x10eeee) {
+          ctx.fillText(text, left, top + this.baseline);
+        }
       }
       const spanW = width * this.cellW;
       if (ul !== 0) {

@@ -338,3 +338,31 @@ test("images: the browser inflate reads zlib data", async () => {
   const out = await browserImageDecoder.inflate(deflateSync(Buffer.from("hello")));
   assert.equal(Buffer.from(out).toString(), "hello");
 });
+
+test("images: Unicode placeholders draw the part of the image under each row, and not the placeholder glyph", async () => {
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { decoder } = fakeDecoder();
+  const { settle } = setup(t, decoder);
+  // 1x2 の RGB を、2 列 x 2 行の仮の配置にする（セルは 9 x 16 画素）
+  await write(t, apc("a=t,f=24,s=1,v=2,i=7,q=2", [255, 0, 0, 0, 255, 0]));
+  await write(t, "\x1b_Ga=p,U=1,i=7,c=2,r=2,q=2\x1b\\");
+  const P = "\u{10EEEE}";
+  await write(
+    t,
+    `\x1b[38;5;7m${P}̅̅${P}̅̍\r\n${P}̍̅${P}̍̍`,
+  );
+  const calls = await settle();
+  // 枠は 18 x 32 画素、画像は 1x2 なので 16 x 32 に収まり、左右に 1 画素ずつの余白
+  assert.deepEqual(
+    draws(calls).map((c) => c.slice(2)),
+    [
+      [0, 0, 1, 1, 1, 0, 16, 16],
+      [0, 1, 1, 1, 1, 16, 16, 16],
+    ],
+  );
+  assert.deepEqual(
+    calls.filter((c) => c[0] === "fillText"),
+    [],
+  );
+  t.dispose();
+});

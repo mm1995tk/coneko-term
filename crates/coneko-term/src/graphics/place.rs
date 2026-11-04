@@ -20,6 +20,8 @@ pub(crate) struct PlaceKeys {
     z: i32,
     placement_id: u32,
     no_move: bool,
+    /// `U=1`: 画面に置かず、Unicode placeholder が引く仮の配置にする。
+    virtual_placement: bool,
 }
 
 /// 画面に頼む仕事。
@@ -71,6 +73,10 @@ impl PlaceKeys {
     pub(super) fn placement_id(&self) -> u32 {
         self.placement_id
     }
+
+    pub(super) fn is_virtual(&self) -> bool {
+        self.virtual_placement
+    }
 }
 
 pub(super) fn parse_keys(keys: &[(u8, &[u8])]) -> Result<PlaceKeys, Fail> {
@@ -91,6 +97,7 @@ pub(super) fn parse_keys(keys: &[(u8, &[u8])]) -> Result<PlaceKeys, Fail> {
         z,
         placement_id: n(b'p')?.unwrap_or(0),
         no_move: n(b'C')? == Some(1),
+        virtual_placement: n(b'U')? == Some(1),
     })
 }
 
@@ -165,6 +172,7 @@ pub(super) fn resolve(
         rows: clamp(rows),
         z: k.z,
         native_size: k.cols == 0 && k.rows == 0,
+        dest_size: None,
     })
 }
 
@@ -174,7 +182,7 @@ impl Graphics {
         let result = self.place_inner(keys, &reply);
         match result {
             Ok((id, effect)) => {
-                self.effects.push(effect);
+                self.effects.extend(effect);
                 reply.send(id, Ok(()), out);
             }
             Err((id, f)) => reply.send(id, Err(f), out),
@@ -182,10 +190,10 @@ impl Graphics {
     }
 
     fn place_inner(
-        &self,
+        &mut self,
         keys: &[(u8, &[u8])],
         reply: &Reply,
-    ) -> Result<(u32, Effect), (u32, Fail)> {
+    ) -> Result<(u32, Option<Effect>), (u32, Fail)> {
         if reply.id != 0 && reply.number != 0 {
             return Err((0, (EINVAL, "cannot specify both i and I")));
         }
@@ -202,12 +210,16 @@ impl Graphics {
         };
         let k = parse_keys(keys).map_err(|f| (id, f))?;
         let placement = resolve(image, &k, k.placement_id, self.cell_size).map_err(|f| (id, f))?;
+        if k.is_virtual() {
+            self.add_virtual(placement);
+            return Ok((id, None));
+        }
         Ok((
             id,
-            Effect::Place {
+            Some(Effect::Place {
                 placement,
                 move_cursor: !k.no_move,
-            },
+            }),
         ))
     }
 
@@ -258,6 +270,11 @@ impl Graphics {
             // アニメーションのフレームは持たないので、消すものが無い。知らない値も何もしない。
             _ => return,
         };
+        // 仮の配置（U=1）は、ID か番号で消すときだけ消える（ほかの d= は触らない）。
+        if let DeleteTarget::Image { id, placement } = target {
+            self.virtuals
+                .retain(|v| !(v.image_id == id && (placement == 0 || v.placement_id == placement)));
+        }
         self.effects
             .push(Effect::Delete(DeleteSpec { target, free }));
     }

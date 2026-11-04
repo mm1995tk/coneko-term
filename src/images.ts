@@ -1,5 +1,5 @@
 /** `WasmTerminal.placements` の 1 つの配置が使う数。並びは `ImagePlacement` の順。 */
-export const PLACEMENT_STRIDE = 14;
+export const PLACEMENT_STRIDE = 16;
 
 /** `z` がこれより小さい画像は、背景色の下に描く（kitty の仕様）。 */
 export const Z_UNDER_BACKGROUND = -1_073_741_824;
@@ -29,6 +29,9 @@ export interface ImagePlacement {
   z: number;
   /** 画素のまま置くか（そうでなければ `cols` x `rows` のセルいっぱいに引き伸ばす）。 */
   native: boolean;
+  /** 画素で決めた描く大きさ（幅・高さ）。0 なら `native` と `cols` x `rows` で決める。 */
+  destW: number;
+  destH: number;
 }
 
 /** `WasmTerminal.placements` の並びを読む。 */
@@ -50,6 +53,8 @@ export function parsePlacements(flat: ArrayLike<number>): ImagePlacement[] {
       rows: flat[o + 11],
       z: flat[o + 12],
       native: flat[o + 13] !== 0,
+      destW: flat[o + 14],
+      destH: flat[o + 15],
     });
   }
   return out;
