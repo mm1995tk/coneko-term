@@ -55,6 +55,9 @@ pub struct Modes {
     pub bracketed_paste: bool,
     /// 2026。同期した出力。状態を持つだけで、描画を止めるのは呼ぶ側。
     pub synchronized_output: bool,
+    /// 5522。クリップボードの貼り付けイベント（kitty）を受けたいか。状態を持つだけで、
+    /// イベントを送るのは呼ぶ側。
+    pub clipboard_paste_events: bool,
     /// LNM（20）。LF・VT・FF でカーソルが左端にも行く。
     pub linefeed_newline: bool,
     /// マウスの報告の種類。
