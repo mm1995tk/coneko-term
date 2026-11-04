@@ -8,8 +8,40 @@
 //!   （`i=`、`I=`）、返事の抑制（`q=1`、`q=2`）。
 //! - 送り方（`t=`）は直接（`t=d`、既定）だけ。`t=f`・`t=t`・`t=s` には `EBADF` を返す。
 //!   coneko-term は OS のファイルにも共有メモリにも触らない。
-//! - 置く（`a=T`・`a=p`）、消す（`a=d`）、描く、Unicode placeholder、アニメーションは扱わない。
+//! - 置く（`a=T`・`a=p`）と消す（`a=d`）は、次の「置く」「消す」の節。
+//! - 描く、Unicode placeholder、アニメーション、親子の配置（`P=`・`Q=`）は扱わない。
 //!   扱わない動作は捨てる。
+//!
+//! # 置く（配置）
+//!
+//! 配置（[`Placement`]）は、画像のどの部分を、どのセルから何セルぶんの大きさで、どの `z` で
+//! 置くかを表す。画面の行（`Line`）に付けて持つ。行が動けば配置も動き（スクロール、IL・DL、
+//! スクロールバックへの押し出し）、行が捨てられれば配置も消える。主画面と代替画面は別々に持つ
+//! （代替画面に入ると空から始まり、出ると捨てる）。画像のデータ自体は 1 つの表で共有する。
+//! 配置は [`crate::Terminal::placements`] で読む。
+//!
+//! - 位置は、命令を受けたときのカーソルのセル（左上）。`C=1` で無ければ、置いたあと
+//!   カーソルを `r - 1` 行ぶん LF で下げ（スクロール範囲の下端ならスクロールする）、
+//!   列を `c` だけ右へ動かす（右端を超えるときは右端）。
+//! - `c`・`r` が無いときは、元の画像の部分の画素の大きさと、セルの画素の大きさ
+//!   （[`crate::Terminal::set_cell_size`]）から決める。片方だけあるときは、縦横比を保つように
+//!   もう片方を決める。
+//! - `X`・`Y` はセルの大きさより小さい値に収める。`x`・`y`・`w`・`h` は画像の外にはみ出す分を
+//!   切る（`x`・`y` が画像の外なら `EINVAL`）。`w`・`h` が 0 のときは端まで。
+//! - `p` があり、同じ画像に同じ `p` の配置が同じ画面にあれば、置き換える。
+//! - 同じ ID で画像を送り直したとき、古い画像を捨てたとき（上限を超えたとき）は、その画像の
+//!   配置も消える。
+//! - ED 2（画面の消去）と DECALN は、見えている画面の配置を消す。ED 0・ED 1・EL・ECH などの
+//!   セルの消去は、配置を消さない（kitty と同じ）。
+//! - 大きさを変えて組み直す（reflow）ときは、配置は元のセルの位置（字の並びの中の位置）と
+//!   一緒に動く。代替画面で列が減るときは、はみ出した列の配置を捨てる。
+//!
+//! # 消す（`a=d`）
+//!
+//! `d=` の値（`a`・`i`・`n`・`c`・`p`・`q`・`x`・`y`・`z`。`f` は何もしない）を扱う。大文字は、
+//! 配置が無くなった画像のデータも捨てる（別の配置が残っていれば捨てない）。`i`・`n` は
+//! スクロールバックを含む画面全体の配置が対象で、そのほかは見えている画面（の一部でも
+//! 見えている配置）が対象。`d` が無いときは `a`。知らない値は何もしない。
 //!
 //! # 画素を読み解かない
 //!
@@ -27,7 +59,10 @@
 //!
 //! 返事は [`crate::Terminal::take_output`] の出口に入る。`i=` も `I=` も無い命令には返事をしない。
 
+mod place;
 mod protocol;
+
+pub(crate) use place::{DeleteSpec, DeleteTarget, Effect};
 
 use std::collections::VecDeque;
 
@@ -75,6 +110,53 @@ pub(crate) struct Graphics {
     pending: Option<protocol::Pending>,
     /// 次に ID を決めるときの候補。
     next_auto_id: u32,
+    /// セルの大きさ（画素。幅, 高さ）。`c`・`r` が無い配置の大きさを決めるのに使う。
+    cell_size: (u32, u32),
+    /// 捨てた（または送り直して置き換えた）画像の ID。配置を消すために取り出す。
+    removed: Vec<u32>,
+    /// 画面に頼む仕事。
+    effects: Vec<Effect>,
+}
+
+/// セルの大きさの既定（画素。幅, 高さ）。
+pub const DEFAULT_CELL_SIZE: (u32, u32) = (10, 20);
+
+/// 画像の置き方（配置）。位置は、持っている行と `col` で決まる。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    /// 置く画像の ID。
+    pub image_id: u32,
+    /// 配置の番号（`p=`）。0 は番号が無い。
+    pub placement_id: u32,
+    /// 左上のセルの列（0 始まり）。
+    pub col: usize,
+    /// 元の画像の使う部分の左端（画素）。
+    pub src_x: u32,
+    /// 元の画像の使う部分の上端（画素）。
+    pub src_y: u32,
+    /// 元の画像の使う部分の幅（画素）。0 は右端まで（画像の大きさが分からないときだけ）。
+    pub src_w: u32,
+    /// 元の画像の使う部分の高さ（画素）。0 は下端まで（画像の大きさが分からないときだけ）。
+    pub src_h: u32,
+    /// 左上のセルの中でのずれ、横（画素）。セルの幅より小さい。
+    pub offset_x: u32,
+    /// 左上のセルの中でのずれ、縦（画素）。セルの高さより小さい。
+    pub offset_y: u32,
+    /// 使うセルの列数（1 以上）。
+    pub cols: u32,
+    /// 使うセルの行数（1 以上）。
+    pub rows: u32,
+    /// 重ねる順（`z=`）。負の値は字の下に描く。
+    pub z: i32,
+}
+
+/// 画面に置いてある配置と、その位置。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlacedImage {
+    /// 見えている画面の一番上の行を 0 とした行。スクロールバックの中は負。
+    pub row: i64,
+    /// 配置。
+    pub placement: Placement,
 }
 
 /// ターミナルが決める ID はここから。クライアントが選ぶ小さな ID と重ならないようにする。
@@ -88,6 +170,9 @@ impl Default for Graphics {
             quota: DEFAULT_QUOTA,
             pending: None,
             next_auto_id: AUTO_ID_BASE,
+            cell_size: DEFAULT_CELL_SIZE,
+            removed: Vec::new(),
+            effects: Vec::new(),
         }
     }
 }
@@ -114,6 +199,24 @@ impl Graphics {
         self.quota
     }
 
+    pub(crate) fn cell_size(&self) -> (u32, u32) {
+        self.cell_size
+    }
+
+    pub(crate) fn set_cell_size(&mut self, w: u32, h: u32) {
+        if w > 0 && h > 0 {
+            self.cell_size = (w, h);
+        }
+    }
+
+    pub(crate) fn take_removed(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.removed)
+    }
+
+    pub(crate) fn take_effects(&mut self) -> Vec<Effect> {
+        std::mem::take(&mut self.effects)
+    }
+
     pub(crate) fn set_quota(&mut self, quota: usize) {
         self.quota = quota;
         self.evict_to(quota);
@@ -129,17 +232,21 @@ impl Graphics {
     fn evict_to(&mut self, limit: usize) {
         while self.bytes > limit {
             match self.images.pop_front() {
-                Some(img) => self.bytes -= img.data.len(),
+                Some(img) => {
+                    self.bytes -= img.data.len();
+                    self.removed.push(img.id);
+                }
                 None => break,
             }
         }
     }
 
     /// `id` の画像があれば捨てる。
-    fn remove(&mut self, id: u32) {
+    pub(crate) fn remove(&mut self, id: u32) {
         if let Some(pos) = self.images.iter().position(|i| i.id == id) {
             if let Some(img) = self.images.remove(pos) {
                 self.bytes -= img.data.len();
+                self.removed.push(id);
             }
         }
     }

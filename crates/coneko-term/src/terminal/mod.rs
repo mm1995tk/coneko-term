@@ -46,7 +46,7 @@ pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
 pub use theme::{Rgb, Theme};
 
-use crate::graphics::{Graphics, Image};
+use crate::graphics::{DeleteSpec, DeleteTarget, Effect, Graphics, Image, PlacedImage, Placement};
 use crate::mouse::{self, MouseAction, MouseButton, MouseEvent};
 use crate::parser::{Params, Parser, Perform};
 use crate::screen::{CursorShape, Screen};
@@ -307,6 +307,32 @@ impl Terminal {
     /// 画像の合計の大きさの上限を変える。超えている分は、古い画像から捨てる。
     pub fn set_image_quota(&mut self, bytes: usize) {
         self.state.graphics.set_quota(bytes);
+        self.state.drop_removed_images();
+    }
+
+    /// 画面に置いてある画像の配置を、上の行から順に。今の画面（主画面か代替画面）のもので、
+    /// スクロールバックの中のものも含む。
+    pub fn placements(&self) -> Vec<PlacedImage> {
+        self.state
+            .screen
+            .placements()
+            .into_iter()
+            .map(|(row, p)| PlacedImage {
+                row,
+                placement: p.clone(),
+            })
+            .collect()
+    }
+
+    /// セルの大きさ（画素。幅, 高さ）。
+    pub fn cell_size(&self) -> (u32, u32) {
+        self.state.graphics.cell_size()
+    }
+
+    /// セルの大きさを教える。`c`・`r` が無い画像の配置の大きさを決めるのに使う。0 は無視する。
+    /// 既定は [`crate::graphics::DEFAULT_CELL_SIZE`]。
+    pub fn set_cell_size(&mut self, width: u32, height: u32) {
+        self.state.graphics.set_cell_size(width, height);
     }
 
     /// マウスの報告が有効か（`CSI ? 9 h`、`1000`、`1002`、`1003` のどれか）。
@@ -467,6 +493,7 @@ impl State {
                 self.screen.erase_cells(c.y, 0, c.x + 1);
             }
             2 => {
+                self.screen.clear_visible_placements();
                 for y in 0..rows {
                     self.screen.erase_cells(y, 0, cols);
                 }
@@ -528,6 +555,88 @@ impl State {
             let (top, bottom) = self.screen.scroll_region();
             let c = self.screen.cursor();
             self.screen.set_cursor(c.x, c.y.clamp(top, bottom));
+        }
+    }
+
+    /// 捨てた画像の配置を消し、画像のコマンドが頼んだ仕事（置く、消す）をする。
+    fn apply_graphics(&mut self) {
+        self.drop_removed_images();
+        for effect in self.graphics.take_effects() {
+            match effect {
+                Effect::Place {
+                    mut placement,
+                    move_cursor,
+                } => {
+                    let c = self.screen.cursor();
+                    let (cols, rows) = (placement.cols as usize, placement.rows as usize);
+                    placement.col = c.x;
+                    self.screen.add_placement(placement);
+                    if move_cursor {
+                        for _ in 1..rows {
+                            self.screen.index();
+                        }
+                        let y = self.screen.cursor().y;
+                        self.screen.set_cursor(c.x.saturating_add(cols), y);
+                    }
+                }
+                Effect::Delete(spec) => self.delete_placements(spec),
+            }
+            self.drop_removed_images();
+        }
+    }
+
+    fn drop_removed_images(&mut self) {
+        let removed = self.graphics.take_removed();
+        if !removed.is_empty() {
+            self.screen.drop_image_placements(&removed);
+        }
+    }
+
+    /// `a=d`。
+    fn delete_placements(&mut self, spec: DeleteSpec) {
+        let rows = self.screen.rows() as i64;
+        let c = self.screen.cursor();
+        // 見えている画面にかかるか。
+        let visible = |row: i64, p: &Placement| row + i64::from(p.rows) > 0 && row < rows;
+        // 画面のセル (x, y)（0 始まり）にかかるか。
+        let covers = |row: i64, p: &Placement, x: usize, y: usize| {
+            let (y, r) = (y as i64, i64::from(p.rows));
+            row <= y && y < row + r && p.col <= x && x < p.col + p.cols as usize
+        };
+        // 1 始まりの値を 0 始まりに（0 は 1 と同じ）。
+        let cell = |v: u32| (v.max(1) - 1) as usize;
+        let hit = |row: i64, p: &Placement| match spec.target {
+            DeleteTarget::All => visible(row, p),
+            DeleteTarget::Image { id, placement } => {
+                p.image_id == id && (placement == 0 || p.placement_id == placement)
+            }
+            DeleteTarget::Cursor => visible(row, p) && covers(row, p, c.x, c.y),
+            DeleteTarget::Cell { x, y } => visible(row, p) && covers(row, p, cell(x), cell(y)),
+            DeleteTarget::CellZ { x, y, z } => {
+                visible(row, p) && p.z == z && covers(row, p, cell(x), cell(y))
+            }
+            DeleteTarget::Column(x) => {
+                let x = cell(x);
+                visible(row, p) && p.col <= x && x < p.col + p.cols as usize
+            }
+            DeleteTarget::Row(y) => {
+                let y = cell(y) as i64;
+                visible(row, p) && row <= y && y < row + i64::from(p.rows)
+            }
+            DeleteTarget::Z(z) => visible(row, p) && p.z == z,
+        };
+        let mut ids = self.screen.retain_placements(|row, p| !hit(row, p));
+        if let DeleteTarget::Image { id, .. } = spec.target {
+            ids.push(id);
+        }
+        if spec.free {
+            ids.sort_unstable();
+            ids.dedup();
+            for id in ids {
+                if !self.screen.image_is_placed(id) {
+                    self.graphics.remove(id);
+                }
+            }
         }
     }
 
@@ -950,5 +1059,6 @@ impl Perform for State {
 
     fn apc_dispatch(&mut self, data: &[u8]) {
         self.graphics.apc(data, &mut self.output);
+        self.apply_graphics();
     }
 }

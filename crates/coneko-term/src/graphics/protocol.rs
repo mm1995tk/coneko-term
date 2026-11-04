@@ -1,5 +1,6 @@
 //! APC `G...` の読み取りと、命令の実行。
 
+use super::place::{self, Effect, PlaceKeys};
 use super::{Graphics, Image, ImageFormat};
 
 /// 幅・高さの上限（kitty と同じ）。
@@ -24,17 +25,21 @@ struct Command {
     id: u32,
     number: u32,
     quiet: u32,
+    /// `a=T` の置き方。
+    place: PlaceKeys,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Transmit,
+    /// `a=T`: 送って置く。
+    TransmitPlace,
     Query,
 }
 
-type Fail = (&'static str, &'static str);
+pub(super) type Fail = (&'static str, &'static str);
 
-const EINVAL: &str = "EINVAL";
+pub(super) const EINVAL: &str = "EINVAL";
 
 /// 制御データ（`,` で区切った `key=value`）を分ける。
 fn split_keys(control: &[u8]) -> Vec<(u8, &[u8])> {
@@ -48,8 +53,18 @@ fn split_keys(control: &[u8]) -> Vec<(u8, &[u8])> {
         .collect()
 }
 
-fn last<'a>(keys: &[(u8, &'a [u8])], key: u8) -> Option<&'a [u8]> {
+pub(super) fn last<'a>(keys: &[(u8, &'a [u8])], key: u8) -> Option<&'a [u8]> {
     keys.iter().rev().find(|(k, _)| *k == key).map(|(_, v)| *v)
+}
+
+/// 符号つきの数（`z` 用）。
+pub(super) fn signed(v: &[u8]) -> Option<i32> {
+    let (neg, digits) = match v.strip_prefix(b"-") {
+        Some(rest) => (true, rest),
+        None => (false, v),
+    };
+    let n = i64::from(number(digits)?.min(i32::MAX as u32 + 1));
+    i32::try_from(if neg { -n } else { n }).ok()
 }
 
 fn number(v: &[u8]) -> Option<u32> {
@@ -60,7 +75,7 @@ fn number(v: &[u8]) -> Option<u32> {
 }
 
 /// 数のキー。無ければ `Ok(None)`、数でなければ `Err`。
-fn num_key(keys: &[(u8, &[u8])], key: u8) -> Result<Option<u32>, ()> {
+pub(super) fn num_key(keys: &[(u8, &[u8])], key: u8) -> Result<Option<u32>, ()> {
     match last(keys, key) {
         None => Ok(None),
         Some(v) => number(v).map(Some).ok_or(()),
@@ -68,22 +83,19 @@ fn num_key(keys: &[(u8, &[u8])], key: u8) -> Result<Option<u32>, ()> {
 }
 
 /// 数のキー。読めなければ 0（返事の宛先を決めるために、ゆるく読む）。
-fn lenient(keys: &[(u8, &[u8])], key: u8) -> u32 {
+pub(super) fn lenient(keys: &[(u8, &[u8])], key: u8) -> u32 {
     last(keys, key).and_then(number).unwrap_or(0)
 }
 
 /// 最初の塊の命令を読む。`Err` は返事に使うので ID と `q` は先に読んである。
 fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)> {
-    let reply = Reply {
-        id: lenient(keys, b'i'),
-        number: lenient(keys, b'I'),
-        quiet: lenient(keys, b'q'),
-    };
+    let reply = Reply::from_keys(keys);
     let fail = |m: Fail| (reply, m);
     let action = match last(keys, b'a') {
         None | Some(b"t") => Action::Transmit,
+        Some(b"T") => Action::TransmitPlace,
         Some(b"q") => Action::Query,
-        // a=T・a=p・a=d など、この段で扱わないものは捨てる。
+        // 知らない動作は捨てる（a=p と a=d は呼ぶ前に分けてある）。
         Some(_) => return Ok(None),
     };
     if reply.id != 0 && reply.number != 0 {
@@ -113,6 +125,11 @@ fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)>
     let size = |key| num_key(keys, key).map_err(|_| fail((EINVAL, "invalid size")));
     let width = size(b's')?.unwrap_or(0);
     let height = size(b'v')?.unwrap_or(0);
+    let place = if action == Action::TransmitPlace {
+        place::parse_keys(keys).map_err(fail)?
+    } else {
+        PlaceKeys::default()
+    };
     Ok(Some(Command {
         action,
         format,
@@ -122,20 +139,33 @@ fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)>
         id: reply.id,
         number: reply.number,
         quiet: reply.quiet,
+        place,
     }))
 }
 
 /// 返事の宛先。
 #[derive(Clone, Copy, Debug)]
-struct Reply {
-    id: u32,
-    number: u32,
-    quiet: u32,
+pub(super) struct Reply {
+    pub(super) id: u32,
+    pub(super) number: u32,
+    pub(super) quiet: u32,
+    /// 配置の番号（`p=`）。0 は返事に書かない。
+    pub(super) placement: u32,
 }
 
 impl Reply {
+    /// キーから宛先を読む。読めない値は 0。
+    pub(super) fn from_keys(keys: &[(u8, &[u8])]) -> Reply {
+        Reply {
+            id: lenient(keys, b'i'),
+            number: lenient(keys, b'I'),
+            quiet: lenient(keys, b'q'),
+            placement: lenient(keys, b'p'),
+        }
+    }
+
     /// 返事のバイト列を `out` に入れる。`i=` も `I=` も無ければ返事をしない。
-    fn send(&self, assigned_id: u32, result: Result<(), Fail>, out: &mut Vec<u8>) {
+    pub(super) fn send(&self, assigned_id: u32, result: Result<(), Fail>, out: &mut Vec<u8>) {
         if self.id == 0 && self.number == 0 {
             return;
         }
@@ -153,6 +183,9 @@ impl Reply {
         }
         if self.number != 0 {
             keys.push(format!("I={}", self.number));
+        }
+        if self.placement != 0 {
+            keys.push(format!("p={}", self.placement));
         }
         let mut s = format!("\x1b_G{};", keys.join(","));
         match result {
@@ -227,6 +260,18 @@ impl Graphics {
             return;
         }
 
+        match last(&keys, b'a') {
+            Some(b"p") => {
+                self.place_command(&keys, Reply::from_keys(&keys), out);
+                return;
+            }
+            Some(b"d") => {
+                self.delete_command(&keys);
+                return;
+            }
+            _ => {}
+        }
+
         let cmd = match parse_command(&keys) {
             Ok(Some(c)) => c,
             Ok(None) => {
@@ -274,6 +319,8 @@ impl Graphics {
 
     fn finish(&mut self, cmd: Command, b64: &[u8], out: &mut Vec<u8>) {
         let reply = cmd.reply();
+        let place = cmd.action == Action::TransmitPlace;
+        let place_keys = cmd.place;
         let assigned = if cmd.id == 0 && cmd.action == Action::Transmit {
             self.fresh_id()
         } else {
@@ -285,6 +332,26 @@ impl Graphics {
                     if !self.insert(image) {
                         reply.send(assigned, Err(too_big()), out);
                         return;
+                    }
+                }
+                if place {
+                    let Some(image) = self.get(assigned) else {
+                        return;
+                    };
+                    match place::resolve(
+                        image,
+                        &place_keys,
+                        place_keys.placement_id(),
+                        self.cell_size,
+                    ) {
+                        Ok(placement) => self.effects.push(Effect::Place {
+                            placement,
+                            move_cursor: !place_keys.no_move(),
+                        }),
+                        Err(f) => {
+                            reply.send(assigned, Err(f), out);
+                            return;
+                        }
                     }
                 }
                 reply.send(assigned, Ok(()), out);
@@ -352,6 +419,11 @@ impl Command {
             id: self.id,
             number: self.number,
             quiet: self.quiet,
+            placement: if self.action == Action::TransmitPlace {
+                self.place.placement_id()
+            } else {
+                0
+            },
         }
     }
 }
