@@ -1,0 +1,11 @@
+[package]
+name = "coneko-term"
+description = "Terminal building blocks: VT parser and screen model. Independent of the browser."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# 本体はブラウザー（wasm-bindgen や web-sys）に依存させない。
+# ネイティブの GPU 描画からも同じ本体を使うため。
+[dependencies]

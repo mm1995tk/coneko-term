@@ -1,0 +1,35 @@
+name: 検査
+
+# flake の checks（nix flake check）を Linux と macOS で回す。手元の nix flake check と同じもの:
+#   formatting … nix fmt で差分が出ない
+#   cargo-test … cargo test（全 crate）
+#   npm        … npm パッケージを作り、その中で TypeScript のテスト（npm test）を回す
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.3
+      - name: nix flake check
+        run: nix flake check --print-build-logs
+      - name: nix fmt で差分が出ないこと
+        run: |
+          nix fmt
+          git diff --exit-code

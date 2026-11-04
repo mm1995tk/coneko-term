@@ -1,0 +1,35 @@
+{
+  "name": "coneko-term",
+  "version": "0.0.0",
+  "description": "Terminal building blocks (VT parser and screen model) in Rust, as WebAssembly with TypeScript types",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mm1995tk/coneko-term.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./coneko_term_wasm_bg.wasm": "./dist/wasm/coneko_term_wasm_bg.wasm"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build:wasm": "sh scripts/build-wasm.sh",
+    "build:ts": "tsc -p tsconfig.json && mkdir -p dist/wasm && cp -f src/wasm/* dist/wasm/",
+    "build": "npm run build:wasm && npm run build:ts",
+    "test": "npm run build:ts && tsc -p tsconfig.test.json && node --test \"test/*.test.ts\"",
+    "prepack": "test -f dist/wasm/coneko_term_wasm_bg.wasm"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

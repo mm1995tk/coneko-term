@@ -1,0 +1,7 @@
+/target
+result
+.direnv
+node_modules
+/dist
+/src/wasm
+*.tgz

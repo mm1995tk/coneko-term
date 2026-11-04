@@ -1,0 +1,16 @@
+[package]
+name = "coneko-term-wasm"
+description = "WebAssembly bindings of coneko-term (wasm-bindgen)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+coneko-term = { path = "../coneko-term" }
+# 版は devShell の wasm-bindgen-cli（nixpkgs）と同じにそろえる。ずれると wasm-bindgen が止まる
+wasm-bindgen = "=0.2.129"
