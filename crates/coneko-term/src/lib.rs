@@ -1,4 +1,7 @@
 //! coneko-term の本体。ブラウザーに依存しない。
+#![warn(missing_docs)]
+
+pub mod screen;
 
 /// このライブラリの版を返す。
 pub fn version() -> &'static str {
