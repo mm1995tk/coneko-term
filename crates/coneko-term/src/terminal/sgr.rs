@@ -89,6 +89,9 @@ pub(super) fn apply_list(pen: &mut Attrs, list: &[&[u32]]) {
                 pen.flags.remove(AttrFlags::BOLD);
                 pen.flags.remove(AttrFlags::DIM);
             }
+            // kitty: 221 は太字だけ、222 は薄字だけを消す
+            221 => pen.flags.remove(AttrFlags::BOLD),
+            222 => pen.flags.remove(AttrFlags::DIM),
             23 => pen.flags.remove(AttrFlags::ITALIC),
             24 => pen.underline.style = UnderlineStyle::None,
             25 => pen.flags.remove(AttrFlags::BLINK),
