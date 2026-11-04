@@ -1,5 +1,7 @@
 //! coneko-term の本体。ブラウザーに依存しない。
 
+pub mod screen;
+
 /// このライブラリの版を返す。
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
