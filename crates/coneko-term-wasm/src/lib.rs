@@ -260,10 +260,29 @@ fn dnd_request(kind: u8, a: u32, b: u32) -> Option<DropRequest> {
     })
 }
 
+/// プログラムの状態の記録を、`\0` で区切った項目にする。並びは、消えたか（`1`・`0`）、id、状態、
+/// `blocked` の理由、進み具合、app、title、msg。無い項目は空。報告の本文に制御文字は入らないので、
+/// `\0` で区切ってよい。
+fn program_status_fields(id: &str, s: Option<&coneko_term::terminal::ProgramStatus>) -> String {
+    let Some(s) = s else {
+        return format!("1\0{id}\0\0\0\0\0\0");
+    };
+    let progress = s.progress.map(|p| p.to_string()).unwrap_or_default();
+    let kind = s.kind.map(|k| k.name()).unwrap_or_default();
+    format!(
+        "0\0{id}\0{}\0{kind}\0{progress}\0{}\0{}\0{}",
+        s.state.name(),
+        s.app.as_deref().unwrap_or_default(),
+        s.title.as_deref().unwrap_or_default(),
+        s.msg.as_deref().unwrap_or_default(),
+    )
+}
+
 /// ターミナルが外へ知らせること 1 つ。`kind` は 0 が BEL、1 が題名、2 がアイコン名、3 が OSC、
 /// 4 が通知（OSC 99）、5 が通知を閉じる求め、6 が通知の対応の問い合わせ（`p=?`）、
 /// 7 が生きている通知の問い合わせ（`p=alive`）、8 がクリップボードへの書き込み（OSC 5522）、
-/// 9 がクリップボードの読み取りの頼み。5 から 7 は `data` が `i=`（UTF-8、無ければ空）。8 と 9 は
+/// 9 がクリップボードの読み取りの頼み、12 がプログラムの状態の記録の変化（OSC 7501）。5 から 7 は
+/// `data` が `i=`（UTF-8、無ければ空）。8 と 9 は
 /// `data` が `id`（UTF-8、無ければ空）。
 #[wasm_bindgen]
 pub struct WasmEvent {
@@ -618,6 +637,7 @@ impl WasmTerminal {
     /// 初期状態に戻す。
     pub fn reset(&mut self) {
         self.term.reset();
+        self.events.extend(self.term.take_events());
     }
 
     /// 大きさを変える。
@@ -686,6 +706,14 @@ impl WasmTerminal {
                 }
                 None => WasmEvent::new(255, 0, Vec::new()),
             },
+            Event::ProgramStatus(c) => {
+                let c = *c;
+                WasmEvent::new(
+                    12,
+                    0,
+                    program_status_fields(&c.id, c.status.as_ref()).into_bytes(),
+                )
+            }
             Event::Dnd(d) => {
                 let dnd = dnd_payload(*d);
                 let mut ev = WasmEvent::new(if dnd.kind == 255 { 255 } else { 10 }, 0, Vec::new());
@@ -1102,6 +1130,7 @@ impl WasmTerminal {
     /// ウィンドウのフォーカスの出入りを知らせる。
     pub fn set_focus(&mut self, focused: bool) {
         self.term.set_focus(focused);
+        self.events.extend(self.term.take_events());
     }
 
     /// OSC の番号 `ident` を呼ぶ側で拾う。
@@ -1173,6 +1202,34 @@ impl WasmTerminal {
         };
         let c = &self.term.screen().extra_cursors;
         vec![word(c.text_color), word(c.cursor_color)]
+    }
+
+    /// マウスが窓から出たことを報告する（kitty の拡張）。報告したら `true`。
+    pub fn report_mouse_leave(&mut self) -> bool {
+        self.term.report_mouse_leave()
+    }
+
+    /// キーを押したことを知らせる（終わった・失敗した状態の記録を消す）。
+    pub fn program_status_key_pressed(&mut self) {
+        self.term.program_status_key_pressed();
+        self.events.extend(self.term.take_events());
+    }
+
+    /// プロセスが終わったことを知らせる（動いている・待っている状態の記録を消す）。
+    pub fn program_status_drop_running(&mut self) {
+        self.term.program_status_drop_running();
+        self.events.extend(self.term.take_events());
+    }
+
+    /// いま持っているプログラムの状態の記録。記録を `\u{1}` で、項目を `\0` で区切る
+    /// （項目は `program_status_fields` の並び）。
+    pub fn program_status_records(&self) -> String {
+        self.term
+            .program_status()
+            .iter()
+            .map(|(id, s)| program_status_fields(id, Some(s)))
+            .collect::<Vec<_>>()
+            .join("\u{1}")
     }
 
     /// マウスの報告が有効か。

@@ -416,6 +416,28 @@ impl Screen {
         b.cursor.pending_wrap = false;
     }
 
+    /// 見えている画面の内容（字と画像）をスクロールバックへ移し、画面を `CSI 2 J` のあとと同じ空にする
+    /// （kitty の `CSI 22 J`）。内容のある最後の行（画像の配置が覆う行を含む）までを移すので、
+    /// 空の行をスクロールバックに積まない。字も画像も無い行（背景色だけの行を含む）は内容と数えないので、
+    /// 画面の下にそういう行が続いていれば移さずに消す。代替画面にはスクロールバックが無いので、消すだけ。
+    pub fn move_to_scrollback(&mut self) {
+        let rows = self.rows();
+        let mut n = (0..rows)
+            .rev()
+            .find(|&y| !self.row(y).is_blank())
+            .map_or(0, |y| y + 1);
+        for (row, p) in self.placements() {
+            let end = row + i64::from(p.rows);
+            if end > 0 {
+                n = n.max(end.min(rows as i64) as usize);
+            }
+        }
+        if n > 0 {
+            let pen = self.pen;
+            self.buf_mut().scroll_up(0, rows - 1, n, &pen);
+        }
+    }
+
     /// スクロールバックを捨てる（ED 3）。
     pub fn clear_scrollback(&mut self) {
         self.buf_mut().clear_scrollback();

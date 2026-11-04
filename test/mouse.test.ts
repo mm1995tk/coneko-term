@@ -23,7 +23,7 @@ function collect(t: Terminal): { out: string[] } {
 }
 
 const mouse = (
-  type: "down" | "up" | "move",
+  type: "down" | "up" | "move" | "leave",
   col: number,
   row: number,
   extra: object = {},
@@ -437,5 +437,39 @@ test("pointer shape: set, push, pop and query follow OSC 22", async () => {
   assert.equal(t.pointerShape, "crosshair");
   t.reset();
   assert.equal(t.pointerShape, undefined);
+  t.dispose();
+});
+
+// ---- kitty: マウスが窓から出たこと
+
+test("mouse: leaving the window is reported with SGR pixels and 1003", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1003h\x1b[?1016h");
+  t.handleMouse(mouse("leave", 0, 0));
+  assert.deepEqual(box.out, ["\x1b[<163;0;0M"]);
+  t.dispose();
+});
+
+test("mouse: leaving is not reported in other modes", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  t.handleMouse(mouse("leave", 0, 0));
+  await write(t, "\x1b[?1003h\x1b[?1006h");
+  t.handleMouse(mouse("leave", 0, 0));
+  await write(t, "\x1b[?1000h\x1b[?1016h");
+  t.handleMouse(mouse("leave", 0, 0));
+  assert.deepEqual(box.out, []);
+  t.dispose();
+});
+
+test("mouse: leaving while a button is held is not reported", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1003h\x1b[?1016h");
+  t.handleMouse(mouse("down", 1, 1));
+  box.out.length = 0;
+  t.handleMouse(mouse("leave", 0, 0));
+  assert.deepEqual(box.out, []);
   t.dispose();
 });

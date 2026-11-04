@@ -2,11 +2,13 @@
 //! 画面（[`crate::screen`]）を動かす。
 //!
 //! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、OSC 8（リンク）を
-//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）、OSC 22（mouse pointer shapes）、OSC 21（color control）と色の積み重ね（`CSI # P`・`CSI # Q`・`CSI # R`、OSC 30001、OSC 30101）。知らないシーケンスは捨てる。
+//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）、OSC 22（mouse pointer shapes）、OSC 21（color control）と色の積み重ね（`CSI # P`・`CSI # Q`・`CSI # R`、OSC 30001、OSC 30101）、OSC 7501（Program Status Protocol）。kitty の miscellaneous protocol extensions のうち、
+//! モードの保存と復元（`CSI ? s`・`CSI ? r`）、SGR 221・222、マウスが窓から出た報告（[`Terminal::report_mouse_leave`]）、
+//! `CSI 22 J` も扱う。知らないシーケンスは捨てる。
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
-//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）・drag and drop（OSC 72）・file transfer（OSC 5113）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
+//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）・drag and drop（OSC 72）・file transfer（OSC 5113）・プログラムの状態の記録の変化（OSC 7501）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
 //! 呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
 //! # PTY へ送るバイト列（出口は 1 つ）
@@ -29,6 +31,9 @@
 //! - DEC: 1、6、7、9、12、25、45、47、66、1000、1002、1003、1004、1005、1006、1015、1016、
 //!   1047、1048、1049、2004、2026、5522
 //!
+//! `CSI ? Pm s`（XTSAVE）と `CSI ? Pm r`（XTRESTORE）は、DEC のモードを保存・復元する。`Pm` が無いときは
+//! （kitty の拡張）、副作用の無いモード（DECOM と画面を切り替えるモードを除く）をすべて。
+//!
 //! # 画面の状態のうち、ここで持つもの
 //!
 //! 矩形の領域への属性（DECCARA・DECRARA）の範囲の選び方（DECSACE）、
@@ -44,6 +49,8 @@ mod dnd_tests;
 mod file_transfer;
 mod kitty_keyboard;
 #[cfg(test)]
+mod misc_tests;
+#[cfg(test)]
 mod mode_tests;
 mod modes;
 mod multi_cursor;
@@ -53,6 +60,9 @@ mod notification;
 mod pointer_shape;
 #[cfg(test)]
 mod pointer_shape_tests;
+mod program_status;
+#[cfg(test)]
+mod program_status_tests;
 mod rect;
 #[cfg(test)]
 mod rect_tests;
@@ -82,6 +92,7 @@ pub use file_transfer::{
 pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_STACK_DEPTH};
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
 pub use notification::{Actions, Notification, NotificationSupport, When};
+pub use program_status::{ProgramKind, ProgramState, ProgramStatus, ProgramStatusChange};
 pub use theme::{Rgb, Theme};
 
 use crate::graphics::{DeleteSpec, DeleteTarget, Effect, Graphics, Image, PlacedImage, Placement};
@@ -139,6 +150,8 @@ pub enum Event {
     /// kitty の file transfer protocol（OSC 5113）の、クライアントからの命令。許すかどうかとファイルの
     /// 読み書きは呼ぶ側が決め、`Terminal::file_transfer_*` で答える。
     FileTransfer(Box<FileTransferEvent>),
+    /// プログラムの状態の記録（kitty の OSC 7501）が変わった、または消えた。
+    ProgramStatus(Box<ProgramStatusChange>),
     /// [`Terminal::register_osc`] で登録した番号の OSC が来た。`data` は番号と `;` のあとの
     /// バイト列（`;` が無ければ空）。
     Osc {
@@ -269,6 +282,10 @@ struct State {
     file_transfer: file_transfer::FileTransfer,
     /// kitty の mouse pointer shapes（OSC 22）の、主画面と代替画面の形の積み重ね。
     pointer_shapes: pointer_shape::PointerShapes,
+    /// プログラムの状態の記録（OSC 7501）。
+    program_status: program_status::Records,
+    /// `CSI ? s` で保存したモード（番号と、設定中か）。
+    saved_modes: std::collections::BTreeMap<u32, bool>,
 }
 
 impl Terminal {
@@ -304,6 +321,8 @@ impl Terminal {
                 dnd: Default::default(),
                 file_transfer: Default::default(),
                 pointer_shapes: Default::default(),
+                program_status: Default::default(),
+                saved_modes: Default::default(),
             },
         }
     }
@@ -795,6 +814,37 @@ impl Terminal {
         true
     }
 
+    /// マウスが窓から出たことを報告する（kitty の拡張）。ピクセル単位の SGR（`CSI ? 1016 h`）で、
+    /// すべての動きを報告する（`CSI ? 1003 h`）ときだけ、ボタン 3（押していない）の動きに 128 を足した
+    /// 報告（`CSI < 163 ; 0 ; 0 M`）を出口に入れて `true`。位置は仕様で無視されるので 0 にする。
+    pub fn report_mouse_leave(&mut self) -> bool {
+        let m = &self.state.modes;
+        if m.mouse_protocol != MouseProtocol::Any || m.mouse_encoding != MouseEncoding::SgrPixels {
+            return false;
+        }
+        self.last_mouse_move = None;
+        self.state.reply("\x1b[<163;0;0M");
+        true
+    }
+
+    /// いま持っているプログラムの状態の記録（OSC 7501）。更新が古い順で、id は根の記録が空。
+    /// `app` は、報告に無ければ親の記録から引き継いだもの。
+    pub fn program_status(&self) -> Vec<(String, ProgramStatus)> {
+        self.state.program_status.all()
+    }
+
+    /// 動いている・待っている状態の記録（working・blocked・idle）を消す。プロセスが終わったときに呼ぶ
+    /// （シェルのプロンプトは OSC 133 の `A` で、ターミナルが自分で気づく）。
+    pub fn program_status_drop_running(&mut self) {
+        self.state.drop_running_program_status();
+    }
+
+    /// キーを押したことを知らせる。終わった・失敗した状態の記録（done・error）を消す
+    /// （窓がフォーカスを得たときは [`Terminal::set_focus`] が同じことをする）。
+    pub fn program_status_key_pressed(&mut self) {
+        self.state.drop_finished_program_status();
+    }
+
     /// いまの色（プログラムが OSC 4・10・11・12・21 で変えたものを含む）。描画はこれを使う。
     pub fn colors(&self) -> &Colors {
         &self.state.colors
@@ -820,6 +870,9 @@ impl Terminal {
     /// ウィンドウがフォーカスを得た・失ったことを知らせる。フォーカスの報告（`CSI ? 1004 h`）が
     /// 有効なら、`CSI I`（得た）か `CSI O`（失った）を出口に入れる。
     pub fn set_focus(&mut self, focused: bool) {
+        if focused {
+            self.state.drop_finished_program_status();
+        }
         if self.state.modes.send_focus {
             self.state.reply(if focused { "\x1b[I" } else { "\x1b[O" });
         }
@@ -929,7 +982,11 @@ impl State {
                 }
                 self.screen.erase_cells(c.y, 0, c.x + 1);
             }
-            2 => {
+            2 | 22 => {
+                if mode == 22 {
+                    // kitty: 先に画面の内容（字と画像）をスクロールバックへ移す
+                    self.screen.move_to_scrollback();
+                }
                 self.screen.clear_visible_placements();
                 self.screen.extra_cursors.clear();
                 for y in 0..rows {
@@ -940,7 +997,6 @@ impl State {
                 self.screen.extra_cursors.clear();
                 self.screen.clear_scrollback();
             }
-            22 => self.screen.extra_cursors.clear(),
             _ => {}
         }
     }
@@ -1097,6 +1153,9 @@ impl State {
         self.dnd.reset();
         self.file_transfer.clear();
         self.pointer_shapes.clear();
+        self.saved_modes.clear();
+        let gone = self.program_status.clear(None);
+        self.push_program_status(gone);
         self.color_stack.clear();
         self.set_colors(Colors::from_theme(&self.theme));
         self.flush_dnd();
@@ -1109,6 +1168,44 @@ impl State {
         }
         let out = self.dnd.take_out();
         self.output.extend_from_slice(&out);
+    }
+
+    fn push_program_status(&mut self, changes: Vec<ProgramStatusChange>) {
+        for c in changes {
+            self.events.push(Event::ProgramStatus(Box::new(c)));
+        }
+    }
+
+    /// OSC 7501。`body` は `7501;` のあと、`total` は OSC の本体の長さ。
+    fn program_status_osc(&mut self, body: &[u8], total: usize, bell: bool) {
+        use program_status::Report;
+        let changes = match program_status::parse(body, total) {
+            Some(Report::Query) => {
+                let st = if bell { "\x07" } else { "\x1b\\" };
+                self.reply(&format!("\x1b]{}{st}", program_status::QUERY_REPLY));
+                return;
+            }
+            Some(Report::Set { id, status }) => self.program_status.set(id, status),
+            Some(Report::Clear { id }) => self.program_status.clear(id.as_deref()),
+            None => return,
+        };
+        self.push_program_status(changes);
+    }
+
+    fn drop_running_program_status(&mut self) {
+        use program_status::ProgramState::*;
+        let gone = self
+            .program_status
+            .remove_where(|_, s| matches!(s.state, Idle | Working | Blocked));
+        self.push_program_status(gone);
+    }
+
+    fn drop_finished_program_status(&mut self) {
+        use program_status::ProgramState::*;
+        let gone = self
+            .program_status
+            .remove_where(|_, s| matches!(s.state, Done | Error));
+        self.push_program_status(gone);
     }
 
     /// 主画面と代替画面を切り替える。カーソルの位置は引き継ぐ（xterm.js と同じ）。
@@ -1189,6 +1286,54 @@ impl State {
         self.modes.mouse_encoding = if on { e } else { MouseEncoding::Default };
     }
 
+    /// 副作用の無いモード（`CSI ? s` に番号が無いときの対象）。DECOM（6）はカーソルを動かし、
+    /// 47・1047・1048・1049 は画面とカーソルを動かすので入れない。
+    const SIDE_EFFECT_FREE_MODES: [u32; 18] = [
+        1, 7, 9, 12, 25, 45, 66, 1000, 1002, 1003, 1004, 1005, 1006, 1015, 1016, 2004, 2026, 5522,
+    ];
+
+    /// XTSAVE（`CSI ? Pm s`）。番号を並べたら、そのモードを保存する。kitty の拡張で、番号が無いときは
+    /// 副作用の無いモードをすべて保存する。保存は 1 つのモードに 1 つで、保存し直すと置き換わる。
+    /// 画面を切り替えるモード（47・1047・1048・1049）と、知らないモードは無視する。
+    fn save_modes(&mut self, params: &Params) {
+        let list: Vec<u32> = if params.is_empty() {
+            Self::SIDE_EFFECT_FREE_MODES.to_vec()
+        } else {
+            params.iter().map(|p| p[0]).collect()
+        };
+        for m in list {
+            if matches!(m, 47 | 1047 | 1048 | 1049) {
+                continue;
+            }
+            match self.mode_status(true, m) {
+                1 => self.saved_modes.insert(m, true),
+                2 => self.saved_modes.insert(m, false),
+                _ => continue,
+            };
+        }
+    }
+
+    /// XTRESTORE（`CSI ? Pm r`）。番号を並べたら、保存してあるそのモードを戻す。kitty の拡張で、番号が
+    /// 無いときは保存してあるモードをすべて戻す。保存していないモードは触らない。
+    fn restore_modes(&mut self, params: &Params) {
+        let list: Vec<u32> = if params.is_empty() {
+            self.saved_modes.keys().copied().collect()
+        } else {
+            params.iter().map(|p| p[0]).collect()
+        };
+        let wanted: Vec<(u32, bool)> = list
+            .into_iter()
+            .filter_map(|m| self.saved_modes.get(&m).map(|&on| (m, on)))
+            .filter(|&(m, on)| self.mode_status(true, m) != if on { 1 } else { 2 })
+            .collect();
+        // マウスの報告の種類は互いに打ち消し合うので、解除を先に、設定を後にする。
+        for on in [false, true] {
+            for &(m, _) in wanted.iter().filter(|(_, o)| *o == on) {
+                self.set_mode(true, m, on);
+            }
+        }
+    }
+
     /// DECRQM の Ps。0 は知らないモード、1 は設定中、2 は解除中。
     fn mode_status(&self, private: bool, mode: u32) -> u8 {
         let m = &self.modes;
@@ -1260,6 +1405,8 @@ impl State {
                 let q = if private { "?" } else { "" };
                 self.reply(&format!("\x1b[{q}{first};{status}$y"));
             }
+            (Some(b'?'), [], b's') => self.save_modes(params),
+            (Some(b'?'), [], b'r') => self.restore_modes(params),
             (None, [b'#'], b'P') => self.push_colors(first as usize),
             (None, [b'#'], b'Q') => self.pop_colors(first as usize),
             (None, [b'#'], b'R') => {
@@ -1447,6 +1594,11 @@ impl State {
                     None => return,
                 };
                 self.events.push(ev);
+            }
+            b"7501" => self.program_status_osc(&data[sep + 1..], data.len(), bell),
+            b"133" if data.get(sep + 1) == Some(&b'A') => {
+                // 新しいシェルのプロンプト。動いている・待っている状態の記録は、もう古い
+                self.drop_running_program_status();
             }
             b"5522" => match self.clipboard.osc(&data[sep + 1..]) {
                 Some(clipboard::Output::Event(ev)) => self.events.push(ev),

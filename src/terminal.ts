@@ -28,10 +28,54 @@ export const CELL_STRIDE = 7;
 /** セルの字（並びの 0 番目）にこのビットが立っていたら、残りのビットが `RowView.cluster` の番号。 */
 export const CLUSTER_FLAG = 0x8000_0000;
 
+/** プログラムの状態（kitty の OSC 7501）。 */
+export type ProgramState = "idle" | "working" | "done" | "blocked" | "error";
+
+/** `blocked` の理由。 */
+export type ProgramKind = "permission" | "question" | "auth";
+
+/** プログラムが報告した状態の記録 1 つ。 */
+export interface ProgramStatus {
+  /** 記録の id。根の記録は空の文字列。 */
+  id: string;
+  state: ProgramState;
+  /** `blocked` のときの理由。 */
+  kind?: ProgramKind;
+  /** 0 から 100。無ければ、動いているが割合は分からない。 */
+  progress?: number;
+  /** プログラムの識別子。報告に無ければ、いちばん近い親の記録のもの。 */
+  app?: string;
+  /** 短い名札。 */
+  title?: string;
+  /** 1 行の説明。 */
+  msg?: string;
+}
+
+/** `onProgramStatus` に渡す、記録の変化。 */
+export interface ProgramStatusChange {
+  /** 変わった記録の id（根の記録は空）。 */
+  id: string;
+  /** 新しい中身。記録が消えたときは `undefined`。 */
+  status?: ProgramStatus;
+}
+
+/** wasm が `\0` で区切って渡す記録を読む。並びは Rust 側の `program_status_fields` を参照。 */
+function programStatusOf(fields: string): ProgramStatusChange {
+  const [removed, id, state, kind, progress, app, title, msg] = fields.split("\0");
+  if (removed === "1") return { id };
+  const status: ProgramStatus = { id, state: state as ProgramState };
+  if (kind) status.kind = kind as ProgramKind;
+  if (progress) status.progress = Number(progress);
+  if (app) status.app = app;
+  if (title !== "") status.title = title;
+  if (msg !== "") status.msg = msg;
+  return { id, status };
+}
+
 /** `Terminal.handleMouse` に渡すポインターのイベント。 */
 export interface MouseInput {
-  /** 押した、離した、動かした。 */
-  type: "down" | "up" | "move";
+  /** 押した、離した、動かした、窓から出た（`leave`。kitty の拡張）。 */
+  type: "down" | "up" | "move" | "leave";
   /** DOM の `MouseEvent.button` と同じ（0 左、1 真ん中、2 右、3 戻る、4 進む）。`down` だけが使う。 */
   button: number;
   /** 見えている画面の列（0 始まり）。範囲の外は端に寄せる。 */
@@ -829,6 +873,7 @@ export class Terminal {
   >();
   private dndListeners = new Set<(e: DndEvent) => void>();
   private fileTransferListeners = new Set<(e: FileTransferEvent) => void>();
+  private programStatusListeners = new Set<(c: ProgramStatusChange) => void>();
   private oscHandlers = new Map<number, Set<(data: string) => void>>();
   private element?: HTMLElement;
   private cleanups: (() => void)[] = [];
@@ -1174,6 +1219,11 @@ export class Terminal {
           for (const l of [...this.fileTransferListeners]) l(e);
           break;
         }
+        case 12: {
+          const change = programStatusOf(this.decoder.decode(data));
+          for (const l of [...this.programStatusListeners]) l(change);
+          break;
+        }
         case 3: {
           const text = this.decoder.decode(data);
           for (const l of [...(this.oscHandlers.get(ev.ident) ?? [])]) l(text);
@@ -1259,6 +1309,32 @@ export class Terminal {
    */
   onNotification(listener: (n: TerminalNotification) => void): Disposable {
     return addListener(this.notificationListeners, listener);
+  }
+
+  /**
+   * プログラムが自分の状態（kitty の Program Status Protocol、OSC 7501）を報告し、記録が変わった、または
+   * 消えた。何をどう見せるかは呼ぶ側が決める。消えるのは、`state=clear`、RIS、新しいシェルのプロンプト
+   * （OSC 133 の `A`。working・blocked・idle）、窓がフォーカスを得たこととキーを押したこと（done・error）、
+   * 記録の数の上限（256）のとき。プロセスの終了は端末の外のことなので、`programStatusProcessExited` で知らせる。
+   */
+  onProgramStatus(listener: (c: ProgramStatusChange) => void): Disposable {
+    return addListener(this.programStatusListeners, listener);
+  }
+
+  /** いま持っている状態の記録。更新が古い順。 */
+  get programStatus(): ProgramStatus[] {
+    const text = this.core.program_status_records();
+    if (text === "") return [];
+    return text
+      .split("\u0001")
+      .map((r) => programStatusOf(r).status)
+      .filter((s): s is ProgramStatus => s !== undefined);
+  }
+
+  /** 端末につないだプロセスが終わったことを知らせる。動いている・待っている状態の記録（working・blocked・idle）を消す。 */
+  programStatusProcessExited(): void {
+    this.core.program_status_drop_running();
+    this.flush();
   }
 
   /** アプリケーションが通知を閉じるよう求めた（`p=close`）。`id` は `i`。 */
@@ -1922,7 +1998,14 @@ export class Terminal {
       target.addEventListener(type, h, capture);
       this.cleanups.push(() => target.removeEventListener(type, h, capture));
     };
-    on<KeyboardEvent>(textarea, "keydown", (e) => void keys.keyDown(e), true);
+    on<KeyboardEvent>(textarea, "keydown", (e) => {
+      // 修飾キーだけでは、利用者が操作したとは数えない
+      if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
+        this.core.program_status_key_pressed();
+        this.flush();
+      }
+      void keys.keyDown(e);
+    }, true);
     on<KeyboardEvent>(textarea, "keyup", (e) => keys.keyUp(e), true);
     on<KeyboardEvent>(textarea, "keypress", (e) => void keys.keyPress(e), true);
     on<InputEvent>(textarea, "input", (e) => void keys.input(e), true);
@@ -2394,6 +2477,12 @@ export class Terminal {
       return true;
     }
 
+    if (ev.type === "leave") {
+      // 押している間は、窓の外へ出てもボタンの報告が続くので、出たことは報告しない
+      if (!this.mouseOwner) flushReport(this.core.report_mouse_leave());
+      return false;
+    }
+
     if (ev.type === "move") {
       if (this.mouseOwner === "report") {
         flushReport(report(this.reportButton, 2));
@@ -2558,10 +2647,16 @@ export class Terminal {
     };
     canvas.addEventListener("mousedown", onDown);
     canvas.addEventListener("mousemove", onHover);
+    // 窓から出たことは、kitty の拡張（ピクセル単位の SGR）で報告する
+    const onLeave = (e: MouseEvent) => {
+      this.handleMouse(this.pointerInput(canvas, e, "leave"));
+    };
+    canvas.addEventListener("mouseleave", onLeave);
     return () => {
       auto.stop();
       canvas.removeEventListener("mousedown", onDown);
       canvas.removeEventListener("mousemove", onHover);
+      canvas.removeEventListener("mouseleave", onLeave);
       doc.removeEventListener("mousemove", onMove);
       doc.removeEventListener("mouseup", onUp);
     };
