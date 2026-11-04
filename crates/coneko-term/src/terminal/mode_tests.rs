@@ -396,11 +396,13 @@ fn osc_4_palette_queries() {
 }
 
 #[test]
-fn osc_color_set_is_ignored() {
+fn osc_color_set_changes_colors_not_theme() {
     let mut t = term(3, 10);
     w(&mut t, "\x1b]10;rgb:ff/00/00\x07\x1b]4;1;#ff0000\x07");
     assert!(out(&mut t).is_empty());
     assert_eq!(t.theme(), &Theme::default());
+    assert_eq!(t.colors().foreground, [0xff, 0x00, 0x00]);
+    assert_eq!(t.colors().palette[1], [0xff, 0x00, 0x00]);
 }
 
 // ---- 出口 ----
