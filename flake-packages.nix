@@ -64,6 +64,7 @@ let
         ./src/keyboard.ts
         ./src/memory.ts
         ./src/renderer.ts
+        ./src/selection.ts
         ./src/terminal.ts
         ./test
         ./LICENSE

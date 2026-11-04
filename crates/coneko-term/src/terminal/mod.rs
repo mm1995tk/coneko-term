@@ -40,6 +40,7 @@ mod theme;
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
 pub use theme::{Rgb, Theme};
 
+use crate::mouse::{self, MouseAction, MouseButton, MouseEvent};
 use crate::parser::{Params, Parser, Perform};
 use crate::screen::{CursorShape, Screen};
 
@@ -131,11 +132,21 @@ impl Charset {
     }
 }
 
+/// 動きの報告の重なりを見分ける印（位置、ボタン、修飾キー）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MouseMoveKey {
+    pos: (u64, u64),
+    button: MouseButton,
+    mods: (bool, bool, bool),
+}
+
 /// ターミナル。`write` にバイト列を渡すと、画面が変わる。
 #[derive(Debug)]
 pub struct Terminal {
     parser: Parser,
     state: State,
+    /// 直前に報告した動き。同じ位置の動きを続けて報告しないために覚える。
+    last_mouse_move: Option<MouseMoveKey>,
 }
 
 #[derive(Debug)]
@@ -166,6 +177,7 @@ impl Terminal {
     pub fn with_screen(screen: Screen) -> Terminal {
         Terminal {
             parser: Parser::new(),
+            last_mouse_move: None,
             state: State {
                 screen,
                 events: Vec::new(),
@@ -201,6 +213,7 @@ impl Terminal {
     pub fn reset(&mut self) {
         self.parser = Parser::new();
         self.state.full_reset();
+        self.last_mouse_move = None;
     }
 
     /// OSC の番号 `ident` を呼ぶ側で拾う。その番号の OSC は、ターミナルは処理せず
@@ -246,6 +259,41 @@ impl Terminal {
     /// 同じ出口から出す。
     pub fn queue_output(&mut self, bytes: &[u8]) {
         self.state.output.extend_from_slice(bytes);
+    }
+
+    /// マウスの報告が有効か（`CSI ? 9 h`、`1000`、`1002`、`1003` のどれか）。
+    pub fn mouse_reporting(&self) -> bool {
+        self.state.modes.mouse_protocol != MouseProtocol::None
+    }
+
+    /// マウスのイベントを報告する。今のモードが報告しないイベント（と、書き方で表せない位置）は
+    /// 何もせず `false`。報告するときは、バイト列を [`Terminal::take_output`] の出口に入れて `true`。
+    /// 位置が前と同じ動きは、続けて報告しない（`false`）。
+    pub fn report_mouse(&mut self, event: &MouseEvent) -> bool {
+        let m = &self.state.modes;
+        let Some(bytes) = mouse::encode(m.mouse_protocol, m.mouse_encoding, event) else {
+            return false;
+        };
+        if event.action == MouseAction::Move {
+            let pixels = m.mouse_encoding == MouseEncoding::SgrPixels;
+            let key = MouseMoveKey {
+                pos: if pixels {
+                    (event.x as u64, event.y as u64)
+                } else {
+                    (event.col as u64, event.row as u64)
+                },
+                button: event.button,
+                mods: (event.shift, event.alt, event.ctrl),
+            };
+            if self.last_mouse_move == Some(key) {
+                return false;
+            }
+            self.last_mouse_move = Some(key);
+        } else {
+            self.last_mouse_move = None;
+        }
+        self.state.output.extend_from_slice(&bytes);
+        true
     }
 
     /// 色の問い合わせに返すテーマ。

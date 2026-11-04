@@ -1,6 +1,11 @@
 import { WasmTerminal } from "./wasm/coneko_term_wasm.js";
 import { getMemory } from "./memory.js";
 import {
+  SelectionModel,
+  type SelectionHost,
+  type SelectionRange,
+} from "./selection.js";
+import {
   CompositionHelper,
   KeyHandler,
   detectPlatform,
@@ -23,6 +28,52 @@ export const CELL_STRIDE = 6;
 /** セルの字（並びの 0 番目）にこのビットが立っていたら、残りのビットが `RowView.cluster` の番号。 */
 export const CLUSTER_FLAG = 0x8000_0000;
 
+/** `Terminal.handleMouse` に渡すポインターのイベント。 */
+export interface MouseInput {
+  /** 押した、離した、動かした。 */
+  type: "down" | "up" | "move";
+  /** DOM の `MouseEvent.button` と同じ（0 左、1 真ん中、2 右、3 戻る、4 進む）。`down` だけが使う。 */
+  button: number;
+  /** 見えている画面の列（0 始まり）。範囲の外は端に寄せる。 */
+  col: number;
+  /** 見えている画面の行（0 始まり）。範囲の外は端に寄せる。 */
+  row: number;
+  /** 画面の左端からの CSS ピクセル（`CSI ? 1016 h` のときだけ使う）。 */
+  x?: number;
+  /** 画面の上端からの CSS ピクセル（`CSI ? 1016 h` のときだけ使う）。 */
+  y?: number;
+  /** Shift を押している。 */
+  shiftKey?: boolean;
+  /** Alt（Option）を押している。 */
+  altKey?: boolean;
+  /** Ctrl を押している。 */
+  ctrlKey?: boolean;
+  /** 連続して押した回数（DOM の `MouseEvent.detail`）。1 は範囲、2 は単語、3 は行。`down` だけが使う。 */
+  clickCount?: number;
+}
+
+/** `Terminal.handleWheel` に渡すホイールのイベント。 */
+export interface WheelInput {
+  /** 縦の量（DOM の `WheelEvent.deltaY`）。負が上。 */
+  deltaY: number;
+  /** 0 がピクセル、1 が行、2 がページ（DOM の `WheelEvent.deltaMode`）。 */
+  deltaMode?: number;
+  /** 見えている画面の列（0 始まり）。報告が有効なときだけ使う（無ければ 0）。 */
+  col?: number;
+  /** 見えている画面の行（0 始まり）。報告が有効なときだけ使う（無ければ 0）。 */
+  row?: number;
+  /** 画面の左端からの CSS ピクセル（`CSI ? 1016 h` の報告だけが使う）。 */
+  x?: number;
+  /** 画面の上端からの CSS ピクセル（`CSI ? 1016 h` の報告だけが使う）。 */
+  y?: number;
+  /** Shift を押している。押していると縦に動かさない。 */
+  shiftKey?: boolean;
+  /** Alt（Option）を押している。 */
+  altKey?: boolean;
+  /** Ctrl を押している。 */
+  ctrlKey?: boolean;
+}
+
 /** 後始末ができるもの。 */
 export interface Disposable {
   dispose(): void;
@@ -36,7 +87,7 @@ export interface Theme {
   background?: string;
   /** カーソルの色（OSC 12）。 */
   cursor?: string;
-  /** 選択範囲の背景。選択の表示（#10）が使う。 */
+  /** 選択範囲の背景。`#rgb`、`#rgba`、`#rrggbb`、`#rrggbbaa`。字はこの色の下に見えるので、半透明にする。既定は `#ffffff4d`（xterm.js と同じ）。 */
   selectionBackground?: string;
   black?: string;
   red?: string;
@@ -74,6 +125,8 @@ export interface TerminalOptions {
   scrollback?: number;
   /** テーマ。 */
   theme?: Theme;
+  /** ダブルクリックで単語を選ぶときの区切りの字。既定は xterm.js と同じ（空白と ``()[]{}',"`` ）。 */
+  wordSeparator?: string;
   /**
    * macOS で Option を Meta（ESC の前置き）として送るか。既定は false（xterm.js と同じ。
    * Option は字を打つキーとして扱う）。
@@ -153,6 +206,22 @@ const DEFAULT_THEME: Required<Omit<Theme, "selectionBackground">> = {
   brightWhite: "#eeeeec",
 };
 
+/** xterm.js 6.0.0 の選択範囲の既定の色（白の 30%）。 */
+const DEFAULT_SELECTION = "#ffffff4d";
+
+/** xterm.js 6.0.0 の `wordSeparator` の既定（Rust の本体の既定と同じ）。 */
+const DEFAULT_WORD_SEPARATOR = " ()[]{}',\"`";
+
+function parseSelectionColor(value: string): string {
+  const v = value.trim();
+  if (!/^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(v)) {
+    throw new Error(
+      `coneko-term: unsupported selectionBackground "${value}" (use #rgb, #rgba, #rrggbb or #rrggbbaa)`,
+    );
+  }
+  return v;
+}
+
 function parseColor(value: string): [number, number, number] {
   const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim());
   if (!m) {
@@ -199,6 +268,16 @@ export class Terminal {
   private scrollListeners = new Set<(viewportY: number) => void>();
   private cellSizeListeners = new Set<(size: CellSize) => void>();
   private wasm: WasmTerminal;
+  private selectionColor = DEFAULT_SELECTION;
+  private selection: SelectionModel;
+  private selectionListeners = new Set<() => void>();
+  private lastSelectionKey = "";
+  private lastTrimmed = 0;
+  private lastAlt = false;
+  /** 押してから離すまで、マウスのイベントを受け持つもの。 */
+  private mouseOwner?: "report" | "select";
+  private reportButton = 0;
+  private wheelPartial = 0;
 
   /** `dispose` のあとに触ると、分かりやすい例外にする。 */
   private get core(): WasmTerminal {
@@ -228,9 +307,35 @@ export class Terminal {
     this.wasm = new WasmTerminal(rows, cols, options.scrollback ?? 1000);
     this.core.set_cursor_blink(options.cursorBlink ?? false);
     this.applyTheme(options.theme ?? {});
+    this.selection = new SelectionModel(this.selectionHost());
+    this.lastAlt = this.core.is_alt_screen();
+    this.lastTrimmed = this.core.scrollback_trimmed();
+  }
+
+  private selectionHost(): SelectionHost {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const t = this;
+    return {
+      get cols() {
+        return t.cols;
+      },
+      totalRows: () => t.scrollbackLength + t.rows,
+      trimmed: () => t.core.scrollback_trimmed(),
+      wordRange: (row, col) =>
+        Array.from(t.core.word_range(row, col, t.wordSeparator)),
+      lineRange: (row) => Array.from(t.core.line_range(row)),
+    };
+  }
+
+  private get wordSeparator(): string {
+    return this.options.wordSeparator ?? DEFAULT_WORD_SEPARATOR;
   }
 
   private applyTheme(theme: Theme): void {
+    this.selectionColor =
+      theme.selectionBackground === undefined
+        ? DEFAULT_SELECTION
+        : parseSelectionColor(theme.selectionBackground);
     const t = { ...DEFAULT_THEME, ...stripUndefined(theme) };
     this.resolvedTheme = t;
     const ansi = new Uint8Array(48);
@@ -319,6 +424,7 @@ export class Terminal {
         this.core.write(job.bytes.subarray(job.offset, end));
         job.offset = end;
         this.syncViewport();
+        this.syncSelection();
         this.afterChange();
         // 聞き手や done の例外で残りの処理を止めない。投げ直して報告する
         this.guard(() => this.flush());
@@ -471,6 +577,8 @@ export class Terminal {
   reset(): void {
     this.queue.length = 0;
     this.core.reset();
+    this.selection.clear();
+    this.syncSelection();
     this.viewOffset = 0;
     this.lastScrollback = this.core.scrollback_len();
     this.afterChange();
@@ -479,6 +587,9 @@ export class Terminal {
   /** 大きさを変える。 */
   resize(cols: number, rows: number): void {
     this.core.resize(Math.max(1, rows), Math.max(1, cols));
+    // 折り返しの組み直しで行の位置が変わるので、選択は消す
+    this.selection.clear();
+    this.syncSelection();
     this.lastScrollback = this.core.scrollback_len();
     this.viewOffset = Math.min(this.viewOffset, this.lastScrollback);
     this.renderer?.resize();
@@ -574,6 +685,11 @@ export class Terminal {
       for (const l of [...this.cellSizeListeners]) l(size);
     });
     this.cleanups.push(() => renderer.dispose());
+    this.cleanups.push(
+      this.bindPointer(canvas),
+      this.bindWheel(el, canvas),
+      this.bindCopy(el),
+    );
     this.setupInput(doc, el);
     this.afterChange();
 
@@ -736,6 +852,7 @@ export class Terminal {
         t.foreground,
         t.background,
         t.cursor,
+        this.selectionColor,
       ),
     };
   }
@@ -890,6 +1007,367 @@ export class Terminal {
     return { length, cells, wrapped, cluster: (i) => core.cluster(i) };
   }
 
+  // ---- 選択
+
+  /** 選択範囲が変わった（広げた、消えた、書き込みで行がずれた）。 */
+  onSelectionChange(listener: () => void): Disposable {
+    return addListener(this.selectionListeners, listener);
+  }
+
+  /** 選択があるか。 */
+  hasSelection(): boolean {
+    return this.selection.range() !== undefined;
+  }
+
+  /**
+   * 選択範囲。位置は、スクロールバックの一番古い行を 0 とした行と列で、`end` は含まない
+   * （代替画面では画面の 0 行目が 0）。選択が無ければ `undefined`。
+   */
+  getSelectionRange(): SelectionRange | undefined {
+    return this.selection.range();
+  }
+
+  /**
+   * 選択した字。折り返しでつながった行は改行を入れずにつなぎ、行末の空のセルは捨てる。
+   * 選択が無ければ空文字列。
+   */
+  getSelection(): string {
+    const r = this.selection.range();
+    if (!r) return "";
+    return this.core.selection_text(
+      r.start.row,
+      r.start.col,
+      r.end.row,
+      r.end.col,
+    );
+  }
+
+  /** 全部（スクロールバックも）を選ぶ。 */
+  selectAll(): void {
+    this.selection.selectAll();
+    this.syncSelection();
+  }
+
+  /** 選択を消す。 */
+  clearSelection(): void {
+    this.selection.clear();
+    this.syncSelection();
+  }
+
+  /**
+   * 選択した字をクリップボードのデータに入れる（`copy` イベントの `clipboardData` を渡す）。
+   * 選択が無ければ何もせず `false`。`open` した要素は、自分で `copy` イベントを受けて
+   * これを呼ぶ（xterm.js と同じ）ので、ふつうは呼ばなくてよい。
+   */
+  copySelection(data: { setData(format: string, data: string): void }): boolean {
+    if (!this.hasSelection()) return false;
+    data.setData("text/plain", this.getSelection());
+    return true;
+  }
+
+  /** 選択範囲が変わっていたら、描き直して、聞き手に知らせる。書き込みのあとにも呼ぶ。 */
+  private syncSelection(): void {
+    if (this.disposed) return;
+    const trimmed = this.core.scrollback_trimmed();
+    const alt = this.core.is_alt_screen();
+    // 主画面と代替画面は別の行の並びなので、切り替わったら選択は消す
+    if (alt !== this.lastAlt) this.selection.clear();
+    this.lastAlt = alt;
+    const moved = trimmed !== this.lastTrimmed;
+    this.lastTrimmed = trimmed;
+    const r = this.selection.range();
+    const key = r
+      ? `${r.start.row}:${r.start.col}-${r.end.row}:${r.end.col}`
+      : "";
+    if (key === this.lastSelectionKey && !(moved && r)) return;
+    this.lastSelectionKey = key;
+    this.renderer?.invalidate();
+    for (const l of [...this.selectionListeners]) this.guard(l);
+  }
+
+  /** 表示位置を考えた、いま見えている `y` 行目の選択範囲 `[開始の列, 終わりの列)`（描画が使う）。 */
+  selectionSpan(y: number): [number, number] | undefined {
+    const r = this.selection.range();
+    if (!r) return undefined;
+    const row = this.viewportY + y;
+    if (row < r.start.row || row > r.end.row) return undefined;
+    const c0 = row === r.start.row ? r.start.col : 0;
+    const c1 = row === r.end.row ? r.end.col : this.cols;
+    return c1 > c0 ? [c0, c1] : undefined;
+  }
+
+  // ---- マウス
+
+  /** マウスの報告が有効か（アプリが `CSI ? 1000 h` などで頼んだ）。 */
+  get mouseReporting(): boolean {
+    return this.core.mouse_reporting();
+  }
+
+  /**
+   * ポインターのイベントを渡す。`open` した要素は、自分で DOM のイベントを受けて、これを呼ぶ。
+   *
+   * - マウスの報告が有効なら、押した・離した・動かした（ボタンを押したまま、または何も押さずに。
+   *   モードによる）を PTY へ送るバイト列にして、`onData` の出口から出す。Shift を押して押した
+   *   ときは報告せず、選択になる（xterm.js と同じ）。
+   * - そうでなければ、左ボタンのドラッグで範囲、ダブルクリックで単語、トリプルクリックで行を選ぶ。
+   *   Shift を押してクリックすると、いまの選択を広げる。
+   *
+   * 押してから離すまでは、押したときに決めた側が受け持つ。受け持った（ブラウザーの既定の動きを
+   * 止めてよい）ときは `true`。
+   */
+  handleMouse(ev: MouseInput): boolean {
+    if (this.disposed) return false;
+    const col = clamp(Math.trunc(ev.col), 0, this.cols - 1);
+    const row = clamp(Math.trunc(ev.row), 0, this.rows - 1);
+    const shift = ev.shiftKey === true;
+    const report = (button: number, action: number): boolean =>
+      this.core.report_mouse(
+        button,
+        action,
+        col,
+        row,
+        Math.max(0, Math.floor(ev.x ?? 0)),
+        Math.max(0, Math.floor(ev.y ?? 0)),
+        (shift ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
+      );
+    const flushReport = (sent: boolean) => {
+      if (sent) this.flush();
+    };
+
+    if (ev.type === "down") {
+      if (this.mouseOwner) return true;
+      if (this.core.mouse_reporting() && !shift) {
+        const button = domButton(ev.button);
+        this.mouseOwner = "report";
+        this.reportButton = button;
+        flushReport(report(button, 0));
+        return true;
+      }
+      if (ev.button !== 0) return false;
+      this.mouseOwner = "select";
+      const at = { row: this.viewportY + row, col };
+      if (shift && this.selection.range()) {
+        this.selection.extendSelection(at);
+      } else {
+        const n = ((Math.max(1, ev.clickCount ?? 1) - 1) % 3) + 1;
+        this.selection.start(n === 1 ? "cell" : n === 2 ? "word" : "line", at);
+      }
+      this.syncSelection();
+      return true;
+    }
+
+    if (ev.type === "move") {
+      if (this.mouseOwner === "report") {
+        flushReport(report(this.reportButton, 2));
+        return true;
+      }
+      if (this.mouseOwner === "select") {
+        this.selection.extend({ row: this.viewportY + row, col });
+        this.syncSelection();
+        return true;
+      }
+      if (this.core.mouse_reporting() && !shift) {
+        flushReport(report(3, 2));
+        return true;
+      }
+      return false;
+    }
+
+    // up
+    const owner = this.mouseOwner;
+    if (!owner) return false;
+    this.mouseOwner = undefined;
+    if (owner === "report") flushReport(report(this.reportButton, 1));
+    return true;
+  }
+
+  /**
+   * ホイールのイベントを渡す。`open` した要素は、自分で DOM のイベントを受けて、これを呼ぶ。
+   *
+   * - マウスの報告が有効なら、ホイールとして報告する（1 回の `wheel` に 1 つ）。
+   * - 代替画面でマウスの報告が無効なら、動かした行の数だけ上下の矢印キーを送る
+   *   （アプリケーションカーソルキーなら `ESC O A`、そうでなければ `ESC [ A`）。
+   * - 通常の画面なら、表示位置を動かす。
+   *
+   * 縦に回さないとき（`deltaY` が 0 か Shift つき）は何もしない。ブラウザーの既定の動きを
+   * 止めてよいときは `true`。
+   */
+  handleWheel(ev: WheelInput): boolean {
+    if (this.disposed || ev.deltaY === 0) return false;
+    const up = ev.deltaY < 0;
+    if (this.core.mouse_reporting()) {
+      const col = clamp(Math.trunc(ev.col ?? 0), 0, this.cols - 1);
+      const row = clamp(Math.trunc(ev.row ?? 0), 0, this.rows - 1);
+      const sent = this.core.report_mouse(
+        up ? 6 : 7,
+        0,
+        col,
+        row,
+        Math.max(0, Math.floor(ev.x ?? 0)),
+        Math.max(0, Math.floor(ev.y ?? 0)),
+        (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
+      );
+      if (sent) this.flush();
+      return true;
+    }
+    const lines = this.wheelLines(ev);
+    if (this.core.is_alt_screen()) {
+      if (lines === 0) return false;
+      const key = up ? "A" : "B";
+      const seq = (this.core.application_cursor_keys() ? "\x1bO" : "\x1b[") + key;
+      this.input(seq.repeat(Math.abs(lines)));
+      return true;
+    }
+    if (this.scrollbackLength === 0) return false;
+    if (lines !== 0) this.scrollLines(lines);
+    return true;
+  }
+
+  /** ホイールが動かす行の数（上が負）。Shift つきは 0。xterm.js の `getLinesScrolled` と同じ式。 */
+  private wheelLines(ev: WheelInput): number {
+    if (ev.shiftKey) return 0;
+    let amount = ev.deltaY;
+    if (ev.deltaMode === 0) {
+      // ピクセル: 行の高さで割り、端数は次に回す
+      const h = this.renderer?.cellSize.height || 1;
+      this.wheelPartial += amount / h;
+      amount = Math.trunc(this.wheelPartial);
+      this.wheelPartial -= amount;
+    } else if (ev.deltaMode === 2) {
+      amount *= this.rows;
+    }
+    return Math.trunc(amount);
+  }
+
+  /** DOM のマウスのイベントを `MouseInput` にする。 */
+  private pointerInput(
+    canvas: HTMLCanvasElement,
+    e: MouseEvent,
+    type: MouseInput["type"],
+  ): MouseInput & { outside: -1 | 0 | 1 } {
+    const rect = canvas.getBoundingClientRect();
+    const cell = this.renderer?.cellSize ?? { width: 1, height: 1 };
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    return {
+      type,
+      button: e.button,
+      col: Math.floor(x / cell.width),
+      row: Math.floor(y / cell.height),
+      x,
+      y,
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      ctrlKey: e.ctrlKey,
+      clickCount: e.detail,
+      outside: y < 0 ? -1 : y >= this.rows * cell.height ? 1 : 0,
+    };
+  }
+
+  /** 選択中に画面の外へ出たとき、その向きにスクロールし続ける。`move` を渡し続け、`stop` で止める。 */
+  private autoScroller(canvas: HTMLCanvasElement): {
+    move(e: MouseEvent): void;
+    stop(): void;
+  } {
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let last: MouseEvent | undefined;
+    const stop = () => {
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
+    };
+    return {
+      stop,
+      move: (e) => {
+        last = e;
+        const outside = this.pointerInput(canvas, e, "move").outside;
+        if (this.mouseOwner !== "select" || outside === 0) return stop();
+        timer ??= setInterval(() => {
+          const i = last && this.pointerInput(canvas, last, "move");
+          if (!i || this.mouseOwner !== "select" || i.outside === 0) return stop();
+          this.scrollLines(i.outside);
+          this.handleMouse(i);
+        }, 50);
+      },
+    };
+  }
+
+  /** 押す・動かす・離すを受ける。戻り値は後始末。 */
+  private bindPointer(canvas: HTMLCanvasElement): () => void {
+    const doc = canvas.ownerDocument;
+    const auto = this.autoScroller(canvas);
+    const onMove = (e: MouseEvent) => {
+      this.handleMouse(this.pointerInput(canvas, e, "move"));
+      auto.move(e);
+    };
+    const onUp = (e: MouseEvent) => {
+      auto.stop();
+      doc.removeEventListener("mousemove", onMove);
+      doc.removeEventListener("mouseup", onUp);
+      this.handleMouse(this.pointerInput(canvas, e, "up"));
+    };
+    const onDown = (e: MouseEvent) => {
+      if (this.handleMouse(this.pointerInput(canvas, e, "down"))) {
+        // ブラウザーの既定の選択やドラッグを止め、代わりにフォーカスを当てる
+        e.preventDefault();
+        this.focus();
+        doc.addEventListener("mousemove", onMove);
+        doc.addEventListener("mouseup", onUp);
+      }
+    };
+    // ボタンを押していない動きは、canvas の上のものだけ報告する
+    const onHover = (e: MouseEvent) => {
+      if (!this.mouseOwner) this.handleMouse(this.pointerInput(canvas, e, "move"));
+    };
+    canvas.addEventListener("mousedown", onDown);
+    canvas.addEventListener("mousemove", onHover);
+    return () => {
+      auto.stop();
+      canvas.removeEventListener("mousedown", onDown);
+      canvas.removeEventListener("mousemove", onHover);
+      doc.removeEventListener("mousemove", onMove);
+      doc.removeEventListener("mouseup", onUp);
+    };
+  }
+
+  /** ホイールを受ける。戻り値は後始末。 */
+  private bindWheel(el: HTMLElement, canvas: HTMLCanvasElement): () => void {
+    const onWheel = (e: WheelEvent) => {
+      const i = this.pointerInput(canvas, e, "move");
+      const consumed = this.handleWheel({
+        deltaY: e.deltaY,
+        deltaMode: e.deltaMode,
+        col: i.col,
+        row: i.row,
+        x: i.x,
+        y: i.y,
+        shiftKey: e.shiftKey,
+        altKey: e.altKey,
+        ctrlKey: e.ctrlKey,
+      });
+      if (consumed) e.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }
+
+  /**
+   * `copy` を受ける。ブラウザーは `copy` を、編集できる要素か選択の始点か `body` に送り、
+   * 欄の要素には送らないことがあるので、document で受けて、フォーカスが欄の中にあるときだけ扱う
+   * （別の入力欄でのコピーは邪魔しない）。戻り値は後始末。
+   */
+  private bindCopy(el: HTMLElement): () => void {
+    const doc = el.ownerDocument;
+    const onCopy = (e: ClipboardEvent) => {
+      const active = doc.activeElement;
+      if (!active || !el.contains(active)) return;
+      if (e.clipboardData && this.copySelection(e.clipboardData)) {
+        e.preventDefault();
+      }
+    };
+    doc.addEventListener("copy", onCopy);
+    return () => doc.removeEventListener("copy", onCopy);
+  }
+
   /** 後始末をする。書き込み待ちのデータは捨てる（`done` は呼ばない）。 */
   dispose(): void {
     if (this.disposed) return;
@@ -904,6 +1382,7 @@ export class Terminal {
     this.renderer = undefined;
     this.scrollbar = undefined;
     this.scrollListeners.clear();
+    this.selectionListeners.clear();
     this.cellSizeListeners.clear();
     this.dataListeners.clear();
     this.titleListeners.clear();
@@ -911,6 +1390,15 @@ export class Terminal {
     this.oscHandlers.clear();
     this.wasm.free();
   }
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
+
+/** DOM の `MouseEvent.button` を、WASM のボタンの番号にする。 */
+function domButton(b: number): number {
+  return b === 3 ? 4 : b === 4 ? 5 : b >= 0 && b <= 2 ? b : 3;
 }
 
 function addListener<T>(set: Set<T>, listener: T): Disposable {

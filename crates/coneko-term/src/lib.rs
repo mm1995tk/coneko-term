@@ -5,6 +5,10 @@ pub mod screen;
 
 pub mod parser;
 
+pub mod mouse;
+
+pub mod selection;
+
 pub mod terminal;
 
 pub use terminal::{Event, Terminal};
