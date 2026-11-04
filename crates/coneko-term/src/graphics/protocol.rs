@@ -1,5 +1,6 @@
 //! APC `G...` の読み取りと、命令の実行。
 
+use super::animation::{self, FrameKeys};
 use super::place::{self, Effect, PlaceKeys};
 use super::{Graphics, Image, ImageFormat};
 
@@ -27,6 +28,8 @@ struct Command {
     quiet: u32,
     /// `a=T` の置き方。
     place: PlaceKeys,
+    /// `a=f` のキー。
+    frame: FrameKeys,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +38,8 @@ enum Action {
     /// `a=T`: 送って置く。
     TransmitPlace,
     Query,
+    /// `a=f`: アニメーションのコマ。
+    Frame,
 }
 
 pub(super) type Fail = (&'static str, &'static str);
@@ -93,6 +98,7 @@ fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)>
     let fail = |m: Fail| (reply, m);
     let action = match last(keys, b'a') {
         None | Some(b"t") => Action::Transmit,
+        Some(b"f") => Action::Frame,
         Some(b"T") => Action::TransmitPlace,
         Some(b"q") => Action::Query,
         // 知らない動作は捨てる（a=p と a=d は呼ぶ前に分けてある）。
@@ -130,6 +136,11 @@ fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)>
     } else {
         PlaceKeys::default()
     };
+    let frame = if action == Action::Frame {
+        animation::parse_frame_keys(keys).map_err(fail)?
+    } else {
+        FrameKeys::default()
+    };
     Ok(Some(Command {
         action,
         format,
@@ -140,6 +151,7 @@ fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)>
         number: reply.number,
         quiet: reply.quiet,
         place,
+        frame,
     }))
 }
 
@@ -269,6 +281,14 @@ impl Graphics {
                 self.delete_command(&keys);
                 return;
             }
+            Some(b"a") => {
+                self.animate_command(&keys, out);
+                return;
+            }
+            Some(b"c") => {
+                self.compose_command(&keys, out);
+                return;
+            }
             _ => {}
         }
 
@@ -319,6 +339,19 @@ impl Graphics {
 
     fn finish(&mut self, cmd: Command, b64: &[u8], out: &mut Vec<u8>) {
         let reply = cmd.reply();
+        if cmd.action == Action::Frame {
+            let frame = cmd.frame;
+            let result = match self.build(cmd, 0, b64) {
+                Ok(Some(data)) => self.add_frame(&reply, frame, data),
+                Ok(None) => return,
+                Err(f) => Err((0, f)),
+            };
+            match result {
+                Ok(id) => reply.send(id, Ok(()), out),
+                Err((id, f)) => reply.send(id, Err(f), out),
+            }
+            return;
+        }
         let place = cmd.action == Action::TransmitPlace;
         let place_keys = cmd.place;
         let assigned = if cmd.id == 0 && cmd.action == Action::Transmit {
@@ -411,6 +444,7 @@ impl Graphics {
             height,
             data,
             serial: 0,
+            animation: Default::default(),
         }))
     }
 }

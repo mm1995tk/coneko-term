@@ -706,3 +706,368 @@ fn native_size_is_only_without_c_and_r() {
         .collect();
     assert_eq!(native, [true, false, false, false]);
 }
+
+// --- アニメーション ---
+
+/// 2x2 の RGBA の画像 `id`（根）を送る。
+fn anim_root(t: &mut Terminal, id: u32) {
+    apc(t, &format!("a=t,f=32,s=2,v=2,i={id};{}", b64(&[0u8; 16])));
+    assert_eq!(reply(t), ok(&format!("i={id}")));
+}
+
+/// 画素 1 つ（RGBA）のコマを送る。
+fn frame(t: &mut Terminal, keys: &str, px: [u8; 4]) -> String {
+    apc(t, &format!("a=f,f=32,s=1,v=1,{keys};{}", b64(&px)));
+    reply(t)
+}
+
+#[test]
+fn frame_is_added_with_default_gap() {
+    let mut t = Terminal::new(5, 20);
+    anim_root(&mut t, 1);
+    assert_eq!(frame(&mut t, "i=1", [1, 2, 3, 4]), ok("i=1"));
+    assert_eq!(frame(&mut t, "i=1,z=100", [5, 6, 7, 8]), ok("i=1"));
+    let a = &t.image(1).unwrap().animation;
+    assert_eq!(a.frame_count(), 3);
+    // 根の既定は 0、新しいコマの既定は 40。
+    assert_eq!(a.gaps, vec![0, DEFAULT_GAP, 100]);
+    assert_eq!(a.ops.len(), 2);
+    match &a.ops[0] {
+        FrameOp::Load {
+            target,
+            base,
+            x,
+            y,
+            width,
+            height,
+            overwrite,
+            data,
+            ..
+        } => {
+            assert_eq!((*target, *x, *y, *width, *height), (2, 0, 0, 1, 1));
+            assert_eq!(*base, FrameBase::Color(0));
+            assert!(!overwrite);
+            assert_eq!(data, &vec![1, 2, 3, 4]);
+        }
+        op => panic!("{op:?}"),
+    }
+}
+
+#[test]
+fn frame_base_position_and_mode() {
+    let mut t = Terminal::new(5, 20);
+    anim_root(&mut t, 1);
+    // 仕様の例: 四角の位置は x・y、下地は c（前のコマ）か Y（1 色）、X=1 は置き換え。
+    assert_eq!(
+        frame(&mut t, "i=1,x=1,y=1,c=1,X=1", [9, 9, 9, 9]),
+        ok("i=1")
+    );
+    assert_eq!(frame(&mut t, "i=1,Y=4278190335", [0; 4]), ok("i=1"));
+    let ops = &t.image(1).unwrap().animation.ops;
+    assert!(matches!(
+        ops[0],
+        FrameOp::Load {
+            target: 2,
+            base: FrameBase::Frame(1),
+            x: 1,
+            y: 1,
+            overwrite: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        ops[1],
+        FrameOp::Load {
+            target: 3,
+            base: FrameBase::Color(0xff00_00ff),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn frame_edit_keeps_count_and_sets_gap() {
+    let mut t = Terminal::new(5, 20);
+    anim_root(&mut t, 1);
+    frame(&mut t, "i=1", [0; 4]);
+    assert_eq!(frame(&mut t, "i=1,r=2,z=77", [1; 4]), ok("i=1"));
+    // z=0 は指定なしと同じ。
+    assert_eq!(frame(&mut t, "i=1,r=2,z=0", [2; 4]), ok("i=1"));
+    let a = &t.image(1).unwrap().animation;
+    assert_eq!(a.frame_count(), 2);
+    assert_eq!(a.gaps, vec![0, 77]);
+    assert!(matches!(
+        a.ops[1],
+        FrameOp::Load {
+            target: 2,
+            base: FrameBase::Edit,
+            ..
+        }
+    ));
+    // 根も編集できる。
+    assert_eq!(frame(&mut t, "i=1,r=1", [3; 4]), ok("i=1"));
+}
+
+#[test]
+fn frame_errors() {
+    let mut t = Terminal::new(5, 20);
+    // 画像が無い。
+    assert!(frame(&mut t, "i=9", [0; 4]).contains("ENOENT"));
+    anim_root(&mut t, 1);
+    // 無いコマを下地・編集に。
+    assert!(frame(&mut t, "i=1,c=5", [0; 4]).contains("ENOENT"));
+    assert!(frame(&mut t, "i=1,r=5", [0; 4]).contains("ENOENT"));
+    // 画像からはみ出す。
+    assert!(frame(&mut t, "i=1,x=2", [0; 4]).contains("EINVAL"));
+    assert_eq!(t.image(1).unwrap().animation.frame_count(), 1);
+    // i も I も無い命令は返事をしない。
+    assert_eq!(frame(&mut t, "z=5", [0; 4]), "");
+}
+
+#[test]
+fn frame_by_number_and_chunked() {
+    let mut t = Terminal::new(5, 20);
+    apc(&mut t, &format!("a=t,f=32,s=2,v=2,I=6;{}", b64(&[0; 16])));
+    let id = t.image_by_number(6).unwrap().id;
+    let want = format!("\x1b_Gi={id},I=6;OK\x1b\\");
+    assert_eq!(reply(&mut t), want);
+    let data = b64(&[1, 2, 3, 4]);
+    apc(&mut t, &format!("a=f,f=32,s=1,v=1,I=6,m=1;{}", &data[..4]));
+    assert_eq!(reply(&mut t), "");
+    apc(&mut t, &format!("m=0;{}", &data[4..]));
+    assert_eq!(reply(&mut t), want);
+    assert_eq!(t.image(id).unwrap().animation.frame_count(), 2);
+}
+
+fn three_frames(t: &mut Terminal) {
+    anim_root(t, 1);
+    frame(t, "i=1,z=10", [0; 4]);
+    frame(t, "i=1,z=20", [0; 4]);
+    assert_eq!(t.image(1).unwrap().animation.frame_count(), 3);
+}
+
+#[test]
+fn control_sets_gap_current_and_state() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    // 仕様の例: a=a,i=7,r=3,z=48 はコマ 3 の表示時間。
+    apc(&mut t, "a=a,i=1,r=3,z=48");
+    assert_eq!(reply(&mut t), ok("i=1"));
+    // 根の表示時間も、ここで決める。
+    apc(&mut t, "a=a,i=1,r=1,z=5");
+    reply(&mut t);
+    // 仕様の例: a=a,i=3,c=7 はコマ 7 をいまのコマにする（ここでは 2）。
+    apc(&mut t, "a=a,i=1,c=2");
+    reply(&mut t);
+    let a = &t.image(1).unwrap().animation;
+    assert_eq!(a.gaps, vec![5, 10, 48]);
+    assert_eq!(a.current, 2);
+    assert_eq!(a.state, PlayState::Stopped);
+    for (s, want) in [
+        (3, PlayState::Running),
+        (2, PlayState::Loading),
+        (1, PlayState::Stopped),
+    ] {
+        apc(&mut t, &format!("a=a,i=1,s={s}"));
+        reply(&mut t);
+        assert_eq!(t.image(1).unwrap().animation.state, want);
+    }
+    // 知らない s は変えない。
+    apc(&mut t, "a=a,i=1,s=3");
+    apc(&mut t, "a=a,i=1,s=9");
+    reply(&mut t);
+    assert_eq!(t.image(1).unwrap().animation.state, PlayState::Running);
+}
+
+#[test]
+fn control_errors_change_nothing() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    apc(&mut t, "a=a,i=1,c=9,s=3");
+    assert!(reply(&mut t).contains("ENOENT"));
+    apc(&mut t, "a=a,i=1,r=9,z=5,s=3");
+    assert!(reply(&mut t).contains("ENOENT"));
+    assert_eq!(t.image(1).unwrap().animation.state, PlayState::Stopped);
+    apc(&mut t, "a=a,i=8,s=3");
+    assert!(reply(&mut t).contains("ENOENT"));
+}
+
+fn gaps_after(t: &mut Terminal, steps: usize) -> Vec<u32> {
+    (0..steps)
+        .map(|_| {
+            t.animation_step(1);
+            t.image(1).unwrap().animation.current
+        })
+        .collect()
+}
+
+#[test]
+fn step_loops_forever_by_default() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    // 止まっているうちは進まない。
+    assert!(!t.animation_step(1));
+    assert_eq!(t.image(1).unwrap().animation.current, 1);
+    apc(&mut t, "a=a,i=1,s=3");
+    assert_eq!(gaps_after(&mut t, 7), vec![2, 3, 1, 2, 3, 1, 2]);
+}
+
+#[test]
+fn step_counts_loops() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    // v=2 は 2 - 1 = 1 回。1 周したら止まる。
+    apc(&mut t, "a=a,i=1,s=3,v=2");
+    assert_eq!(gaps_after(&mut t, 4), vec![2, 3, 3, 3]);
+    assert_eq!(t.image(1).unwrap().animation.state, PlayState::Stopped);
+    // v=3 は 2 回。
+    apc(&mut t, "a=a,i=1,c=1,s=3,v=3");
+    assert_eq!(gaps_after(&mut t, 6), vec![2, 3, 1, 2, 3, 3]);
+    assert_eq!(t.image(1).unwrap().animation.state, PlayState::Stopped);
+    // v=1 は回し続ける。止めると回した数は戻る。
+    apc(&mut t, "a=a,i=1,c=1,s=3,v=1");
+    assert_eq!(gaps_after(&mut t, 5), vec![2, 3, 1, 2, 3]);
+    apc(&mut t, "a=a,i=1,s=1");
+    assert_eq!(t.image(1).unwrap().animation.played, 0);
+}
+
+#[test]
+fn step_skips_gapless_frames() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    // コマ 2 は負の表示時間: 見せずに飛ばす。
+    apc(&mut t, "a=a,i=1,r=2,z=-1");
+    apc(&mut t, "a=a,i=1,s=3");
+    assert_eq!(gaps_after(&mut t, 4), vec![3, 1, 3, 1]);
+    // 全部が負でも止まらない（進まないだけ）。
+    apc(&mut t, "a=a,i=1,r=1,z=-1");
+    apc(&mut t, "a=a,i=1,r=3,z=-1");
+    assert!(!t.animation_step(1));
+}
+
+#[test]
+fn loading_mode_waits_for_new_frames() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    apc(&mut t, "a=a,i=1,s=2,c=3");
+    assert!(!t.animation_step(1));
+    assert_eq!(t.image(1).unwrap().animation.current, 3);
+    // 次のコマが届けば進む。
+    frame(&mut t, "i=1", [0; 4]);
+    assert!(t.animation_step(1));
+    assert_eq!(t.image(1).unwrap().animation.current, 4);
+    assert!(!t.animation_step(1));
+    assert!(!t.animation_step(99));
+}
+
+#[test]
+fn compose_checks_and_records() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    // 仕様の例の形: r（元）の X・Y・w・h の四角を、c（先）の x・y へ。
+    apc(&mut t, "a=c,i=1,r=2,c=3,w=1,h=1,X=1,Y=1,x=0,y=1");
+    assert_eq!(reply(&mut t), ok("i=1"));
+    apc(&mut t, "a=c,i=1,r=2,c=3,C=1");
+    assert_eq!(reply(&mut t), ok("i=1"));
+    let a = &t.image(1).unwrap().animation;
+    assert_eq!(a.ops.len(), 4);
+    assert_eq!(
+        a.ops[2],
+        FrameOp::Compose {
+            src: 2,
+            dst: 3,
+            src_x: 1,
+            src_y: 1,
+            dst_x: 0,
+            dst_y: 1,
+            width: 1,
+            height: 1,
+            overwrite: false,
+        }
+    );
+    // 大きさを省くと画像いっぱい。置き換えは C=1。
+    assert!(matches!(
+        a.ops[3],
+        FrameOp::Compose {
+            width: 2,
+            height: 2,
+            overwrite: true,
+            ..
+        }
+    ));
+    // コマが無い。
+    apc(&mut t, "a=c,i=1,r=2,c=9");
+    assert!(reply(&mut t).contains("ENOENT"));
+    apc(&mut t, "a=c,i=1,r=0,c=2");
+    assert!(reply(&mut t).contains("ENOENT"));
+    apc(&mut t, "a=c,i=7,r=2,c=3");
+    assert!(reply(&mut t).contains("ENOENT"));
+    // 四角が画像の外（先が外、元が外）。
+    apc(&mut t, "a=c,i=1,r=2,c=3,w=2,h=2,x=1");
+    assert!(reply(&mut t).contains("EINVAL"));
+    apc(&mut t, "a=c,i=1,r=2,c=3,w=2,h=2,X=1");
+    assert!(reply(&mut t).contains("EINVAL"));
+    // 同じコマで四角が重なる。重ならなければよい。
+    apc(&mut t, "a=c,i=1,r=2,c=2,w=1,h=1,X=0,x=0");
+    assert!(reply(&mut t).contains("EINVAL"));
+    apc(&mut t, "a=c,i=1,r=2,c=2,w=1,h=1,x=1");
+    assert_eq!(reply(&mut t), ok("i=1"));
+    assert_eq!(t.image(1).unwrap().animation.ops.len(), 5);
+}
+
+#[test]
+fn frame_data_counts_toward_the_quota() {
+    let mut t = Terminal::new(5, 20);
+    anim_root(&mut t, 1);
+    let root = t.image_bytes();
+    assert_eq!(root, 16);
+    frame(&mut t, "i=1", [0; 4]);
+    assert!(t.image_bytes() > root + 4);
+    assert_eq!(t.image_bytes(), t.image(1).unwrap().stored_bytes());
+    // 画像を捨てればコマのぶんも戻る。
+    apc(&mut t, "a=d,d=I,i=1");
+    assert_eq!(t.image_bytes(), 0);
+
+    // 古い画像から捨てて、コマの場所を作る。
+    t.set_image_quota(200);
+    anim_root(&mut t, 2);
+    anim_root(&mut t, 3);
+    for _ in 0..2 {
+        assert_eq!(frame(&mut t, "i=3", [0; 4]), ok("i=3"));
+    }
+    assert!(t.image_bytes() <= 200);
+    // 自分以外が全部捨てられても入らなければ、EFBIG。
+    t.set_image_quota(160);
+    assert!(frame(&mut t, "i=3", [0; 4]).contains("EFBIG"));
+    assert!(t.image(3).is_some());
+}
+
+#[test]
+fn compose_counts_toward_the_quota() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    let before = t.image_bytes();
+    apc(&mut t, "a=c,i=1,r=2,c=3,w=1,h=1");
+    reply(&mut t);
+    assert!(t.image_bytes() > before);
+    assert_eq!(t.image_bytes(), t.image(1).unwrap().stored_bytes());
+}
+
+#[test]
+fn frames_are_limited() {
+    let mut t = Terminal::new(5, 20);
+    anim_root(&mut t, 1);
+    for _ in 1..MAX_FRAMES {
+        assert_eq!(frame(&mut t, "i=1", [0; 4]), ok("i=1"));
+    }
+    assert!(frame(&mut t, "i=1", [0; 4]).contains("ENOSPC"));
+    assert_eq!(t.image(1).unwrap().animation.frame_count(), MAX_FRAMES);
+}
+
+#[test]
+fn resending_the_image_drops_its_animation() {
+    let mut t = Terminal::new(5, 20);
+    three_frames(&mut t);
+    anim_root(&mut t, 1);
+    assert_eq!(t.image(1).unwrap().animation.frame_count(), 1);
+}

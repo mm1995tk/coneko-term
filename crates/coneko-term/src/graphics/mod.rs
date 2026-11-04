@@ -10,8 +10,8 @@
 //!   coneko-term は OS のファイルにも共有メモリにも触らない。
 //! - 置く（`a=T`・`a=p`）と消す（`a=d`）は、次の「置く」「消す」の節。
 //! - `U=1` の配置は画面に置かず、仮の配置として持つ。字（U+10EEEE）が引く。次の「Unicode placeholder」の節。
-//! - アニメーション、親子の配置（`P=`・`Q=`）は扱わない。
-//!   扱わない動作は捨てる。
+//! - アニメーション（`a=f`・`a=a`・`a=c`）は次の「アニメーション」の節。
+//! - 親子の配置（`P=`・`Q=`）は扱わない。扱わない動作は捨てる。
 //!
 //! # 置く（配置）
 //!
@@ -70,11 +70,13 @@
 //!
 //! 返事は [`crate::Terminal::take_output`] の出口に入る。`i=` も `I=` も無い命令には返事をしない。
 
+mod animation;
 mod diacritics;
 mod place;
 mod placeholder;
 mod protocol;
 
+pub use animation::{Animation, FrameBase, FrameOp, PlayState, DEFAULT_GAP, MAX_FRAMES, MAX_OPS};
 pub(crate) use place::{DeleteSpec, DeleteTarget, Effect};
 pub(crate) use placeholder::derive as derive_placeholders;
 pub use placeholder::PLACEHOLDER;
@@ -115,6 +117,15 @@ pub struct Image {
     /// 持った順に増える通し番号。同じ ID で送り直すと変わる。描く側が、読み解いた画像を
     /// 使い回してよいか（同じ ID で別の画像になっていないか）を確かめるのに使う。
     pub serial: u64,
+    /// アニメーション（コマの操作と再生の状態）。コマを足していなければ空で、止まっている。
+    pub animation: Animation,
+}
+
+impl Image {
+    /// 上限に数えるバイト数。画像のデータと、コマの操作。
+    pub fn stored_bytes(&self) -> usize {
+        self.data.len() + self.animation.bytes()
+    }
 }
 
 /// 持っている画像。
@@ -283,7 +294,7 @@ impl Graphics {
         while self.bytes > limit {
             match self.images.pop_front() {
                 Some(img) => {
-                    self.bytes -= img.data.len();
+                    self.bytes -= img.stored_bytes();
                     self.removed.push(img.id);
                     self.virtuals.retain(|v| v.image_id != img.id);
                 }
@@ -292,11 +303,25 @@ impl Graphics {
         }
     }
 
+    /// `keep` 以外の画像を古い順に、合計が `limit` 以下になるまで捨てる。
+    pub(super) fn evict_keeping(&mut self, limit: usize, keep: u32) {
+        while self.bytes > limit {
+            let Some(pos) = self.images.iter().position(|i| i.id != keep) else {
+                break;
+            };
+            if let Some(img) = self.images.remove(pos) {
+                self.bytes -= img.stored_bytes();
+                self.removed.push(img.id);
+                self.virtuals.retain(|v| v.image_id != img.id);
+            }
+        }
+    }
+
     /// `id` の画像があれば捨てる。
     pub(crate) fn remove(&mut self, id: u32) {
         if let Some(pos) = self.images.iter().position(|i| i.id == id) {
             if let Some(img) = self.images.remove(pos) {
-                self.bytes -= img.data.len();
+                self.bytes -= img.stored_bytes();
                 self.removed.push(id);
                 self.virtuals.retain(|v| v.image_id != id);
             }
@@ -306,12 +331,12 @@ impl Graphics {
     /// 画像を入れる。同じ ID の画像は置き換える。上限を超えるなら古いものから捨てる。
     /// 1 つだけで上限を超えるときは入れずに `false`。
     fn insert(&mut self, mut image: Image) -> bool {
-        if image.data.len() > self.quota {
+        if image.stored_bytes() > self.quota {
             return false;
         }
         self.remove(image.id);
-        self.evict_to(self.quota - image.data.len());
-        self.bytes += image.data.len();
+        self.evict_to(self.quota - image.stored_bytes());
+        self.bytes += image.stored_bytes();
         image.serial = self.next_serial;
         self.next_serial += 1;
         self.images.push_back(image);
