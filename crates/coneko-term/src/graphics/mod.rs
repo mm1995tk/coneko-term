@@ -97,6 +97,9 @@ pub struct Image {
     pub height: u32,
     /// base64 を戻したバイト列。圧縮も PNG もそのまま。
     pub data: Vec<u8>,
+    /// 持った順に増える通し番号。同じ ID で送り直すと変わる。描く側が、読み解いた画像を
+    /// 使い回してよいか（同じ ID で別の画像になっていないか）を確かめるのに使う。
+    pub serial: u64,
 }
 
 /// 持っている画像。
@@ -110,6 +113,8 @@ pub(crate) struct Graphics {
     pending: Option<protocol::Pending>,
     /// 次に ID を決めるときの候補。
     next_auto_id: u32,
+    /// 次に画像へ付ける通し番号（[`Image::serial`]）。
+    next_serial: u64,
     /// セルの大きさ（画素。幅, 高さ）。`c`・`r` が無い配置の大きさを決めるのに使う。
     cell_size: (u32, u32),
     /// 捨てた（または送り直して置き換えた）画像の ID。配置を消すために取り出す。
@@ -148,6 +153,9 @@ pub struct Placement {
     pub rows: u32,
     /// 重ねる順（`z=`）。負の値は字の下に描く。
     pub z: i32,
+    /// `c` も `r` も無く、元の部分を拡大も縮小もせず（画素のまま）置くか。そうでなければ、
+    /// `cols` x `rows` のセルいっぱいに引き伸ばして描く。
+    pub native_size: bool,
 }
 
 /// 画面に置いてある配置と、その位置。
@@ -170,6 +178,7 @@ impl Default for Graphics {
             quota: DEFAULT_QUOTA,
             pending: None,
             next_auto_id: AUTO_ID_BASE,
+            next_serial: 1,
             cell_size: DEFAULT_CELL_SIZE,
             removed: Vec::new(),
             effects: Vec::new(),
@@ -253,13 +262,15 @@ impl Graphics {
 
     /// 画像を入れる。同じ ID の画像は置き換える。上限を超えるなら古いものから捨てる。
     /// 1 つだけで上限を超えるときは入れずに `false`。
-    fn insert(&mut self, image: Image) -> bool {
+    fn insert(&mut self, mut image: Image) -> bool {
         if image.data.len() > self.quota {
             return false;
         }
         self.remove(image.id);
         self.evict_to(self.quota - image.data.len());
         self.bytes += image.data.len();
+        image.serial = self.next_serial;
+        self.next_serial += 1;
         self.images.push_back(image);
         true
     }

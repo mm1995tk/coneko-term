@@ -689,7 +689,9 @@ export class Terminal {
 
     const renderer = new CanvasRenderer(canvas, this, this.renderOptions());
     this.renderer = renderer;
+    this.syncCellSize();
     renderer.onCellSizeChange((size) => {
+      this.syncCellSize();
       for (const l of [...this.cellSizeListeners]) l(size);
     });
     this.cleanups.push(() => renderer.dispose());
@@ -973,6 +975,32 @@ export class Terminal {
   /** フォーカスを外す。`open` の前は何もしない。 */
   blur(): void {
     this.textarea?.blur();
+  }
+
+  /** セルの画素の大きさをコアに教える（`c`・`r` が無い画像の置く大きさを決めるのに使う）。 */
+  private syncCellSize(): void {
+    const cell = this.renderer?.deviceCellSize;
+    if (cell) this.core.set_cell_size(cell.width, cell.height);
+  }
+
+  /** 画像の配置の並び（描画が使う）。`PLACEMENT_STRIDE` 個ずつ。 */
+  readPlacements(): Float64Array {
+    return this.core.placements();
+  }
+
+  /** 持っている画像の `[ID, 通し番号]` の並び（描画が使う）。 */
+  imageSerials(): Float64Array {
+    return this.core.image_serials();
+  }
+
+  /** 画像の情報 `[通し番号, 形式, 圧縮, 幅, 高さ]`（描画が使う）。画像が無ければ空。 */
+  imageInfo(id: number): Float64Array {
+    return this.core.image_info(id);
+  }
+
+  /** 画像のバイト列（描画が使う）。 */
+  imageData(id: number): Uint8Array {
+    return this.core.image_data(id);
   }
 
   /** 変わった行（見えている画面の行番号）を返し、「変わった」の印を消す。 */
