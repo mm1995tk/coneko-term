@@ -43,6 +43,7 @@ export {
   type DropDataForm,
   type DropRequest,
   type CursorState,
+  type ExtraCursorState,
   type MouseInput,
   type NotificationSupport,
   type TerminalNotification,

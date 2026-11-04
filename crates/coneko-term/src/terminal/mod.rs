@@ -2,7 +2,7 @@
 //! 画面（[`crate::screen`]）を動かす。
 //!
 //! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、OSC 8（リンク）を
-//! 除いたもの、と kitty の OSC 66（text sizing）。知らないシーケンスは捨てる。
+//! 除いたもの、と、kitty の OSC 66（text sizing）と multiple cursors（`CSI > ... SP q`）。知らないシーケンスは捨てる。
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
@@ -41,6 +41,9 @@ mod kitty_keyboard;
 #[cfg(test)]
 mod mode_tests;
 mod modes;
+mod multi_cursor;
+#[cfg(test)]
+mod multi_cursor_tests;
 mod notification;
 mod sgr;
 #[cfg(test)]
@@ -760,11 +763,16 @@ impl State {
             }
             2 => {
                 self.screen.clear_visible_placements();
+                self.screen.extra_cursors.clear();
                 for y in 0..rows {
                     self.screen.erase_cells(y, 0, cols);
                 }
             }
-            3 => self.screen.clear_scrollback(),
+            3 => {
+                self.screen.extra_cursors.clear();
+                self.screen.clear_scrollback();
+            }
+            22 => self.screen.extra_cursors.clear(),
             _ => {}
         }
     }
@@ -1293,6 +1301,12 @@ impl Perform for State {
         action: u8,
     ) {
         if self.mode_or_query(params, intermediates, marker, action) {
+            return;
+        }
+        if marker == Some(b'>') && intermediates == b" " {
+            if action == b'q' {
+                self.multi_cursor(params);
+            }
             return;
         }
         if marker.is_some() {

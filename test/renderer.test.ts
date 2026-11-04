@@ -418,3 +418,77 @@ test("sized text: a fractional scale shrinks the font and the alignment places i
   );
   t.dispose();
 });
+
+test("renderer: extra cursors are drawn at their cells in their shapes, even when the main cursor is hidden", async () => {
+  const t = new Terminal({ cols: 10, rows: 3 });
+  const { fake, flush } = setup(t);
+  flush();
+  t.setFocused(true);
+  await write(t, "\x1b[?25l");
+  flush();
+  // ブロック: カーソルの色で、そのセルを塗る
+  await write(t, "\x1b[>1;2:2:3 q");
+  flush();
+  assert.ok(
+    fake.calls.some((c) => c[0] === "set fillStyle" && c[1] === "#00ff00"),
+    "block",
+  );
+  assert.ok(
+    fake.calls.some(
+      (c) => c[0] === "fillRect" && c[1] === 18 && c[2] === 16 && c[3] === 9,
+    ),
+    "block at x=2, y=1",
+  );
+  // 縦棒と下線
+  await write(t, "\x1b[>0;4 q\x1b[>2;2:1:1 q\x1b[>3;2:3:2 q");
+  flush();
+  assert.ok(
+    fake.calls.some(
+      (c) => c[0] === "fillRect" && c[1] === 0 && c[2] === 0 && c[3] === 1 && c[4] === 16,
+    ),
+    "bar at the first cell",
+  );
+  assert.ok(
+    fake.calls.some(
+      (c) => c[0] === "fillRect" && c[1] === 9 && c[2] === 47 && c[3] === 9 && c[4] === 1,
+    ),
+    "underline at x=1, y=2",
+  );
+  // 消すと、描き直されて消える
+  await write(t, "\x1b[>0;4 q");
+  flush();
+  assert.ok(
+    !fake.calls.some((c) => c[0] === "fillRect" && c[3] === 1 && c[4] === 16),
+  );
+  t.dispose();
+});
+
+test("renderer: extra cursors use the extra color and follow the main shape", async () => {
+  const t = new Terminal({ cols: 10, rows: 2 });
+  const { fake, flush } = setup(t);
+  flush();
+  t.setFocused(true);
+  await write(t, "\x1b[>40;2:255:0:0 q\x1b[4 q\x1b[>29;2:2:2 q");
+  flush();
+  assert.ok(
+    fake.calls.some((c) => c[0] === "set fillStyle" && c[1] === "#ff0000"),
+    "color",
+  );
+  assert.ok(
+    fake.calls.some(
+      (c) => c[0] === "fillRect" && c[1] === 9 && c[2] === 31 && c[3] === 9 && c[4] === 1,
+    ),
+    "underline, like the main cursor",
+  );
+  // 主のカーソルが縦棒に変わると、追従するカーソルも変わる
+  fake.calls.length = 0;
+  await write(t, "\x1b[6 q");
+  flush();
+  assert.ok(
+    fake.calls.some(
+      (c) => c[0] === "fillRect" && c[1] === 9 && c[2] === 16 && c[3] === 1 && c[4] === 16,
+    ),
+    "bar",
+  );
+  t.dispose();
+});

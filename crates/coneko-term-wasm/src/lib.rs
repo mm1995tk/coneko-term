@@ -847,6 +847,40 @@ impl WasmTerminal {
         ]
     }
 
+    /// 追加のカーソル（kitty の multiple cursors protocol）。`[x, y, 形]` の並び（上の行から、
+    /// 左の列の順）。形は 0 ブロック 1 下線 2 縦棒 3 主のカーソルに従う。
+    pub fn extra_cursors(&self) -> Vec<u32> {
+        use coneko_term::screen::ExtraCursorShape;
+        let mut v = Vec::new();
+        for (x, y, shape) in self.term.screen().extra_cursors.iter() {
+            v.push(x as u32);
+            v.push(y as u32);
+            v.push(match shape {
+                ExtraCursorShape::Block => 0,
+                ExtraCursorShape::Underline => 1,
+                ExtraCursorShape::Bar => 2,
+                _ => 3,
+            });
+        }
+        v
+    }
+
+    /// 追加のカーソルの色の組 `[字の色, カーソルの色]`。色の語は、セルの色と同じ書き方
+    /// （上位 8 ビットが種類: 0 主のカーソルと同じ、1 パレット、2 RGB、3 反転）。
+    pub fn extra_cursor_colors(&self) -> Vec<u32> {
+        use coneko_term::screen::ExtraCursorColor;
+        let word = |c: ExtraCursorColor| match c {
+            ExtraCursorColor::Special => 3 << 24,
+            ExtraCursorColor::Rgb(r, g, b) => {
+                (2 << 24) | u32::from(r) << 16 | u32::from(g) << 8 | u32::from(b)
+            }
+            ExtraCursorColor::Indexed(i) => (1 << 24) | u32::from(i),
+            _ => 0,
+        };
+        let c = &self.term.screen().extra_cursors;
+        vec![word(c.text_color), word(c.cursor_color)]
+    }
+
     /// マウスの報告が有効か。
     pub fn mouse_reporting(&self) -> bool {
         self.term.mouse_reporting()
