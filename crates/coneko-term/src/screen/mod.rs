@@ -450,6 +450,16 @@ impl Screen {
         out
     }
 
+    /// 今の画面の行のセルと、その行（見えている画面の一番上を 0 とし、スクロールバックの中は負）。
+    pub(crate) fn rows_with_index(&self) -> impl Iterator<Item = (i64, &[Cell])> {
+        let b = self.buf();
+        let base = b.scrollback_len() as i64;
+        b.lines
+            .iter()
+            .enumerate()
+            .map(move |(i, l)| (i as i64 - base, l.cells()))
+    }
+
     /// カーソルの行に配置を足す。位置の列は `p.col`。
     pub(crate) fn add_placement(&mut self, p: Placement) {
         let y = self.buf().cursor.y;
