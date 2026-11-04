@@ -31,6 +31,7 @@
 //!
 //! # 画面の状態のうち、ここで持つもの
 //!
+//! 矩形の領域への属性（DECCARA・DECRARA）の範囲の選び方（DECSACE）、
 //! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合。
 
 mod clipboard;
@@ -49,6 +50,9 @@ mod notification;
 mod pointer_shape;
 #[cfg(test)]
 mod pointer_shape_tests;
+mod rect;
+#[cfg(test)]
+mod rect_tests;
 mod sgr;
 #[cfg(test)]
 mod tests;
@@ -233,6 +237,8 @@ struct State {
     gl: usize,
     saved_charsets: Option<([Charset; 4], usize)>,
     last_char: Option<char>,
+    /// DECSACE。真なら矩形の領域（`CSI 2 * x`）、偽なら行の流れに沿った範囲（既定）。
+    rect_extent: bool,
     modes: Modes,
     /// kitty keyboard protocol のフラグの積み重ね。主画面（0）と代替画面（1）で別々。
     keyboard_flags: [KeyboardFlagStack; 2],
@@ -273,6 +279,7 @@ impl Terminal {
                 gl: 0,
                 saved_charsets: None,
                 last_char: None,
+                rect_extent: false,
                 modes: Modes::default(),
                 keyboard_flags: Default::default(),
                 theme: Theme::default(),
@@ -1056,6 +1063,7 @@ impl State {
         self.gl = 0;
         self.saved_charsets = None;
         self.last_char = None;
+        self.rect_extent = false;
         self.modes = Modes::default();
         self.keyboard_flags = Default::default();
         self.graphics.clear();
@@ -1465,6 +1473,20 @@ impl Perform for State {
         if intermediates == b" " {
             if action == b'q' {
                 self.set_cursor_style(raw(params, 0).unwrap_or(0));
+            }
+            return;
+        }
+        if intermediates == b"$" {
+            match action {
+                b'r' => self.deccara(params, false),
+                b't' => self.deccara(params, true),
+                _ => {}
+            }
+            return;
+        }
+        if intermediates == b"*" {
+            if action == b'x' {
+                self.decsace(params);
             }
             return;
         }
