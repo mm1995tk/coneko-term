@@ -278,3 +278,108 @@ test("notifications without a listener do nothing", async () => {
   assert.deepEqual(out, []);
   t.dispose();
 });
+
+const b64 = (s: string | Uint8Array) =>
+  Buffer.from(typeof s === "string" ? s : s).toString("base64");
+
+test("clipboard (OSC 5522): a write becomes one event, the answer goes to onData", async () => {
+  const t = new Terminal();
+  const writes: unknown[] = [];
+  t.onClipboardWrite((w) => writes.push(w));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+
+  await write(
+    t,
+    `\x1b]5522;type=write:id=w1\x1b\\` +
+      `\x1b]5522;type=wdata:mime=${b64("text/plain")};${b64("hel")}\x1b\\` +
+      `\x1b]5522;type=wdata:mime=${b64("text/plain")};${b64("lo")}\x1b\\` +
+      `\x1b]5522;type=wdata:mime=${b64("image/png")};${b64(new Uint8Array([137, 80, 78, 71]))}\x1b\\`,
+  );
+  assert.deepEqual(writes, []);
+  await write(t, "\x1b]5522;type=wdata\x1b\\");
+  assert.deepEqual(writes, [
+    {
+      id: "w1",
+      location: "clipboard",
+      items: [
+        { mime: "text/plain", data: new TextEncoder().encode("hello") },
+        { mime: "image/png", data: new Uint8Array([137, 80, 78, 71]) },
+      ],
+    },
+  ]);
+  assert.deepEqual(out, []);
+  t.replyClipboardWrite("w1");
+  t.replyClipboardWrite("w1", "EPERM");
+  assert.deepEqual(out, [
+    "\x1b]5522;type=write:status=DONE:id=w1\x1b\\",
+    "\x1b]5522;type=write:status=EPERM:id=w1\x1b\\",
+  ]);
+  t.dispose();
+});
+
+test("clipboard (OSC 5522): primary selection and invalid base64", async () => {
+  const t = new Terminal();
+  const writes: { location: string }[] = [];
+  t.onClipboardWrite((w) => writes.push(w));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(
+    t,
+    `\x1b]5522;type=write:loc=primary\x1b\\\x1b]5522;type=wdata\x1b\\` +
+      `\x1b]5522;type=write\x1b\\\x1b]5522;type=wdata:mime=${b64("a/b")};!!!!\x1b\\\x1b]5522;type=wdata\x1b\\`,
+  );
+  assert.deepEqual(writes.map((w) => w.location), ["primary"]);
+  assert.deepEqual(out, ["\x1b]5522;type=write:status=EINVAL\x1b\\"]);
+  t.dispose();
+});
+
+test("clipboard (OSC 5522): read requests and answers", async () => {
+  const t = new Terminal();
+  const reads: unknown[] = [];
+  t.onClipboardRead((r) => reads.push(r));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(
+    t,
+    `\x1b]5522;type=read:id=r1;${b64("text/plain image/png")}\x1b\\` +
+      `\x1b]5522;type=read:loc=primary;${b64(".")}\x1b\\`,
+  );
+  assert.deepEqual(reads, [
+    { id: "r1", location: "clipboard", list: false, mimes: ["text/plain", "image/png"] },
+    { id: "", location: "primary", list: true, mimes: [] },
+  ]);
+  t.replyClipboardReadData("r1", [
+    { mime: "text/plain", data: new TextEncoder().encode("hi") },
+  ]);
+  t.replyClipboardReadTypes("", ["text/plain", "image/png"]);
+  t.replyClipboardReadError("r2", "EPERM");
+  t.replyClipboardReadData("r3", []);
+  assert.deepEqual(out, [
+    `\x1b]5522;type=read:status=OK:id=r1\x1b\\` +
+      `\x1b]5522;type=read:status=DATA:mime=${b64("text/plain")}:id=r1;aGk=\x1b\\` +
+      `\x1b]5522;type=read:status=DONE:id=r1\x1b\\`,
+    `\x1b]5522;type=read:status=OK\x1b\\` +
+      `\x1b]5522;type=read:status=DATA:mime=${b64(".")};${b64("text/plain image/png")}\x1b\\` +
+      `\x1b]5522;type=read:status=DONE\x1b\\`,
+    "\x1b]5522;type=read:status=EPERM:id=r2\x1b\\",
+    "\x1b]5522;type=read:status=OK:id=r3\x1b\\\x1b]5522;type=read:status=DONE:id=r3\x1b\\",
+  ]);
+  t.dispose();
+});
+
+test("clipboard (OSC 5522): without a listener, reads and writes are refused", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(
+    t,
+    `\x1b]5522;type=read:id=r;${b64("text/plain")}\x1b\\` +
+      `\x1b]5522;type=write:id=w\x1b\\\x1b]5522;type=wdata\x1b\\`,
+  );
+  assert.equal(
+    out.join(""),
+    "\x1b]5522;type=read:status=EPERM:id=r\x1b\\\x1b]5522;type=write:status=EPERM:id=w\x1b\\",
+  );
+  t.dispose();
+});

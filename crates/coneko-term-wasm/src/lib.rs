@@ -7,7 +7,10 @@ use coneko_term::mouse::{MouseAction, MouseButton, MouseEvent};
 use coneko_term::screen::cell::{Cell, Color, Content, UnderlineStyle};
 use coneko_term::screen::Line;
 use coneko_term::selection::{self, Pos};
-use coneko_term::terminal::{Notification, NotificationSupport, Theme, When};
+use coneko_term::terminal::{
+    ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest,
+    ClipboardWriteError, Notification, NotificationSupport, Theme, When,
+};
 use coneko_term::{Event, Terminal};
 use wasm_bindgen::prelude::*;
 
@@ -62,15 +65,28 @@ fn underline_code(s: UnderlineStyle) -> u32 {
     }
 }
 
+fn location_code(l: ClipboardLocation) -> u8 {
+    match l {
+        ClipboardLocation::Clipboard => 0,
+        ClipboardLocation::Primary => 1,
+    }
+}
+
 /// ターミナルが外へ知らせること 1 つ。`kind` は 0 が BEL、1 が題名、2 がアイコン名、3 が OSC、
 /// 4 が通知（OSC 99）、5 が通知を閉じる求め、6 が通知の対応の問い合わせ（`p=?`）、
-/// 7 が生きている通知の問い合わせ（`p=alive`）。5 から 7 は `data` が `i=`（UTF-8、無ければ空）。
+/// 7 が生きている通知の問い合わせ（`p=alive`）、8 がクリップボードへの書き込み（OSC 5522）、
+/// 9 がクリップボードの読み取りの頼み。5 から 7 は `data` が `i=`（UTF-8、無ければ空）。8 と 9 は
+/// `data` が `id`（UTF-8、無ければ空）。
 #[wasm_bindgen]
 pub struct WasmEvent {
     kind: u8,
     ident: u32,
     data: Vec<u8>,
     notification: Option<Notification>,
+    clipboard_location: u8,
+    clipboard_list: bool,
+    clipboard_mimes: Vec<String>,
+    clipboard_data: Vec<Vec<u8>>,
 }
 
 impl WasmEvent {
@@ -80,6 +96,10 @@ impl WasmEvent {
             ident,
             data,
             notification: None,
+            clipboard_location: 0,
+            clipboard_list: false,
+            clipboard_mimes: Vec::new(),
+            clipboard_data: Vec::new(),
         }
     }
 
@@ -181,6 +201,25 @@ impl WasmEvent {
     pub fn notification_buttons(&self) -> Vec<String> {
         self.with_notification(|n| n.buttons.clone())
     }
+    /// クリップボードの場所（種類が 8 か 9 のとき）。0 が主のクリップボード、1 が primary selection。
+    #[wasm_bindgen(getter)]
+    pub fn clipboard_location(&self) -> u8 {
+        self.clipboard_location
+    }
+    /// 読み取りの頼みが種類の一覧（`.`）か（種類が 9 のとき）。
+    #[wasm_bindgen(getter)]
+    pub fn clipboard_list(&self) -> bool {
+        self.clipboard_list
+    }
+    /// 書き込みの MIME の種類（種類が 8 のとき）か、読み取りで頼まれた MIME の種類（種類が 9 のとき）。
+    #[wasm_bindgen(getter)]
+    pub fn clipboard_mimes(&self) -> Vec<String> {
+        self.clipboard_mimes.clone()
+    }
+    /// 書き込みの `index` 番目の MIME の種類のデータ（種類が 8 のとき）。
+    pub fn clipboard_item_data(&self, index: usize) -> Vec<u8> {
+        self.clipboard_data.get(index).cloned().unwrap_or_default()
+    }
 }
 
 /// ターミナル。
@@ -191,6 +230,7 @@ pub struct WasmTerminal {
     clusters: Vec<String>,
     events: std::collections::VecDeque<Event>,
     last_wrapped: bool,
+    clipboard_reply_items: Vec<ClipboardItem>,
 }
 
 #[wasm_bindgen]
@@ -205,6 +245,7 @@ impl WasmTerminal {
             clusters: Vec::new(),
             events: Default::default(),
             last_wrapped: false,
+            clipboard_reply_items: Vec::new(),
         }
     }
 
@@ -254,6 +295,29 @@ impl WasmTerminal {
             Event::NotificationClose { id } => WasmEvent::new(5, 0, id.into_bytes()),
             Event::NotificationQuery { id } => WasmEvent::new(6, 0, id.into_bytes()),
             Event::NotificationAlive { id } => WasmEvent::new(7, 0, id.into_bytes()),
+            Event::ClipboardWrite(w) => {
+                let w = *w;
+                let mut ev = WasmEvent::new(8, 0, w.id.into_bytes());
+                ev.clipboard_location = location_code(w.location);
+                for item in w.items {
+                    ev.clipboard_mimes.push(item.mime);
+                    ev.clipboard_data.push(item.data);
+                }
+                ev
+            }
+            Event::ClipboardRead {
+                id,
+                location,
+                request,
+            } => {
+                let mut ev = WasmEvent::new(9, 0, id.into_bytes());
+                ev.clipboard_location = location_code(location);
+                match request {
+                    ClipboardReadRequest::Types => ev.clipboard_list = true,
+                    ClipboardReadRequest::Mimes(m) => ev.clipboard_mimes = m,
+                }
+                ev
+            }
             _ => WasmEvent::new(255, 0, Vec::new()),
         })
     }
@@ -301,6 +365,49 @@ impl WasmTerminal {
     /// `p=alive` の問い合わせに答える。
     pub fn notification_alive_reply(&mut self, id: &str, ids: Vec<String>) {
         self.term.notification_alive_reply(id, &ids);
+    }
+
+    /// クリップボードへの書き込み（種類が 8 のイベント）に答える。`status` は `DONE`（成功）か、
+    /// `EIO`・`EINVAL`・`ENOSYS`・`EPERM`・`EBUSY`・`EFBIG`。知らない値は `EIO`。
+    pub fn clipboard_write_reply(&mut self, id: &str, status: &str) {
+        let result = match status {
+            "DONE" => Ok(()),
+            "EINVAL" => Err(ClipboardWriteError::Einval),
+            "ENOSYS" => Err(ClipboardWriteError::Enosys),
+            "EPERM" => Err(ClipboardWriteError::Eperm),
+            "EBUSY" => Err(ClipboardWriteError::Ebusy),
+            "EFBIG" => Err(ClipboardWriteError::Efbig),
+            _ => Err(ClipboardWriteError::Eio),
+        };
+        self.term.clipboard_write_reply(id, result);
+    }
+
+    /// 読み取りの頼み（種類が 9 のイベント）の種類の一覧（`.`）に答える。
+    pub fn clipboard_read_reply_types(&mut self, id: &str, mimes: Vec<String>) {
+        self.term.clipboard_read_reply_types(id, &mimes);
+    }
+
+    /// 読み取りの答えに入れるデータを 1 つ足す。`clipboard_read_reply_data` が送って空にする。
+    pub fn clipboard_reply_item(&mut self, mime: String, data: Vec<u8>) {
+        self.clipboard_reply_items
+            .push(ClipboardItem { mime, data });
+    }
+
+    /// 読み取りの頼みのデータに、`clipboard_reply_item` で足したものを答える。足していなければ、データの無い `OK` と `DONE` だけを返す。
+    pub fn clipboard_read_reply_data(&mut self, id: &str) {
+        let items = std::mem::take(&mut self.clipboard_reply_items);
+        self.term.clipboard_read_reply_data(id, &items);
+    }
+
+    /// 読み取りの頼みを断る。`error` は `ENOSYS`・`EPERM`・`EBUSY`。知らない値は `EPERM`。
+    pub fn clipboard_read_reply_error(&mut self, id: &str, error: &str) {
+        self.clipboard_reply_items.clear();
+        let e = match error {
+            "ENOSYS" => ClipboardReadError::Enosys,
+            "EBUSY" => ClipboardReadError::Ebusy,
+            _ => ClipboardReadError::Eperm,
+        };
+        self.term.clipboard_read_reply_error(id, e);
     }
 
     /// PTY へ送るバイト列を取り出す。

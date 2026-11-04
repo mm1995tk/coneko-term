@@ -6,7 +6,7 @@
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
-//! BEL・題名の変更・通知（OSC 99）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
+//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
 //! 呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
 //! # PTY へ送るバイト列（出口は 1 つ）
@@ -27,12 +27,13 @@
 //!
 //! - ANSI: 4（IRM）、20（LNM）
 //! - DEC: 1、6、7、9、12、25、45、47、66、1000、1002、1003、1004、1005、1006、1015、1016、
-//!   1047、1048、1049、2004、2026
+//!   1047、1048、1049、2004、2026、5522
 //!
 //! # 画面の状態のうち、ここで持つもの
 //!
 //! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合。
 
+mod clipboard;
 mod kitty_keyboard;
 #[cfg(test)]
 mod mode_tests;
@@ -43,6 +44,10 @@ mod sgr;
 mod tests;
 mod theme;
 
+pub use clipboard::{
+    ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest, ClipboardWrite,
+    ClipboardWriteError,
+};
 pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_STACK_DEPTH};
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
 pub use notification::{Actions, Notification, NotificationSupport, When};
@@ -83,6 +88,20 @@ pub enum Event {
     NotificationAlive {
         /// `i=`（無ければ空）。
         id: String,
+    },
+    /// クリップボードへの書き込み（OSC 5522 の `type=write`）がそろった。呼ぶ側は、書き込みを
+    /// 許すなら OS のクリップボードへ書き、どちらにしても [`Terminal::clipboard_write_reply`] で答える。
+    ClipboardWrite(Box<ClipboardWrite>),
+    /// クリップボードの読み取りの頼み（OSC 5522 の `type=read`）。許すかどうかは呼ぶ側が決め、
+    /// [`Terminal::clipboard_read_reply_types`]・[`Terminal::clipboard_read_reply_data`]・
+    /// [`Terminal::clipboard_read_reply_error`] のどれかで答える。
+    ClipboardRead {
+        /// `id`（無ければ空）。答えに渡す。
+        id: String,
+        /// 読む先。
+        location: ClipboardLocation,
+        /// 頼まれたもの。
+        request: ClipboardReadRequest,
     },
     /// [`Terminal::register_osc`] で登録した番号の OSC が来た。`data` は番号と `;` のあとの
     /// バイト列（`;` が無ければ空）。
@@ -198,6 +217,8 @@ struct State {
     graphics: Graphics,
     /// 組み立て中の通知（OSC 99）。
     notifications: notification::Notifications,
+    /// 組み立て中のクリップボードへの書き込み（OSC 5522）。
+    clipboard: clipboard::Clipboard,
 }
 
 impl Terminal {
@@ -225,6 +246,7 @@ impl Terminal {
                 osc_handlers: Vec::new(),
                 graphics: Graphics::default(),
                 notifications: Default::default(),
+                clipboard: Default::default(),
             },
         }
     }
@@ -321,6 +343,28 @@ impl Terminal {
     /// `p=alive` の問い合わせ（[`Event::NotificationAlive`]）に答える。`ids` は生きている通知の `i=`。
     pub fn notification_alive_reply(&mut self, id: &str, ids: &[String]) {
         self.queue_output(&notification::alive_reply(id, ids));
+    }
+
+    /// クリップボードへの書き込み（[`Event::ClipboardWrite`]）に答える。成功なら `Ok(())`
+    /// （`status=DONE`）、書き込みを許さない・できないときはそのエラー。
+    pub fn clipboard_write_reply(&mut self, id: &str, result: Result<(), ClipboardWriteError>) {
+        self.queue_output(&clipboard::write_reply(id, result));
+    }
+
+    /// 種類の一覧の頼み（[`ClipboardReadRequest::Types`]）に答える。`mimes` が空なら、データの無い `OK` と `DONE` だけを返す。
+    pub fn clipboard_read_reply_types(&mut self, id: &str, mimes: &[String]) {
+        self.queue_output(&clipboard::read_types_reply(id, mimes));
+    }
+
+    /// データの頼み（[`ClipboardReadRequest::Mimes`]）に答える。`items` は、頼まれた種類のうち
+    /// 渡せるもの。空なら、データの無い `OK` と `DONE` だけを返す。場所が無いときは `clipboard_read_reply_error` の `Enosys`。
+    pub fn clipboard_read_reply_data(&mut self, id: &str, items: &[ClipboardItem]) {
+        self.queue_output(&clipboard::read_data_reply(id, items));
+    }
+
+    /// 読み取りの頼み（[`Event::ClipboardRead`]）を断る・失敗を知らせる。許さないなら `Eperm`。
+    pub fn clipboard_read_reply_error(&mut self, id: &str, error: ClipboardReadError) {
+        self.queue_output(&clipboard::read_error_reply(id, error));
     }
 
     /// 受け取った画像を ID で引く（kitty graphics の `i=`）。
@@ -700,6 +744,7 @@ impl State {
         self.keyboard_flags = Default::default();
         self.graphics.clear();
         self.notifications.clear();
+        self.clipboard.clear();
     }
 
     /// 主画面と代替画面を切り替える。カーソルの位置は引き継ぐ（xterm.js と同じ）。
@@ -767,6 +812,7 @@ impl State {
             1016 => self.set_mouse_encoding(MouseEncoding::SgrPixels, on),
             2004 => self.modes.bracketed_paste = on,
             2026 => self.modes.synchronized_output = on,
+            5522 => self.modes.clipboard_paste_events = on,
             _ => {}
         }
     }
@@ -810,6 +856,7 @@ impl State {
                 1016 => m.mouse_encoding == MouseEncoding::SgrPixels,
                 2004 => m.bracketed_paste,
                 2026 => m.synchronized_output,
+                5522 => m.clipboard_paste_events,
                 _ => return 0,
             }
         };
@@ -965,6 +1012,11 @@ impl State {
                 };
                 self.events.push(ev);
             }
+            b"5522" => match self.clipboard.osc(&data[sep + 1..]) {
+                Some(clipboard::Output::Event(ev)) => self.events.push(ev),
+                Some(clipboard::Output::Reply(bytes)) => self.output.extend_from_slice(&bytes),
+                None => {}
+            },
             cmd @ (b"4" | b"10" | b"11" | b"12") => {
                 let rest = text();
                 self.osc_color_query(cmd, &rest, bell);
