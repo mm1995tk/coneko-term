@@ -1,4 +1,14 @@
 import { CELL_STRIDE, CLUSTER_FLAG, type RowView } from "./terminal.js";
+import {
+  ImageCache,
+  Z_UNDER_BACKGROUND,
+  browserImageDecoder,
+  parsePlacements,
+  type DrawableImage,
+  type ImageDecoder,
+  type ImagePlacement,
+  type ImageSource,
+} from "./images.js";
 
 /** スクロールバーの幅（CSS ピクセル）。xterm.js 6.0.0 と同じ。 */
 export const SCROLLBAR_WIDTH = 14;
@@ -89,8 +99,8 @@ export class Palette {
   }
 }
 
-/** 描画が `Terminal` から読むもの。 */
-export interface RenderSource {
+/** 描画が `Terminal` から読むもの。画像を描くには、`ImageSource` の 3 つと `readPlacements` も要る。 */
+export interface RenderSource extends Partial<ImageSource> {
   /** 列の数。 */
   readonly cols: number;
   /** 行の数。 */
@@ -115,6 +125,8 @@ export interface RenderSource {
   selectionSpan?(y: number): [number, number] | undefined;
   /** 表示位置を考えた、いま見えている `y` 行目。 */
   readViewportRow(y: number): RowView;
+  /** 画像の配置の並び（`WasmTerminal.placements` と同じ）。 */
+  readPlacements?(): ArrayLike<number>;
 }
 
 /** 描画の設定。 */
@@ -137,6 +149,8 @@ export interface RenderEnv {
   requestFrame(cb: () => void): number;
   /** `requestFrame` を取り消す。 */
   cancelFrame(id: number): void;
+  /** 画像を読み解く道具。省くとブラウザーの機能を使う。 */
+  imageDecoder?: ImageDecoder;
 }
 
 /** ブラウザーの `devicePixelRatio` と `requestAnimationFrame` を使う、既定の `RenderEnv`。 */
@@ -145,6 +159,19 @@ export const browserEnv: RenderEnv = {
   requestFrame: (cb) => requestAnimationFrame(cb),
   cancelFrame: (id) => cancelAnimationFrame(id),
 };
+
+/** 描く画像と、その読み解き済みの中身。 */
+interface PlacedBitmap {
+  p: ImagePlacement;
+  image: DrawableImage;
+}
+
+/** 画像を重ねる層。背景色の下、字の下（背景色の上）、字の上。 */
+interface ImageLayers {
+  under: PlacedBitmap[];
+  below: PlacedBitmap[];
+  above: PlacedBitmap[];
+}
 
 /** セルの大きさ。単位は CSS ピクセル。 */
 export interface CellSize {
@@ -179,6 +206,11 @@ export class CanvasRenderer {
   private cellSizeListeners = new Set<(size: CellSize) => void>();
   /** 直前の描画で、スクロールバックを見ていたか。 */
   private lastOffset = 0;
+  private imageCache?: ImageCache;
+  /** 今のフレームで描く画像（読み解き済みのもの）。層ごと、`z` と ID の順。 */
+  private layers: ImageLayers = { under: [], below: [], above: [] };
+  /** 直前のフレームで描いた画像の印。変わったら全部を描き直す。 */
+  private lastImageKey = "";
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -195,6 +227,11 @@ export class CanvasRenderer {
   /** セルの大きさ（CSS ピクセル）。 */
   get cellSize(): CellSize {
     return { width: this.cellW / this.dpr, height: this.cellH / this.dpr };
+  }
+
+  /** デバイスピクセルでのセルの大きさ。 */
+  get deviceCellSize(): CellSize {
+    return { width: this.cellW, height: this.cellH };
   }
 
   /** セルの大きさが変わった（フォントの読み込みや `devicePixelRatio` の変化のあと）。 */
@@ -328,6 +365,8 @@ export class CanvasRenderer {
     const showCursor = this.cursorShown(offset);
     const rows = new Set<number>();
     let full = this.needsFull || offset !== this.lastOffset;
+    // 画像の置き場所や中身が変わったら、全部を描き直す
+    if (this.collectImages(offset)) full = true;
     // 過去の行を見ているときは、書き込みでずれる行を全部描き直す
     if (offset > 0 && dirty.length > 0) full = true;
     if (!full) {
@@ -346,6 +385,81 @@ export class CanvasRenderer {
       for (const y of [...rows].sort((a, b) => a - b)) {
         if (y < src.rows) this.drawRow(y, offset);
       }
+    }
+  }
+
+  /**
+   * 見えている画像の配置を集めて層に分ける。前のフレームから変わったら `true`。
+   * 読み解きが終わっていない画像は、終わるまで描かない（終わったら描き直す）。
+   */
+  private collectImages(offset: number): boolean {
+    const src = this.source;
+    const flat = src.readPlacements?.();
+    const layers: ImageLayers = { under: [], below: [], above: [] };
+    let key = "";
+    if (flat && flat.length > 0) {
+      const cache = (this.imageCache ??= new ImageCache(
+        src as ImageSource,
+        this.env.imageDecoder ?? browserImageDecoder,
+        () => this.invalidate(),
+      ));
+      cache.sync();
+      const placed = parsePlacements(flat)
+        .filter((p) => p.row + offset < src.rows && p.row + offset + p.rows > 0)
+        .sort((a, b) => a.z - b.z || a.imageId - b.imageId);
+      for (const p of placed) {
+        const image = cache.get(p.imageId);
+        if (!image) continue;
+        const layer =
+          p.z < Z_UNDER_BACKGROUND ? layers.under : p.z < 0 ? layers.below : layers.above;
+        layer.push({ p, image });
+        key += `${p.imageId}:${p.row}:${p.col}:${p.srcX}:${p.srcY}:${p.srcW}:${p.srcH}:${p.offsetX}:${p.offsetY}:${p.cols}:${p.rows}:${p.z}:${p.native};`;
+      }
+    } else {
+      this.imageCache?.sync();
+    }
+    this.layers = layers;
+    const changed = key !== this.lastImageKey;
+    this.lastImageKey = key;
+    return changed;
+  }
+
+  /** 行 `y` にかかる画像を、`top` から始まる 1 行ぶんだけ描く。 */
+  private drawImages(list: PlacedBitmap[], y: number, offset: number): void {
+    if (list.length === 0) return;
+    const ctx = this.ctx;
+    const top = y * this.cellH;
+    const bottom = top + this.cellH;
+    const limit = this.source.cols * this.cellW;
+    ctx.globalAlpha = 1;
+    for (const { p, image } of list) {
+      const srcX = p.srcX;
+      const srcY = p.srcY;
+      const srcW = p.srcW > 0 ? p.srcW : image.width - srcX;
+      const srcH = p.srcH > 0 ? p.srcH : image.height - srcY;
+      if (srcW <= 0 || srcH <= 0) continue;
+      // 隣の行と継ぎ目が出ないよう、置く場所は整数のデバイスピクセルにする
+      const dx = Math.round(p.col * this.cellW + p.offsetX);
+      const dy = Math.round((p.row + offset) * this.cellH + p.offsetY);
+      const dw = Math.round(p.native ? srcW : p.cols * this.cellW);
+      const dh = Math.round(p.native ? srcH : p.rows * this.cellH);
+      if (dw <= 0 || dh <= 0) continue;
+      const x0 = Math.max(dx, 0);
+      const x1 = Math.min(dx + dw, limit);
+      const y0 = Math.max(dy, top);
+      const y1 = Math.min(dy + dh, bottom);
+      if (x1 <= x0 || y1 <= y0) continue;
+      ctx.drawImage(
+        image as unknown as CanvasImageSource,
+        srcX + ((x0 - dx) * srcW) / dw,
+        srcY + ((y0 - dy) * srcH) / dh,
+        ((x1 - x0) * srcW) / dw,
+        ((y1 - y0) * srcH) / dh,
+        x0,
+        y0,
+        x1 - x0,
+        y1 - y0,
+      );
     }
   }
 
@@ -376,12 +490,16 @@ export class CanvasRenderer {
     ctx.fillStyle = palette.background;
     ctx.fillRect(0, top, cols * cellW, cellH);
 
+    // 下から順に: 背景色の下の画像、背景色、字の下の画像、選択範囲、字、字の上の画像
+    this.drawImages(this.layers.under, y, offset);
     const n = Math.min(row.length, cols);
     const colors = this.resolveRowColors(row.cells, n, solidBlock ? cursor.x : -1);
     this.fillBackgroundRuns(row.cells, colors, n, top);
+    this.drawImages(this.layers.below, y, offset);
     this.fillSelection(y, top);
     this.drawGlyphsAndLines(row, colors, n, top);
     ctx.globalAlpha = 1;
+    this.drawImages(this.layers.above, y, offset);
 
     if (cursorOn && blinkVisible) this.drawCursorShape(cursor, row.cells, top);
   }
@@ -613,6 +731,8 @@ export class CanvasRenderer {
     if (this.frame !== undefined) this.env.cancelFrame(this.frame);
     this.frame = undefined;
     this.cellSizeListeners.clear();
+    this.imageCache?.dispose();
+    this.imageCache = undefined;
   }
 }
 

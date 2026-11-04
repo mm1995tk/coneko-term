@@ -678,3 +678,31 @@ fn placements_follow_reflow() {
     t.resize(4, 5);
     assert!(t.placements().is_empty());
 }
+
+#[test]
+fn resending_gives_the_image_a_new_serial() {
+    let mut t = Terminal::new(5, 20);
+    apc(&mut t, "f=24,s=1,v=1,i=1;AAAA");
+    apc(&mut t, "f=24,s=1,v=1,i=2;AAAA");
+    let (a, b) = (t.image(1).unwrap().serial, t.image(2).unwrap().serial);
+    assert!(a > 0 && b > a);
+    apc(&mut t, "f=24,s=1,v=1,i=1;/wAA");
+    t.take_output();
+    assert!(t.image(1).unwrap().serial > b);
+}
+
+#[test]
+fn native_size_is_only_without_c_and_r() {
+    let mut t = Terminal::new(10, 40);
+    send_big(&mut t, "a=t,i=1");
+    apc(&mut t, "a=p,i=1,C=1");
+    apc(&mut t, "a=p,i=1,C=1,c=2");
+    apc(&mut t, "a=p,i=1,C=1,r=2");
+    apc(&mut t, "a=p,i=1,C=1,c=2,r=2");
+    let native: Vec<_> = t
+        .placements()
+        .iter()
+        .map(|p| p.placement.native_size)
+        .collect();
+    assert_eq!(native, [true, false, false, false]);
+}

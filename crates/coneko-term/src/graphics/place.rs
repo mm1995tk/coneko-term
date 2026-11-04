@@ -164,6 +164,7 @@ pub(super) fn resolve(
         cols: clamp(cols),
         rows: clamp(rows),
         z: k.z,
+        native_size: k.cols == 0 && k.rows == 0,
     })
 }
 
