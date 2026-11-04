@@ -181,3 +181,37 @@ test("write after dispose is ignored", async () => {
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(called, false);
 });
+
+test("an exception in done does not stop later writes", async () => {
+  const t = new Terminal({ cols: 4, rows: 1 });
+  const errors: unknown[] = [];
+  const orig = globalThis.queueMicrotask;
+  globalThis.queueMicrotask = (f) =>
+    orig(() => {
+      try {
+        f();
+      } catch (e) {
+        errors.push(e);
+      }
+    });
+  t.write("a", () => {
+    throw new Error("boom");
+  });
+  await write(t, "b");
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(t.getRowText(0), "ab  ");
+  assert.equal(errors.length, 1);
+  globalThis.queueMicrotask = orig;
+  t.dispose();
+});
+
+test("write copies the buffer, and a disposed terminal throws clearly", async () => {
+  const t = new Terminal({ cols: 4, rows: 1 });
+  const buf = new TextEncoder().encode("ab");
+  const p = write(t, buf);
+  buf.fill(0x7a);
+  await p;
+  assert.equal(t.getRowText(0), "ab  ");
+  t.dispose();
+  assert.throws(() => t.readRow(0), /disposed/);
+});

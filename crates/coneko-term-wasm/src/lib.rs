@@ -83,6 +83,7 @@ pub struct WasmTerminal {
     cells: Vec<u32>,
     clusters: Vec<String>,
     events: std::collections::VecDeque<Event>,
+    last_wrapped: bool,
 }
 
 #[wasm_bindgen]
@@ -96,6 +97,7 @@ impl WasmTerminal {
             cells: Vec::new(),
             clusters: Vec::new(),
             events: Default::default(),
+            last_wrapped: false,
         }
     }
 
@@ -266,9 +268,9 @@ impl WasmTerminal {
         self.fill(Some(&line))
     }
 
-    /// 書き出した行が折り返されている（次の行に続く）か。直前の `read_*` のもの。
-    pub fn row_wrapped(&self, y: usize) -> bool {
-        y < self.term.screen().rows() && self.term.screen().row(y).is_wrapped()
+    /// 直前の `read_*` で書き出した行が、次の行へ折り返されているか。
+    pub fn row_wrapped(&self) -> bool {
+        self.last_wrapped
     }
 
     /// セルのバッファーの位置（WASM のメモリの中の byte offset）。
@@ -286,6 +288,7 @@ impl WasmTerminal {
     fn fill(&mut self, line: Option<&Line>) -> usize {
         self.cells.clear();
         self.clusters.clear();
+        self.last_wrapped = line.is_some_and(|l| l.is_wrapped());
         let Some(line) = line else { return 0 };
         for cell in line.cells() {
             self.push_cell(cell);

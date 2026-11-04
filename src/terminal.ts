@@ -162,7 +162,13 @@ const sleep0 = () => new Promise<void>((r) => setTimeout(r, 0));
  */
 export class Terminal {
   readonly options: Readonly<TerminalOptions>;
-  private core: WasmTerminal;
+  private wasm: WasmTerminal;
+
+  /** `dispose` のあとに触ると、分かりやすい例外にする。 */
+  private get core(): WasmTerminal {
+    if (this.disposed) throw new Error("coneko-term: terminal is disposed");
+    return this.wasm;
+  }
   private queue: WriteJob[] = [];
   private pumping = false;
   private disposed = false;
@@ -180,7 +186,7 @@ export class Terminal {
     this.options = { ...options };
     const cols = Math.max(1, options.cols ?? 80);
     const rows = Math.max(1, options.rows ?? 24);
-    this.core = new WasmTerminal(rows, cols, options.scrollback ?? 1000);
+    this.wasm = new WasmTerminal(rows, cols, options.scrollback ?? 1000);
     this.core.set_cursor_blink(options.cursorBlink ?? false);
     this.applyTheme(options.theme ?? {});
   }
@@ -246,7 +252,9 @@ export class Terminal {
    */
   write(data: string | Uint8Array, done?: () => void): void {
     if (this.disposed) return;
-    const bytes = typeof data === "string" ? this.encoder.encode(data) : data;
+    // 非同期に処理するので、呼ぶ側がバッファーを使い回しても壊れないようにコピーする
+    const bytes =
+      typeof data === "string" ? this.encoder.encode(data) : data.slice();
     this.queue.push({ bytes, offset: 0, done });
     if (!this.pumping) {
       this.pumping = true;
@@ -255,24 +263,38 @@ export class Terminal {
   }
 
   private async pump(): Promise<void> {
-    let sliceStart = performance.now();
-    while (!this.disposed && this.queue.length > 0) {
-      const job = this.queue[0];
-      const end = Math.min(job.offset + SLICE_BYTES, job.bytes.length);
-      this.core.write(job.bytes.subarray(job.offset, end));
-      job.offset = end;
-      this.flush();
-      if (this.disposed) break;
-      if (job.offset >= job.bytes.length) {
-        this.queue.shift();
-        job.done?.();
+    try {
+      let sliceStart = performance.now();
+      while (!this.disposed && this.queue.length > 0) {
+        const job = this.queue[0];
+        const end = Math.min(job.offset + SLICE_BYTES, job.bytes.length);
+        this.core.write(job.bytes.subarray(job.offset, end));
+        job.offset = end;
+        // 聞き手や done の例外で残りの処理を止めない。投げ直して報告する
+        this.guard(() => this.flush());
+        if (this.disposed) break;
+        if (job.offset >= job.bytes.length) {
+          this.queue.shift();
+          if (job.done) this.guard(job.done);
+        }
+        if (performance.now() - sliceStart >= SLICE_MS && this.queue.length > 0) {
+          await sleep0();
+          sliceStart = performance.now();
+        }
       }
-      if (performance.now() - sliceStart >= SLICE_MS && this.queue.length > 0) {
-        await sleep0();
-        sliceStart = performance.now();
-      }
+    } finally {
+      this.pumping = false;
     }
-    this.pumping = false;
+  }
+
+  private guard(f: () => void): void {
+    try {
+      f();
+    } catch (e) {
+      queueMicrotask(() => {
+        throw e;
+      });
+    }
   }
 
   /** PTY へ送るバイト列とイベントを、聞き手に渡す。 */
@@ -280,6 +302,7 @@ export class Terminal {
     for (;;) {
       const ev = this.core.next_event();
       if (!ev) break;
+      try {
       const data = ev.data;
       switch (ev.kind) {
         case 0:
@@ -296,7 +319,9 @@ export class Terminal {
           break;
         }
       }
-      ev.free();
+      } finally {
+        ev.free();
+      }
     }
     const out = this.core.take_output();
     if (out.length > 0) {
@@ -424,12 +449,12 @@ export class Terminal {
 
   /** 見えている画面の `y` 行目のセル。 */
   readRow(y: number): RowView {
-    return this.view(this.core.read_row(y), this.core.row_wrapped(y));
+    return this.view(this.core.read_row(y));
   }
 
   /** スクロールバックの `i` 行目（0 が一番古い）のセル。 */
   readScrollbackRow(i: number): RowView {
-    return this.view(this.core.read_scrollback_row(i), false);
+    return this.view(this.core.read_scrollback_row(i));
   }
 
   /** 見えている画面の `y` 行目の字（空のセルは空白）。末尾の空白は残す。 */
@@ -447,8 +472,9 @@ export class Terminal {
     return s;
   }
 
-  private view(length: number, wrapped: boolean): RowView {
+  private view(length: number): RowView {
     const core = this.core;
+    const wrapped = core.row_wrapped();
     const cells = new Uint32Array(
       getMemory().buffer,
       core.cells_ptr() as unknown as number,
@@ -469,7 +495,7 @@ export class Terminal {
     this.titleListeners.clear();
     this.bellListeners.clear();
     this.oscHandlers.clear();
-    this.core.free();
+    this.wasm.free();
   }
 }
 
