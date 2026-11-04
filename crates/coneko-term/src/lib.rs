@@ -9,6 +9,8 @@ pub mod mouse;
 
 pub mod selection;
 
+pub mod graphics;
+
 pub mod terminal;
 
 pub use terminal::{Event, Terminal};
