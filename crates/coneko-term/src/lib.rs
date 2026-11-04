@@ -1,4 +1,7 @@
 //! coneko-term の本体。ブラウザーに依存しない。
+#![warn(missing_docs)]
+
+pub mod screen;
 
 pub mod parser;
 

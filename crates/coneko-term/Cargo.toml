@@ -9,3 +9,4 @@ repository.workspace = true
 # 本体はブラウザー（wasm-bindgen や web-sys）に依存させない。
 # ネイティブの GPU 描画からも同じ本体を使うため。
 [dependencies]
+unicode-width = "0.2"
