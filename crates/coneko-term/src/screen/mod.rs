@@ -307,6 +307,80 @@ impl Screen {
         self.buf_mut().scroll_down(t, b, n, &pen);
     }
 
+    /// スクロール範囲を `n` 行ぶん上へ送る。`scroll_up` と違い、押し出した行はスクロールバックに
+    /// 残さない（SU。xterm.js と同じ）。
+    pub fn scroll_up_discard(&mut self, n: usize) {
+        let (pen, (t, b)) = (self.pen, self.scroll_region());
+        self.buf_mut().scroll_up_discard(t, b, n, &pen);
+    }
+
+    /// カーソルの行に空の行を `n` 行入れる（IL）。カーソルがスクロール範囲の外なら何もしない。
+    /// 成功したらカーソルは左端へ。
+    pub fn insert_lines(&mut self, n: usize) {
+        let (pen, (t, b)) = (self.pen, self.scroll_region());
+        let buf = self.buf_mut();
+        let y = buf.cursor.y;
+        if y < t || y > b {
+            return;
+        }
+        buf.scroll_down(y, b, n, &pen);
+        buf.cursor.x = 0;
+        buf.cursor.pending_wrap = false;
+    }
+
+    /// カーソルの行から `n` 行を消す（DL）。カーソルがスクロール範囲の外なら何もしない。
+    /// 成功したらカーソルは左端へ。消した行はスクロールバックに残さない。
+    pub fn delete_lines(&mut self, n: usize) {
+        let (pen, (t, b)) = (self.pen, self.scroll_region());
+        let buf = self.buf_mut();
+        let y = buf.cursor.y;
+        if y < t || y > b {
+            return;
+        }
+        buf.scroll_up_discard(y, b, n, &pen);
+        buf.cursor.x = 0;
+        buf.cursor.pending_wrap = false;
+    }
+
+    // ---- セルの挿入と削除 ----
+
+    /// カーソルの位置に空のセルを `n` 個入れる（ICH）。右のセルは押し出される。カーソルは動かない。
+    pub fn insert_cells(&mut self, n: usize) {
+        let pen = self.pen;
+        self.buf_mut().insert_cells(n, &pen);
+    }
+
+    /// カーソルの位置から `n` 個のセルを消して詰める（DCH）。カーソルは動かない。
+    pub fn delete_cells(&mut self, n: usize) {
+        let pen = self.pen;
+        self.buf_mut().delete_cells(n, &pen);
+    }
+
+    /// 全部のセルを `c` で埋め、スクロール範囲を戻してカーソルを左上へ置く（DECALN）。
+    pub fn fill_with(&mut self, c: char) {
+        self.reset_scroll_region();
+        let b = self.buf_mut();
+        b.fill(c);
+        b.cursor.x = 0;
+        b.cursor.y = 0;
+        b.cursor.pending_wrap = false;
+    }
+
+    /// スクロールバックを捨てる（ED 3）。
+    pub fn clear_scrollback(&mut self) {
+        self.buf_mut().clear_scrollback();
+    }
+
+    /// 全部を初期の状態に戻す（RIS）。大きさとスクロールバックの上限は変えない。
+    pub fn reset(&mut self) {
+        let (rows, cols, max) = (
+            self.primary.rows,
+            self.primary.cols,
+            self.primary.max_scrollback,
+        );
+        *self = Screen::with_scrollback(rows, cols, max);
+    }
+
     // ---- タブ ----
 
     /// カーソルの列にタブ位置を置く（HTS）。

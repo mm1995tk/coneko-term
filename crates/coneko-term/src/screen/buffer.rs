@@ -48,6 +48,32 @@ impl Line {
         }
     }
 
+    /// `x` が全角の字の右半分なら、その字を左右とも消す。
+    fn split_wide_at(&mut self, x: usize) {
+        if self.cells[x].is_wide_tail() && x > 0 {
+            self.cells[x - 1] = Cell::default();
+            self.cells[x] = Cell::default();
+        }
+    }
+
+    /// 相方のいない全角の字の半分を消す。
+    fn fix_wide(&mut self) {
+        let n = self.cells.len();
+        for i in 0..n {
+            let c = &self.cells[i];
+            let orphan = if c.width == 2 {
+                !(i + 1 < n && self.cells[i + 1].is_wide_tail())
+            } else if c.is_wide_tail() {
+                !(i > 0 && self.cells[i - 1].width == 2)
+            } else {
+                false
+            };
+            if orphan {
+                self.cells[i] = Cell::default();
+            }
+        }
+    }
+
     fn resize(&mut self, cols: usize) {
         self.cells.resize(cols, Cell::default());
         // 切り詰めて全角の字の右半分だけが消えたら、左半分も消す
@@ -152,10 +178,19 @@ impl Buffer {
     /// 範囲 `top..=bottom` を `n` 行ぶん上へ送る。`top == 0` なら、押し出された行は
     /// スクロールバックに残る（xterm.js と同じ。下端が画面の下端でなくてもよい）。
     pub fn scroll_up(&mut self, top: usize, bottom: usize, n: usize, pen: &Attrs) {
+        self.scroll_up_impl(top, bottom, n, pen, top == 0);
+    }
+
+    /// `scroll_up` と同じだが、押し出された行はスクロールバックに残さず捨てる（SU、DL）。
+    pub fn scroll_up_discard(&mut self, top: usize, bottom: usize, n: usize, pen: &Attrs) {
+        self.scroll_up_impl(top, bottom, n, pen, false);
+    }
+
+    fn scroll_up_impl(&mut self, top: usize, bottom: usize, n: usize, pen: &Attrs, history: bool) {
         let n = n.min(bottom - top + 1);
         let erase = Self::erase_attrs(pen);
         for _ in 0..n {
-            if top == 0 && self.max_scrollback > 0 {
+            if history && self.max_scrollback > 0 {
                 let at = self.idx(bottom) + 1;
                 self.lines.insert(at, Line::blank(self.cols, erase));
                 while self.lines.len() > self.rows + self.max_scrollback {
@@ -328,6 +363,55 @@ impl Buffer {
         if x0 == 0 && x1 == line.cells.len() {
             line.wrapped = false;
         }
+    }
+
+    /// カーソルの位置に空のセルを `n` 個入れ、右のセルを押し出す（ICH）。
+    pub fn insert_cells(&mut self, n: usize, pen: &Attrs) {
+        let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols);
+        let n = n.min(cols - x);
+        let erase = Self::erase_attrs(pen);
+        self.cursor.pending_wrap = false;
+        let line = self.line_mut(y);
+        line.split_wide_at(x);
+        line.cells.truncate(cols - n);
+        for _ in 0..n {
+            line.cells.insert(x, Cell::blank(erase));
+        }
+        line.fix_wide();
+    }
+
+    /// カーソルの位置から `n` 個のセルを消し、右のセルを詰める（DCH）。
+    pub fn delete_cells(&mut self, n: usize, pen: &Attrs) {
+        let (x, y, cols) = (self.cursor.x, self.cursor.y, self.cols);
+        let n = n.min(cols - x);
+        let erase = Self::erase_attrs(pen);
+        self.cursor.pending_wrap = false;
+        let line = self.line_mut(y);
+        line.split_wide_at(x);
+        line.cells.drain(x..x + n);
+        line.cells.resize(cols, Cell::blank(erase));
+        line.fix_wide();
+    }
+
+    /// 全部のセルを `c` で埋める（DECALN）。
+    pub fn fill(&mut self, c: char) {
+        for y in 0..self.rows {
+            let line = self.line_mut(y);
+            for cell in &mut line.cells {
+                *cell = Cell {
+                    content: Content::Char(c),
+                    width: 1,
+                    attrs: Attrs::default(),
+                };
+            }
+            line.wrapped = false;
+        }
+    }
+
+    /// スクロールバックを捨てる。
+    pub fn clear_scrollback(&mut self) {
+        let n = self.scrollback_len();
+        self.lines.drain(..n);
     }
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
