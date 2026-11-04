@@ -7,7 +7,7 @@ use coneko_term::mouse::{MouseAction, MouseButton, MouseEvent};
 use coneko_term::screen::cell::{Cell, Color, Content, UnderlineStyle};
 use coneko_term::screen::Line;
 use coneko_term::selection::{self, Pos};
-use coneko_term::terminal::Theme;
+use coneko_term::terminal::{Notification, NotificationSupport, Theme, When};
 use coneko_term::{Event, Terminal};
 use wasm_bindgen::prelude::*;
 
@@ -60,17 +60,35 @@ fn underline_code(s: UnderlineStyle) -> u32 {
     }
 }
 
-/// ターミナルが外へ知らせること 1 つ。`kind` は 0 が BEL、1 が題名、2 がアイコン名、3 が OSC。
+/// ターミナルが外へ知らせること 1 つ。`kind` は 0 が BEL、1 が題名、2 がアイコン名、3 が OSC、
+/// 4 が通知（OSC 99）、5 が通知を閉じる求め、6 が通知の対応の問い合わせ（`p=?`）、
+/// 7 が生きている通知の問い合わせ（`p=alive`）。5 から 7 は `data` が `i=`（UTF-8、無ければ空）。
 #[wasm_bindgen]
 pub struct WasmEvent {
     kind: u8,
     ident: u32,
     data: Vec<u8>,
+    notification: Option<Notification>,
+}
+
+impl WasmEvent {
+    fn new(kind: u8, ident: u32, data: Vec<u8>) -> WasmEvent {
+        WasmEvent {
+            kind,
+            ident,
+            data,
+            notification: None,
+        }
+    }
+
+    fn with_notification<T: Default>(&self, f: impl FnOnce(&Notification) -> T) -> T {
+        self.notification.as_ref().map(f).unwrap_or_default()
+    }
 }
 
 #[wasm_bindgen]
 impl WasmEvent {
-    /// 種類（0 が BEL、1 が題名、2 がアイコン名、3 が登録した OSC）。
+    /// 種類（0 が BEL、1 が題名、2 がアイコン名、3 が登録した OSC、4 から 7 が通知）。
     #[wasm_bindgen(getter)]
     pub fn kind(&self) -> u8 {
         self.kind
@@ -84,6 +102,82 @@ impl WasmEvent {
     #[wasm_bindgen(getter)]
     pub fn data(&self) -> Vec<u8> {
         self.data.clone()
+    }
+    /// 通知の `i=`（無ければ空）。種類が 4 のとき。以降の `notification_*` も同じ。
+    #[wasm_bindgen(getter)]
+    pub fn notification_id(&self) -> String {
+        self.with_notification(|n| n.id.clone())
+    }
+    /// 通知の題名。
+    #[wasm_bindgen(getter)]
+    pub fn notification_title(&self) -> String {
+        self.with_notification(|n| n.title.clone())
+    }
+    /// 通知の本文。
+    #[wasm_bindgen(getter)]
+    pub fn notification_body(&self) -> String {
+        self.with_notification(|n| n.body.clone())
+    }
+    /// 緊急度（`u`）。指定が無ければ -1。
+    #[wasm_bindgen(getter)]
+    pub fn notification_urgency(&self) -> i32 {
+        self.with_notification(|n| n.urgency.map_or(-1, i32::from))
+    }
+    /// 押されたときの動き（`a`）。ビット 0 が focus、ビット 1 が report。
+    #[wasm_bindgen(getter)]
+    pub fn notification_actions(&self) -> u8 {
+        self.with_notification(|n| n.actions.focus as u8 | (n.actions.report as u8) << 1)
+    }
+    /// いつ出すか（`o`）。0 always、1 unfocused、2 invisible。
+    #[wasm_bindgen(getter)]
+    pub fn notification_when(&self) -> u8 {
+        self.with_notification(|n| match n.when {
+            When::Unfocused => 1,
+            When::Invisible => 2,
+            _ => 0,
+        })
+    }
+    /// 閉じられたときに知らせるか（`c=1`）。
+    #[wasm_bindgen(getter)]
+    pub fn notification_report_close(&self) -> bool {
+        self.with_notification(|n| n.report_close)
+    }
+    /// 消えるまでの時間（`w`、ミリ秒）。指定が無ければ -2。
+    #[wasm_bindgen(getter)]
+    pub fn notification_timeout(&self) -> i32 {
+        self.with_notification(|n| n.timeout.unwrap_or(-2))
+    }
+    /// アプリケーションの名前（`f`）。無ければ `undefined`。
+    #[wasm_bindgen(getter)]
+    pub fn notification_app_name(&self) -> Option<String> {
+        self.notification.as_ref().and_then(|n| n.app_name.clone())
+    }
+    /// 音（`s`）。無ければ `undefined`。
+    #[wasm_bindgen(getter)]
+    pub fn notification_sound(&self) -> Option<String> {
+        self.notification.as_ref().and_then(|n| n.sound.clone())
+    }
+    /// アイコンの画像の ID（`g`）。無ければ `undefined`。
+    #[wasm_bindgen(getter)]
+    pub fn notification_icon_cache_id(&self) -> Option<String> {
+        self.notification
+            .as_ref()
+            .and_then(|n| n.icon_cache_id.clone())
+    }
+    /// 通知の種類（`t`）。
+    #[wasm_bindgen(getter)]
+    pub fn notification_types(&self) -> Vec<String> {
+        self.with_notification(|n| n.types.clone())
+    }
+    /// アイコンの名前（`n`）。
+    #[wasm_bindgen(getter)]
+    pub fn notification_icon_names(&self) -> Vec<String> {
+        self.with_notification(|n| n.icon_names.clone())
+    }
+    /// ボタンの文字（`p=buttons`）。
+    #[wasm_bindgen(getter)]
+    pub fn notification_buttons(&self) -> Vec<String> {
+        self.with_notification(|n| n.buttons.clone())
     }
 }
 
@@ -146,32 +240,65 @@ impl WasmTerminal {
     /// 次のイベントを取り出す。無ければ `undefined`。
     pub fn next_event(&mut self) -> Option<WasmEvent> {
         self.events.pop_front().map(|e| match e {
-            Event::Bell => WasmEvent {
-                kind: 0,
-                ident: 0,
-                data: Vec::new(),
-            },
-            Event::Title(s) => WasmEvent {
-                kind: 1,
-                ident: 0,
-                data: s.into_bytes(),
-            },
-            Event::IconName(s) => WasmEvent {
-                kind: 2,
-                ident: 0,
-                data: s.into_bytes(),
-            },
-            Event::Osc { ident, data } => WasmEvent {
-                kind: 3,
-                ident,
-                data,
-            },
-            _ => WasmEvent {
-                kind: 255,
-                ident: 0,
-                data: Vec::new(),
-            },
+            Event::Bell => WasmEvent::new(0, 0, Vec::new()),
+            Event::Title(s) => WasmEvent::new(1, 0, s.into_bytes()),
+            Event::IconName(s) => WasmEvent::new(2, 0, s.into_bytes()),
+            Event::Osc { ident, data } => WasmEvent::new(3, ident, data),
+            Event::Notification(n) => {
+                let mut ev = WasmEvent::new(4, 0, Vec::new());
+                ev.notification = Some(*n);
+                ev
+            }
+            Event::NotificationClose { id } => WasmEvent::new(5, 0, id.into_bytes()),
+            Event::NotificationQuery { id } => WasmEvent::new(6, 0, id.into_bytes()),
+            Event::NotificationAlive { id } => WasmEvent::new(7, 0, id.into_bytes()),
+            _ => WasmEvent::new(255, 0, Vec::new()),
         })
+    }
+
+    /// 通知が押されたことを返す。`button` は 0 なら通知そのもの、1 以上ならボタンの番号。
+    pub fn notification_activated(&mut self, id: &str, button: u32) {
+        self.term
+            .notification_activated(id, (button > 0).then_some(button));
+    }
+
+    /// 通知が閉じられたことを返す。
+    pub fn notification_closed(&mut self, id: &str) {
+        self.term.notification_closed(id);
+    }
+
+    /// `p=?` の問い合わせに答える。
+    #[allow(clippy::too_many_arguments)]
+    pub fn notification_query_reply(
+        &mut self,
+        id: &str,
+        actions: Vec<String>,
+        when: Vec<String>,
+        payloads: Vec<String>,
+        urgencies: Vec<u8>,
+        close_report: bool,
+        timeout: bool,
+        sounds: Vec<String>,
+        types: Vec<String>,
+    ) {
+        self.term.notification_query_reply(
+            id,
+            &NotificationSupport {
+                actions,
+                when,
+                payloads,
+                urgencies,
+                close_report,
+                timeout,
+                sounds,
+                types,
+            },
+        );
+    }
+
+    /// `p=alive` の問い合わせに答える。
+    pub fn notification_alive_reply(&mut self, id: &str, ids: Vec<String>) {
+        self.term.notification_alive_reply(id, &ids);
     }
 
     /// PTY へ送るバイト列を取り出す。
