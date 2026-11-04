@@ -714,7 +714,7 @@ fn images() {
         dnd(&mut t),
         vec![
             DndEvent::DragImage { index: Some(0) },
-            DndEvent::DragImage { index: Some(9) }
+            DndEvent::DragImage { index: None }
         ]
     );
 }
@@ -752,7 +752,13 @@ fn image_errors() {
         out(&mut t);
         send(&mut t, "t=o:o=1", "text/plain");
         send(&mut t, meta, &payload);
-        assert_eq!(out(&mut t), "\x1b]72;t=E;EINVAL\x1b\\", "{meta}");
+        let first = out(&mut t);
+        let mut got = first.clone();
+        if first.is_empty() {
+            send(&mut t, meta, "");
+            got = out(&mut t);
+        }
+        assert_eq!(got, "\x1b]72;t=E;EINVAL\x1b\\", "{meta}");
     }
 }
 
@@ -845,8 +851,11 @@ fn remote_drag_entries() {
     send(&mut t, "t=k:x=1:m=1", &b64(b"ab"));
     send(&mut t, "t=k:x=1:m=0", "");
     send(&mut t, "t=k:x=2:X=1:m=0", &b64(b"../x"));
+    send(&mut t, "t=k:x=2:X=1", "");
     send(&mut t, "t=k:x=3:X=7:m=0", &b64(b"a\0b\0"));
+    send(&mut t, "t=k:x=3:X=7", "");
     send(&mut t, "t=k:x=3:Y=7:y=2:m=0", &b64(b"data"));
+    send(&mut t, "t=k:x=3:Y=7:y=2", "");
     let key = |index, sub_index, parent| DragEntryKey {
         index,
         sub_index,
@@ -914,4 +923,98 @@ fn unknown_and_invalid_packets_are_dropped() {
     }
     assert!(dnd(&mut t).is_empty());
     assert_eq!(out(&mut t), "");
+}
+
+#[test]
+fn kitten_style_end_of_data_is_an_empty_packet() {
+    let mut t = term();
+    enable_offers(&mut t);
+    t.drag_gesture(loc(0, 0));
+    out(&mut t);
+    send(&mut t, "t=o:o=1", "text/plain text/uri-list");
+    // データつきの `m=0` のあとに、空のパケット。先に送ったデータは消えない。
+    send(&mut t, "t=p:x=0:m=0", &b64(b"hello"));
+    send(&mut t, "t=p:x=0", "");
+    send(&mut t, "t=p:x=1:m=0", &b64(b"a"));
+    send(&mut t, "t=p:x=1:m=0", &b64(b"b"));
+    send(&mut t, "t=p:x=1", "");
+    // 画像も同じ。
+    send(&mut t, "t=p:x=-1:y=32:X=1:Y=1:m=0", &b64(&[1, 2, 3, 4]));
+    send(&mut t, "t=p:x=-1:y=32:X=1:Y=1", "");
+    send(&mut t, "t=P:x=-1", "");
+    assert_eq!(out(&mut t), "");
+    let DndEvent::DragStart(o) = dnd(&mut t).remove(0) else {
+        panic!()
+    };
+    assert_eq!(o.data, vec![Some(b"hello".to_vec()), Some(b"ab".to_vec())]);
+    assert_eq!(o.images.len(), 1);
+    assert_eq!(o.images[0].data, vec![1, 2, 3, 4]);
+    t.drag_started();
+    out(&mut t);
+    // `y` が無ければ 0。分けて来たデータは、空のパケットでそろう。
+    send(&mut t, "t=e:m=1", &b64(b"abc"));
+    send(&mut t, "t=e:m=0", &b64(b"def"));
+    send(&mut t, "t=e:y=1:m=0", &b64(b"x"));
+    assert!(dnd(&mut t).is_empty());
+    send(&mut t, "t=e", "");
+    send(&mut t, "t=e:y=1", "");
+    assert_eq!(
+        dnd(&mut t),
+        vec![
+            DndEvent::DragData {
+                index: 0,
+                data: b"abcdef".to_vec()
+            },
+            DndEvent::DragData {
+                index: 1,
+                data: b"x".to_vec()
+            },
+        ]
+    );
+    assert_eq!(out(&mut t), "");
+}
+
+#[test]
+fn image_index_out_of_range_removes_the_image() {
+    let mut t = term();
+    enable_offers(&mut t);
+    t.drag_gesture(loc(0, 0));
+    send(&mut t, "t=o:o=1", "text/plain");
+    send(&mut t, "t=p:x=-1:y=32:X=1:Y=1", &b64(&[1, 2, 3, 4]));
+    send(&mut t, "t=P:x=-1", "");
+    dnd(&mut t);
+    t.drag_started();
+    out(&mut t);
+    send(&mut t, "t=P:x=1", "");
+    send(&mut t, "t=P:x=-1", "");
+    assert_eq!(dnd(&mut t), vec![DndEvent::DragImage { index: None }]);
+    assert_eq!(out(&mut t), "");
+}
+
+#[test]
+fn offer_errors_tell_too_many_from_invalid() {
+    let mut t = term();
+    enable_offers(&mut t);
+    t.drag_gesture(loc(0, 0));
+    out(&mut t);
+    send(
+        &mut t,
+        "t=o:o=1",
+        &format!("text/plain {}", "x".repeat(300)),
+    );
+    assert_eq!(out(&mut t), "\x1b]72;t=E;EINVAL\x1b\\");
+}
+
+#[test]
+fn disabling_during_a_drop_finishes_it() {
+    let mut t = term();
+    dropped(&mut t, &["text/plain"], false);
+    send(&mut t, "t=A", "");
+    assert_eq!(
+        dnd(&mut t),
+        vec![
+            DndEvent::DropFinished { operation: None },
+            DndEvent::DropDisabled
+        ]
+    );
 }

@@ -318,7 +318,7 @@ export interface DragImage {
  * kitty の drag and drop protocol（OSC 72）のイベント。`onDnd` で受ける。
  *
  * ドロップを受ける側:
- * - `dropEnabled` / `dropDisabled`: プログラムがドロップを受け付ける・やめた。
+ * - `dropEnabled` / `dropDisabled`: プログラムがドロップを受け付ける・やめた。ドロップの途中でやめたら、先に `dropFinished`（`operation` が null）が来る。
  * - `dropResponse`: ドラッグが窓の上にある間のプログラムの答え。OS に、受けるか・どの操作かを伝える。
  * - `dropRequest`: ドロップされたデータの頼み。`replyDropData` か `replyDropError` で答える。
  * - `dropFinished`: プログラムがドロップを読み終えた。OS にドロップの完了を伝える。`operation` が null なら取り消し。
@@ -326,8 +326,8 @@ export interface DragImage {
  * ドラッグを始める側:
  * - `dragEnabled` / `dragDisabled`: プログラムがドラッグを始められると言った・やめた。
  * - `dragStart`: ドラッグを始める求め。OS のドラッグを始め、`dragStarted` か `dragError` で答える。
- * - `dragImage`: ドラッグの画像を変える（`index` が null なら外す）。
- * - `dragData` / `dragDataError`: `requestDragData` で頼んだ MIME の種類（0 始まり）のデータ・エラー。
+ * - `dragImage`: ドラッグの画像を変える。`index` が null なら外す（範囲外の番号も null にそろえてある）。
+ * - `dragData` / `dragDataError`: `requestDragData` で頼んだ MIME の種類（0 始まり）のデータ・エラー。分けて届いたデータは、終わり（空のパケット）でそろえて 1 回だけ来る。
  * - `dragEntry`: 遠くの機械へのドラッグで、`requestDragEntry` で頼んだ項目のデータ。
  * - `dragCanceled` / `dragAborted`: プログラムがドラッグを取り消した・エラーで止めた。
  */

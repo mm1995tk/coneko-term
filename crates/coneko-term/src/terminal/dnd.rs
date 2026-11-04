@@ -36,7 +36,7 @@
 //!   鍵だけを使う。別の `t` のパケットが割り込んだら、途中のものを捨てる。
 //! - 知らない `t`・不正な鍵・不正な数は捨てる。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::clipboard::{decode_base64, encode_base64};
 
@@ -293,7 +293,8 @@ pub enum DndEvent {
         /// 受け付ける MIME の種類。
         mimes: Vec<String>,
     },
-    /// プログラムがドロップを受け付けないと言った（`t=A`）、またはリセットされた。
+    /// プログラムがドロップを受け付けないと言った（`t=A`）、またはリセットされた。ドロップの途中なら、
+    /// 先に [`DndEvent::DropFinished`]（取り消し）が出る。
     DropDisabled,
     /// ドラッグが窓の上にある間の、プログラムの答え（`t=m:o=O`）。GUI は OS に、ドロップを
     /// 受けるか・どの操作かを伝える。
@@ -468,9 +469,22 @@ enum Drag {
     /// 申し出を受けて、データと画像を溜めている。
     Building(Builder),
     /// `DragStart` を出して、GUI の答えを待っている。
-    Starting { mimes: usize },
+    Starting { mimes: usize, images: usize },
     /// ドラッグが始まっている。
-    Active { mimes: usize },
+    Active(ActiveDrag),
+}
+
+/// 始まっているドラッグ。プログラムから分けて届くデータを、そろうまで溜める。
+#[derive(Debug, Default)]
+struct ActiveDrag {
+    mimes: usize,
+    images: usize,
+    /// 溜めている途中の `t=e` のデータ（MIME の番号ごと）。
+    data: HashMap<u32, Vec<u8>>,
+    /// 溜めている途中の `t=k` の項目（`x`・`y`・`Y` ごと）。
+    entries: HashMap<(u32, u32, u32), (DragEntryForm, Vec<u8>)>,
+    /// 溜めているバイト数の合計。
+    buffered: usize,
 }
 
 /// OSC 72 の状態。
@@ -503,11 +517,17 @@ fn valid_mime(m: &str) -> bool {
     !m.is_empty() && m.chars().count() <= MAX_MIME_LEN && !m.chars().any(|c| c.is_control())
 }
 
-/// 空白で区切った MIME の一覧。多すぎる・不正な種類があるなら `None`。
-fn parse_mimes(payload: &[u8]) -> Option<Vec<String>> {
-    let text = std::str::from_utf8(payload).ok()?;
+/// 空白で区切った MIME の一覧。多すぎれば `Efbig`、UTF-8 でない・不正な種類があれば `Einval`。
+fn parse_mimes(payload: &[u8]) -> Result<Vec<String>, DndError> {
+    let text = std::str::from_utf8(payload).map_err(|_| DndError::Einval)?;
     let mimes: Vec<String> = text.split_ascii_whitespace().map(str::to_string).collect();
-    (mimes.len() <= MAX_MIMES && mimes.iter().all(|m| valid_mime(m))).then_some(mimes)
+    if mimes.len() > MAX_MIMES {
+        return Err(DndError::Efbig);
+    }
+    if !mimes.iter().all(|m| valid_mime(m)) {
+        return Err(DndError::Einval);
+    }
+    Ok(mimes)
 }
 
 /// 詰め物が無くてもよい base64（仕様）を戻す。
@@ -550,7 +570,7 @@ fn parse_machine_id(payload: &[u8]) -> Option<String> {
 
 // ---- PTY へ出す ----
 
-/// `ESC ] 72 ; 鍵 [:i=…] [; 中身] ESC \`。
+/// `ESC ] 72 ; 鍵 [:i=…] [; 中身] ESC `。
 fn packet(out: &mut Vec<u8>, meta: &str, id: u32, payload: &str) {
     out.extend_from_slice(b"\x1b]72;");
     out.extend_from_slice(meta.as_bytes());
@@ -634,9 +654,13 @@ impl Dnd {
     pub(super) fn reset(&mut self) {
         let accepting = self.accepting;
         let offers = self.offers;
+        let dropped = self.session.phase == Phase::Dropped;
         let events = std::mem::take(&mut self.events);
         *self = Dnd::default();
         self.events = events;
+        if dropped {
+            self.events.push(DndEvent::DropFinished { operation: None });
+        }
         if accepting {
             self.events.push(DndEvent::DropDisabled);
         }
@@ -678,7 +702,8 @@ impl Dnd {
                 chain.payload.extend_from_slice(payload);
                 if !meta.more {
                     let chain = self.chain.take().expect("chain");
-                    self.process(chain.meta, chain.payload);
+                    // 最後のパケットが空なら、データの終わりの印。
+                    self.process(chain.meta, chain.payload, payload.is_empty());
                 }
                 return;
             }
@@ -698,21 +723,22 @@ impl Dnd {
             });
             return;
         }
-        self.process(meta, payload.to_vec());
+        self.process(meta, payload.to_vec(), payload.is_empty());
     }
 
-    fn process(&mut self, meta: Meta, payload: Vec<u8>) {
+    /// `ended`: 最後のパケットのペイロードが空だった（データの終わりの印）。
+    fn process(&mut self, meta: Meta, payload: Vec<u8>, ended: bool) {
         match meta.kind {
             'a' => self.accept(&meta, &payload),
             'A' => self.stop_accepting(),
             'm' => self.drop_response(&meta, &payload),
             'r' => self.drop_request(&meta),
             'o' => self.offer(&meta, &payload),
-            'p' => self.present(&meta, &payload),
+            'p' => self.present(&meta, &payload, ended),
             'P' => self.drag_command(&meta),
-            'e' => self.drag_data(&meta, &payload),
+            'e' => self.drag_data(&meta, &payload, ended),
             'E' => self.drag_error_from_client(&meta, &payload),
-            'k' => self.drag_entry(&meta, &payload),
+            'k' => self.drag_entry(&meta, &payload, ended),
             _ => {}
         }
     }
@@ -730,7 +756,7 @@ impl Dnd {
             }
             return;
         }
-        let Some(mimes) = parse_mimes(payload) else {
+        let Ok(mimes) = parse_mimes(payload) else {
             return;
         };
         self.accepting = true;
@@ -739,7 +765,10 @@ impl Dnd {
     }
 
     fn stop_accepting(&mut self) {
-        self.session = Session::default();
+        // ドロップの途中なら、取り消しとして終わらせる（GUI が OS のドロップを閉じられるように）。
+        if std::mem::take(&mut self.session).phase == Phase::Dropped {
+            self.events.push(DndEvent::DropFinished { operation: None });
+        }
         self.machine_id = None;
         if std::mem::take(&mut self.accepting) {
             self.accept_mimes.clear();
@@ -758,8 +787,8 @@ impl Dnd {
             None
         } else {
             match parse_mimes(payload) {
-                Some(m) => Some(m),
-                None => return,
+                Ok(m) => Some(m),
+                Err(_) => return,
             }
         };
         self.events
@@ -781,93 +810,84 @@ impl Dnd {
         );
     }
 
-    fn drop_request(&mut self, meta: &Meta) {
-        // 終わり: `t=r:o=operation`。
-        if meta.x.is_none() && meta.big_y.is_none() {
-            if self.session.phase != Phase::Dropped {
-                self.drop_error("", DndError::Eperm, "");
-                return;
-            }
-            let operation = DndOperation::from_code(meta.op.unwrap_or(0)).unwrap_or(None);
-            self.session = Session::default();
-            self.events.push(DndEvent::DropFinished { operation });
+    /// `t=r:o=operation`: プログラムがドロップを読み終えた。
+    fn drop_finish(&mut self, meta: &Meta) {
+        if self.session.phase != Phase::Dropped {
+            self.drop_error("", DndError::Eperm, "");
             return;
         }
-        let positive = |n: Option<i32>| n.and_then(|n| u32::try_from(n).ok()).filter(|&n| n >= 1);
-        let handle = meta.big_y.map(|h| u32::try_from(h).unwrap_or(u32::MAX));
-        let req = match (handle, meta.x, meta.y) {
-            (Some(handle), None, _) => Some(DropRequest::DirClose { handle }),
-            (Some(handle), Some(_), _) => {
-                positive(meta.x).map(|index| DropRequest::DirEntry { handle, index })
-            }
-            (None, Some(_), Some(_)) => positive(meta.x)
-                .zip(positive(meta.y))
-                .map(|(index, sub_index)| DropRequest::Entry { index, sub_index }),
-            (None, Some(_), None) => positive(meta.x).map(|index| DropRequest::Data { index }),
-            (None, None, _) => None,
-        };
-        let Some(req) = req else {
-            let keys = [
-                meta.x.map(|v| format!("x={v}")),
-                meta.y.map(|v| format!("y={v}")),
-                meta.big_y.map(|v| format!("Y={v}")),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(":");
-            self.drop_error(&keys, DndError::Enoent, "");
-            return;
-        };
-        let keys = request_keys(&req);
+        let operation = DndOperation::from_code(meta.op.unwrap_or(0)).unwrap_or(None);
+        self.session = Session::default();
+        self.events.push(DndEvent::DropFinished { operation });
+    }
+
+    /// 頼みを検査する。通れば、必要な状態（`text/uri-list` を頼んだ、handle を閉じた）を更新する。
+    fn check_request(&mut self, req: &DropRequest) -> Result<(), DndError> {
         // ドロップの前の頼みは断る。ドロップは終わらない。
         if !self.accepting || self.session.phase != Phase::Dropped {
-            self.drop_error(&keys, DndError::Eperm, "");
-            return;
+            return Err(DndError::Eperm);
         }
-        match req {
+        let s = &mut self.session;
+        let is_list = |index: u32| {
+            s.dropped
+                .get(index as usize - 1)
+                .is_some_and(|m| m == "text/uri-list")
+        };
+        match *req {
             DropRequest::Data { index } => {
-                let Some(mime) = self.session.dropped.get(index as usize - 1) else {
-                    self.drop_error(&keys, DndError::Enoent, "");
-                    return;
-                };
-                if mime == "text/uri-list" {
-                    self.session.uri_list = true;
+                if index as usize > s.dropped.len() {
+                    return Err(DndError::Enoent);
+                }
+                if is_list(index) {
+                    s.uri_list = true;
                 }
             }
             DropRequest::Entry { index, .. } => {
-                let is_list = self
-                    .session
-                    .dropped
-                    .get(index as usize - 1)
-                    .is_some_and(|m| m == "text/uri-list");
-                if !self.session.uri_list || !is_list {
-                    self.drop_error(&keys, DndError::Einval, "");
-                    return;
+                if !s.uri_list || !is_list(index) {
+                    return Err(DndError::Einval);
                 }
-                if self.session.from_self {
-                    self.drop_error(&keys, DndError::Eperm, "");
-                    return;
+                if s.from_self {
+                    return Err(DndError::Eperm);
                 }
             }
             DropRequest::DirEntry { handle, .. } => {
-                if !self.session.handles.contains(&handle) {
-                    self.drop_error(&keys, DndError::Einval, "");
-                    return;
+                if !s.handles.contains(&handle) {
+                    return Err(DndError::Einval);
                 }
-                if self.session.from_self {
-                    self.drop_error(&keys, DndError::Eperm, "");
-                    return;
+                if s.from_self {
+                    return Err(DndError::Eperm);
                 }
             }
             DropRequest::DirClose { handle } => {
-                if !self.session.handles.remove(&handle) {
-                    self.drop_error(&keys, DndError::Einval, "");
-                    return;
+                if !s.handles.remove(&handle) {
+                    return Err(DndError::Einval);
                 }
-                self.events.push(DndEvent::DropRequest(req));
+            }
+        }
+        Ok(())
+    }
+
+    fn drop_request(&mut self, meta: &Meta) {
+        // 終わり: `t=r:o=operation`。
+        if meta.x.is_none() && meta.big_y.is_none() {
+            self.drop_finish(meta);
+            return;
+        }
+        let req = match DropRequest::from_meta(meta) {
+            Ok(r) => r,
+            Err(keys) => {
+                self.drop_error(&keys, DndError::Enoent, "");
                 return;
             }
+        };
+        let keys = request_keys(&req);
+        if let Err(e) = self.check_request(&req) {
+            self.drop_error(&keys, e, "");
+            return;
+        }
+        if matches!(req, DropRequest::DirClose { .. }) {
+            self.events.push(DndEvent::DropRequest(req));
+            return;
         }
         if self.session.pending >= MAX_PENDING {
             // 頼みが多すぎる: 断ってドロップを終わらせる（仕様）。
@@ -965,7 +985,7 @@ impl Dnd {
         true
     }
 
-    /// データの答え。頼まれていないものは出さない。
+    /// データの答え。ドロップの途中でなければ出さない。
     pub(super) fn drop_data_reply(&mut self, req: &DropRequest, form: DropForm, data: &[u8]) {
         if self.session.phase != Phase::Dropped || matches!(req, DropRequest::DirClose { .. }) {
             return;
@@ -1065,9 +1085,12 @@ impl Dnd {
             self.drag_error_packet(None, DndError::Einval.code());
             return;
         };
-        let Some(mimes) = parse_mimes(payload) else {
-            self.drag_error_packet(None, DndError::Efbig.code());
-            return;
+        let mimes = match parse_mimes(payload) {
+            Ok(m) => m,
+            Err(e) => {
+                self.drag_error_packet(None, e.code());
+                return;
+            }
         };
         if mimes.is_empty() {
             self.drag_error_packet(None, DndError::Einval.code());
@@ -1084,7 +1107,23 @@ impl Dnd {
         });
     }
 
-    fn present(&mut self, meta: &Meta, payload: &[u8]) {
+    /// 画像が形式どおりか。生のデータは大きさが幅 × 高さ × 1 画素の大きさに合うこと。
+    fn image_valid(img: &DragImage) -> bool {
+        match img.format {
+            DragImageFormat::Rgb => {
+                u64::from(img.width) * u64::from(img.height) * 3 == img.data.len() as u64
+            }
+            DragImageFormat::Rgba => {
+                u64::from(img.width) * u64::from(img.height) * 4 == img.data.len() as u64
+            }
+            DragImageFormat::Text => std::str::from_utf8(&img.data).is_ok(),
+            _ => true,
+        }
+    }
+
+    /// `t=p`: 先に送るデータと画像。データは何度かに分けて来てよく、空のパケットが終わりの印
+    /// （kitty の dnd kitten は、データのあとに空のパケットを別に送る）。送られた順につなげる。
+    fn present(&mut self, meta: &Meta, payload: &[u8], ended: bool) {
         let Drag::Building(b) = &mut self.drag else {
             self.drag_error_packet(None, DndError::Eperm.code());
             return;
@@ -1099,17 +1138,35 @@ impl Dnd {
                 self.fail_drag(DndError::Einval);
                 return;
             };
-            b.data_total = b.data_total - slot.as_ref().map_or(0, Vec::len) + bytes.len();
+            // 空のパケットだけでも、空のデータとして枠を作る。
+            slot.get_or_insert_with(Vec::new).extend_from_slice(&bytes);
+            b.data_total += bytes.len();
             if b.data_total > MAX_PRESENT_BYTES {
                 self.fail_drag(DndError::Efbig);
-                return;
             }
-            *slot = Some(bytes);
             return;
         }
-        // 画像: -1 から順に。
-        if idx.unsigned_abs() as usize != b.images.len() + 1 {
+        // 画像: -1 から順に。溜めている途中の画像の続きか、次の画像。
+        let n = idx.unsigned_abs() as usize;
+        b.image_total += bytes.len();
+        if b.image_total > MAX_IMAGE_BYTES {
+            self.fail_drag(DndError::Efbig);
+            return;
+        }
+        if n != 0 && n == b.images.len() {
+            let img = &mut b.images[n - 1];
+            img.data.extend_from_slice(&bytes);
+            if ended && !Self::image_valid(img) {
+                self.fail_drag(DndError::Einval);
+            }
+            return;
+        }
+        if n != b.images.len() + 1 || b.images.last().is_some_and(|i| !Self::image_valid(i)) {
             self.fail_drag(DndError::Einval);
+            return;
+        }
+        if b.images.len() >= MAX_IMAGES {
+            self.fail_drag(DndError::Efbig);
             return;
         }
         let (Some(width), Some(height)) = (
@@ -1129,42 +1186,33 @@ impl Dnd {
                 return;
             }
         };
-        let per_pixel = match format {
-            DragImageFormat::Rgb => Some(3u64),
-            DragImageFormat::Rgba => Some(4),
-            _ => None,
-        };
-        if let Some(n) = per_pixel {
-            if u64::from(width) * u64::from(height) * n != bytes.len() as u64 {
-                self.fail_drag(DndError::Einval);
-                return;
-            }
-        }
         let opacity = meta.op.unwrap_or(0);
-        if !(0..=1024).contains(&opacity)
-            || (format == DragImageFormat::Text && std::str::from_utf8(&bytes).is_err())
-        {
+        if !(0..=1024).contains(&opacity) {
             self.fail_drag(DndError::Einval);
             return;
         }
-        b.image_total += bytes.len();
-        if b.images.len() >= MAX_IMAGES || b.image_total > MAX_IMAGE_BYTES {
-            self.fail_drag(DndError::Efbig);
-            return;
-        }
-        b.images.push(DragImage {
+        let img = DragImage {
             format,
             width,
             height,
             opacity: opacity as u32,
             data: bytes,
-        });
+        };
+        if ended && !Self::image_valid(&img) {
+            self.fail_drag(DndError::Einval);
+            return;
+        }
+        b.images.push(img);
     }
 
     fn drag_command(&mut self, meta: &Meta) {
         let idx = meta.x.unwrap_or(0);
         match &mut self.drag {
             Drag::Building(b) if idx == -1 => {
+                if !b.images.iter().all(Self::image_valid) {
+                    self.fail_drag(DndError::Einval);
+                    return;
+                }
                 let image = b.image.or(if b.images.is_empty() { None } else { Some(0) });
                 let offer = DragOffer {
                     operations: b.operations,
@@ -1176,6 +1224,7 @@ impl Dnd {
                 };
                 self.drag = Drag::Starting {
                     mimes: offer.mimes.len(),
+                    images: offer.images.len(),
                 };
                 self.events.push(DndEvent::DragStart(Box::new(offer)));
             }
@@ -1184,44 +1233,61 @@ impl Dnd {
                     .ok()
                     .filter(|&i| (i as usize) < b.images.len());
             }
-            Drag::Active { .. } if idx != -1 => {
-                let index = u32::try_from(idx).ok();
+            Drag::Active(a) if idx != -1 => {
+                // 範囲外の番号は、画像を外す。
+                let index = u32::try_from(idx).ok().filter(|&i| (i as usize) < a.images);
                 self.events.push(DndEvent::DragImage { index });
             }
-            _ => self.drag_error_packet(None, DndError::Eperm.code()),
+            Drag::Idle => self.drag_error_packet(None, DndError::Eperm.code()),
+            // 始まったあとの `t=P:x=-1`、答えを待つ間の画像の変更: 黙って捨てる。
+            _ => {}
         }
     }
 
-    fn drag_data(&mut self, meta: &Meta, payload: &[u8]) {
-        let Drag::Active { mimes } = self.drag else {
+    /// `t=e:y=idx`: 頼んだデータ。何度かに分けて来てよく、空のパケットが終わりの印。
+    /// そろってから 1 つの [`DndEvent::DragData`] にする。`y` が無ければ 0。
+    fn drag_data(&mut self, meta: &Meta, payload: &[u8], ended: bool) {
+        let Drag::Active(a) = &mut self.drag else {
             // 始まる前の `t=e` は不正（仕様）。
             self.fail_drag(DndError::Einval);
             return;
         };
-        let Some(index) = meta
-            .y
-            .and_then(|y| u32::try_from(y).ok())
-            .filter(|&i| (i as usize) < mimes)
-        else {
-            self.drag_error_packet(meta.y, DndError::Einval.code());
+        let y = meta.y.unwrap_or(0);
+        let Some(index) = u32::try_from(y).ok().filter(|&i| (i as usize) < a.mimes) else {
+            self.drag_error_packet(Some(y), DndError::Einval.code());
             return;
         };
-        match decode(payload) {
-            Some(data) => self.events.push(DndEvent::DragData { index, data }),
-            None => self.events.push(DndEvent::DragDataError {
+        let Some(bytes) = decode(payload) else {
+            a.data.remove(&index);
+            self.events.push(DndEvent::DragDataError {
                 index,
                 error: DndError::Einval.code().to_string(),
                 description: "invalid base64".to_string(),
-            }),
+            });
+            return;
+        };
+        a.buffered += bytes.len();
+        if a.buffered > MAX_PRESENT_BYTES {
+            self.fail_drag(DndError::Efbig);
+            return;
+        }
+        a.data.entry(index).or_default().extend_from_slice(&bytes);
+        if ended {
+            let data = a.data.remove(&index).unwrap_or_default();
+            a.buffered -= data.len();
+            self.events.push(DndEvent::DragData { index, data });
         }
     }
 
     fn drag_error_from_client(&mut self, meta: &Meta, payload: &[u8]) {
         let (error, description) = parse_error(payload);
-        match (&self.drag, meta.y) {
+        match (&mut self.drag, meta.y) {
             (Drag::Idle, _) => {}
-            (Drag::Active { mimes }, Some(y)) if y >= 0 => {
-                if (y as usize) < *mimes {
+            (Drag::Active(a), Some(y)) if y >= 0 => {
+                if (y as usize) < a.mimes {
+                    if let Some(d) = a.data.remove(&(y as u32)) {
+                        a.buffered -= d.len();
+                    }
                     self.events.push(DndEvent::DragDataError {
                         index: y as u32,
                         error,
@@ -1232,26 +1298,27 @@ impl Dnd {
                 }
             }
             (Drag::Building(_), _) => self.drag = Drag::Idle,
-            (Drag::Starting { .. } | Drag::Active { .. }, Some(-1)) => {
+            (Drag::Starting { .. } | Drag::Active(_), Some(-1)) => {
                 self.drag = Drag::Idle;
                 self.events.push(DndEvent::DragCanceled);
             }
-            (Drag::Starting { .. } | Drag::Active { .. }, None) => {
+            (Drag::Starting { .. } | Drag::Active(_), None) => {
                 self.drag = Drag::Idle;
                 self.events
                     .push(DndEvent::DragAborted { error, description });
             }
-            (Drag::Starting { .. } | Drag::Active { .. }, Some(_)) => {
+            (Drag::Starting { .. } | Drag::Active(_), Some(_)) => {
                 self.fail_drag(DndError::Einval);
             }
         }
     }
 
-    fn drag_entry(&mut self, meta: &Meta, payload: &[u8]) {
-        if !matches!(self.drag, Drag::Active { .. }) {
+    /// `t=k`: 遠くの機械へのドラッグの項目。`t=e` と同じく、空のパケットが終わりの印。
+    fn drag_entry(&mut self, meta: &Meta, payload: &[u8], ended: bool) {
+        let Drag::Active(a) = &mut self.drag else {
             self.fail_drag(DndError::Einval);
             return;
-        }
+        };
         let u = |n: Option<i32>| n.and_then(|n| u32::try_from(n).ok());
         let Some(index) = u(meta.x).filter(|&i| i >= 1) else {
             return;
@@ -1267,15 +1334,27 @@ impl Dnd {
             sub_index: u(meta.y).unwrap_or(0),
             parent: u(meta.big_y).unwrap_or(0),
         };
-        match decode(payload) {
-            Some(data) => self.events.push(DndEvent::DragEntry { key, form, data }),
-            None => {
-                self.drag = Drag::Idle;
-                self.events.push(DndEvent::DragAborted {
-                    error: DndError::Einval.code().to_string(),
-                    description: "invalid base64".to_string(),
-                });
-            }
+        let Some(bytes) = decode(payload) else {
+            self.fail_drag(DndError::Einval);
+            return;
+        };
+        a.buffered += bytes.len();
+        if a.buffered > MAX_PRESENT_BYTES {
+            self.fail_drag(DndError::Efbig);
+            return;
+        }
+        let slot = a
+            .entries
+            .entry((key.index, key.sub_index, key.parent))
+            .or_insert((form, Vec::new()));
+        slot.1.extend_from_slice(&bytes);
+        if ended {
+            let (form, data) = a
+                .entries
+                .remove(&(key.index, key.sub_index, key.parent))
+                .unwrap_or((form, Vec::new()));
+            a.buffered -= data.len();
+            self.events.push(DndEvent::DragEntry { key, form, data });
         }
     }
 
@@ -1304,10 +1383,14 @@ impl Dnd {
 
     /// `DragStart` への答え（成功）。
     pub(super) fn drag_started(&mut self) -> bool {
-        let Drag::Starting { mimes } = self.drag else {
+        let Drag::Starting { mimes, images } = self.drag else {
             return false;
         };
-        self.drag = Drag::Active { mimes };
+        self.drag = Drag::Active(ActiveDrag {
+            mimes,
+            images,
+            ..ActiveDrag::default()
+        });
         self.drag_error_packet(None, "OK");
         true
     }
@@ -1323,7 +1406,7 @@ impl Dnd {
     }
 
     fn drag_active(&self) -> bool {
-        matches!(self.drag, Drag::Active { .. })
+        matches!(self.drag, Drag::Active(_))
     }
 
     pub(super) fn drag_accepted(&mut self, index: u32) -> bool {
@@ -1347,9 +1430,10 @@ impl Dnd {
     }
 
     pub(super) fn drag_data_request(&mut self, index: u32) -> bool {
-        let Drag::Active { mimes } = self.drag else {
+        let Drag::Active(a) = &self.drag else {
             return false;
         };
+        let mimes = a.mimes;
         (index as usize) < mimes && self.drag_event(&format!("x=5:y={index}"))
     }
 
@@ -1376,5 +1460,35 @@ fn chain_cap(kind: char) -> usize {
         MAX_DATA_CHAIN
     } else {
         MAX_TEXT_CHAIN
+    }
+}
+
+impl DropRequest {
+    /// `t=r` の鍵から頼みを組む（終わりの `t=r:o=O` は含まない）。組めなければ、答えに付ける鍵。
+    fn from_meta(meta: &Meta) -> Result<DropRequest, String> {
+        let positive = |n: Option<i32>| n.and_then(|n| u32::try_from(n).ok()).filter(|&n| n >= 1);
+        let handle = meta.big_y.map(|h| u32::try_from(h).unwrap_or(u32::MAX));
+        let req = match (handle, meta.x, meta.y) {
+            (Some(handle), None, _) => Some(DropRequest::DirClose { handle }),
+            (Some(handle), Some(_), _) => {
+                positive(meta.x).map(|index| DropRequest::DirEntry { handle, index })
+            }
+            (None, Some(_), Some(_)) => positive(meta.x)
+                .zip(positive(meta.y))
+                .map(|(index, sub_index)| DropRequest::Entry { index, sub_index }),
+            (None, Some(_), None) => positive(meta.x).map(|index| DropRequest::Data { index }),
+            (None, None, _) => None,
+        };
+        req.ok_or_else(|| {
+            [
+                meta.x.map(|v| format!("x={v}")),
+                meta.y.map(|v| format!("y={v}")),
+                meta.big_y.map(|v| format!("Y={v}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(":")
+        })
     }
 }
