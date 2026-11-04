@@ -10,7 +10,7 @@ coneko-term は、ターミナルの部品のライブラリです。最初の�
 
 最初のゴールは、xterm.js と入れ替えても shijimi-editor の GUI が今と同じように動くことです。kitty のプロトコルはそのあとに足します。「xterm.js と同じ」の物差しは、[xterm.js 6.0.0 の対応表](https://xtermjs.org/docs/api/vtfeatures/)と、そのソースです。
 
-**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。マウスの報告・ホイール・選択とコピーまでできています。kitty keyboard protocol は一部できています。モードのフラグ（`CSI > u`、`CSI < u`、`CSI = u`、`CSI ? u`）とフラグ 1（disambiguate escape codes）で、ほかのフラグはまだです。
+**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。マウスの報告・ホイール・選択とコピーまでできています。kitty keyboard protocol は一部できています。モードのフラグ（`CSI > u`、`CSI < u`、`CSI = u`、`CSI ? u`）とフラグ 1（disambiguate escape codes）で、ほかのフラグはまだです。コアは kitty graphics protocol で送られた画像（APC の `a=t` と `a=q`、分割送信、直接の送り方だけ）を受け取って持ちます。置くことと描くことはまだです。
 
 ## パッケージ
 
