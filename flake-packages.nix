@@ -59,6 +59,7 @@ let
         ./package-lock.json
         ./tsconfig.json
         ./tsconfig.test.json
+        ./src/animation.ts
         ./src/images.ts
         ./src/index.ts
         ./src/input.ts

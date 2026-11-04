@@ -1806,6 +1806,26 @@ export class Terminal {
     return this.core.image_data(id);
   }
 
+  /** 画像のアニメーションの状態 `[コマの数, いまのコマ, 再生の状態（1 止まる、2 待ちながら回す、3 回す）, いまのコマの表示時間（ミリ秒）, 操作の数]`（描画が使う）。画像が無ければ空。 */
+  animationInfo(id: number): Float64Array {
+    return this.core.animation_info(id);
+  }
+
+  /** いまのコマの表示時間が過ぎたと知らせ、次のコマへ進める（描画が使う）。進んだら `true`。 */
+  animationStep(id: number): boolean {
+    return this.core.animation_step(id);
+  }
+
+  /** コマを作る `index` 番目の操作（描画が使う）。並びは `WasmTerminal.frame_op` の説明を参照。 */
+  frameOp(id: number, index: number): Float64Array {
+    return this.core.frame_op(id, index);
+  }
+
+  /** `frameOp` の「データを置く」操作のバイト列（描画が使う）。 */
+  frameOpData(id: number, index: number): Uint8Array {
+    return this.core.frame_op_data(id, index);
+  }
+
   /** 変わった行（見えている画面の行番号）を返し、「変わった」の印を消す。 */
   takeDirtyRows(): number[] {
     return Array.from(this.core.take_dirty_rows());
