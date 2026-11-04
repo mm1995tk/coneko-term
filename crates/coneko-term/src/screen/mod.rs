@@ -2,13 +2,14 @@
 //!
 //! シーケンスの解釈（#4）はここに含まない。ここにあるのは、解釈した結果から呼ぶ操作。
 //!
-//! あとで足すもの（セルに付く画像、複数のカーソル）のために、
-//! `Content` などの enum は `#[non_exhaustive]`、カーソルは `Buffer` の 1 つの値にまとめてある。
+//! あとで足すもの（セルに付く画像）のために、
+//! `Content` などの enum は `#[non_exhaustive]`、カーソルは `Buffer` の 1 つの値にまとめてある。追加のカーソルは [`ExtraCursors`] で `Screen` が持つ。
 //!
 //! 左右のマージン（DECSLRM）は持たない。xterm.js 6.0.0 が対応していないため。
 
 mod buffer;
 pub mod cell;
+mod extra_cursors;
 #[cfg(test)]
 mod tests;
 
@@ -18,6 +19,7 @@ use crate::graphics::Placement;
 use buffer::Buffer;
 pub use buffer::{Line, SavedCursor};
 pub use cell::{Align, Attrs, Cell, Color, Content, SizedBlock, Underline, UnderlineStyle};
+pub use extra_cursors::{ExtraCursorColor, ExtraCursorShape, ExtraCursors};
 
 /// スクロールバックの既定の行数。
 pub const DEFAULT_SCROLLBACK: usize = 5000;
@@ -70,6 +72,9 @@ pub struct Screen {
     pub cursor_visible: bool,
     /// 挿入モード（IRM）。字を書くとき、右のセルを押し出す。
     pub insert_mode: bool,
+    /// 追加のカーソル（kitty の multiple cursors protocol）。主画面と代替画面で共有し、
+    /// 画面の切り替えと RIS で空になる。
+    pub extra_cursors: ExtraCursors,
 }
 
 impl Screen {
@@ -91,6 +96,7 @@ impl Screen {
             cursor_blinking: false,
             cursor_visible: true,
             insert_mode: false,
+            extra_cursors: ExtraCursors::default(),
         }
     }
 
@@ -515,6 +521,7 @@ impl Screen {
         let (rows, cols) = (self.primary.rows, self.primary.cols);
         self.alt = Buffer::new_alt(rows, cols);
         self.alt_active = true;
+        self.extra_cursors.clear();
     }
 
     /// 主画面へ戻る。代替画面の中身は捨てる。
@@ -523,6 +530,7 @@ impl Screen {
             return;
         }
         self.alt_active = false;
+        self.extra_cursors.clear();
         // 代替画面の配置は捨てる
         let (rows, cols) = (self.primary.rows, self.primary.cols);
         self.alt = Buffer::new_alt(rows, cols);
@@ -539,5 +547,6 @@ impl Screen {
         assert!(rows >= 1 && cols >= 1, "rows and cols must be at least 1");
         self.primary.resize(rows, cols);
         self.alt.resize(rows, cols);
+        self.extra_cursors.retain_within(rows, cols);
     }
 }

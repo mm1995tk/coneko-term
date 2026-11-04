@@ -634,6 +634,13 @@ export interface CursorState {
   shape: "block" | "underline" | "bar";
 }
 
+/** 追加のカーソル（位置と形）。 */
+export interface ExtraCursorState {
+  x: number;
+  y: number;
+  shape: "block" | "underline" | "bar";
+}
+
 /**
  * 1 行ぶんのセル。`cells` は WASM のメモリの上の見え方で、次に `readRow` などを呼ぶか
  * 書き込みで画面が変わるまでしか使えない。セルの並びは `CELL_STRIDE` 個ずつ:
@@ -907,6 +914,31 @@ export class Terminal {
       blinking: blinking === 1,
       shape: (["block", "underline", "bar"] as const)[shape],
     };
+  }
+
+  /**
+   * 追加のカーソル（kitty の multiple cursors protocol）。上の行から、左の列の順。
+   * `shape` は、主のカーソルに従うものも、いまの主のカーソルの形にしてある。
+   */
+  get extraCursors(): ExtraCursorState[] {
+    const flat = this.core.extra_cursors();
+    const main = this.cursor.shape;
+    const shapes = ["block", "underline", "bar"] as const;
+    const out: ExtraCursorState[] = [];
+    for (let i = 0; i + 2 < flat.length; i += 3) {
+      out.push({ x: flat[i], y: flat[i + 1], shape: shapes[flat[i + 2]] ?? main });
+    }
+    return out;
+  }
+
+  /** 追加のカーソルの `[x, y, 形]` の並び（描画が使う。形は 3 が主のカーソルに従う）。 */
+  readExtraCursors(): Uint32Array {
+    return this.core.extra_cursors();
+  }
+
+  /** 追加のカーソルの色の語 `[字の色, カーソルの色]`（描画が使う。上位 8 ビットが 0 主のカーソルと同じ、1 パレット、2 RGB、3 反転）。 */
+  readExtraCursorColors(): Uint32Array {
+    return this.core.extra_cursor_colors();
   }
 
   /** 代替画面にいるか。 */
