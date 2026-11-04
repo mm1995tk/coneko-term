@@ -61,6 +61,7 @@ let
         ./tsconfig.test.json
         ./src/index.ts
         ./src/memory.ts
+        ./src/renderer.ts
         ./src/terminal.ts
         ./test
         ./LICENSE
@@ -86,8 +87,10 @@ let
       mkdir -p $out
       npm_config_cache=$TMPDIR/npm-cache npm pack --ignore-scripts --pack-destination $out
       # 配る tarball に .wasm と .d.ts が入っていること（prepack は --ignore-scripts では走らない）
+      # （`grep -q` が先に終わって tar が SIGPIPE で落ちないよう、一覧をいったんファイルに置く）
+      tar tzf $out/*.tgz > $TMPDIR/tarball-files
       for f in dist/index.d.ts dist/wasm/coneko_term_wasm_bg.wasm dist/wasm/coneko_term_wasm.d.ts; do
-        tar tzf $out/*.tgz | grep -qx "package/$f"
+        grep -qx "package/$f" $TMPDIR/tarball-files
       done
       runHook postInstall
     '';

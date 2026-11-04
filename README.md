@@ -10,7 +10,7 @@ coneko-term is a library of terminal building blocks. The first user is the GUI 
 
 The first goal is that shijimi-editor's GUI works with coneko-term as it does with xterm.js. kitty's protocol comes after that. "The same as xterm.js" is measured against the [xterm.js 6.0.0 feature table](https://xtermjs.org/docs/api/vtfeatures/) and its source.
 
-**Status:** the WASM and TypeScript API (`Terminal`) is in place. Drawing, keyboard and mouse are not.
+**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Keyboard and mouse (wheel, selection) are not.
 
 ## Packages
 
@@ -27,7 +27,19 @@ term.registerOscHandler(133, (data) => console.log("OSC 133", data));
 term.write("hello\r\n", () => console.log("processed"));
 ```
 
-`Terminal` has no DOM dependency (`open(host)` only creates a focusable element; drawing comes with the renderer). Large `write`s are processed in small slices, and `done` is called when that data has been processed. `takeDirtyRows()` and `readRow(y)` give the changed rows as cells in WASM memory.
+`Terminal` has no DOM dependency until you call `open(host)`. Large `write`s are processed in small slices, and `done` is called when that data has been processed. `takeDirtyRows()` and `readRow(y)` give the changed rows as cells in WASM memory.
+
+## Drawing
+
+```ts
+const term = new Terminal({ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, lineHeight: 1 });
+await document.fonts.load("15px 'JetBrains Mono'"); // optional: the cell size is measured again when fonts finish loading
+term.open(pane); // creates a focusable element with a canvas and a scrollbar
+term.fit(); // cols and rows from the size of `pane` (minus the scrollbar width, as xterm.js's FitAddon)
+term.onCellSizeChange(() => term.fit()); // fonts loaded, devicePixelRatio changed
+```
+
+Drawing uses Canvas 2D with the browser's fonts (fallback fonts work for CJK), is crisp at any `devicePixelRatio`, and is batched with `requestAnimationFrame`: only changed rows are redrawn. `viewportY`, `scrollLines(n)`, `scrollToTop()`, `scrollToBottom()`, `scrollToLine(n)` and `onScroll` move the viewport into the scrollback; at the bottom it follows new output. Try it with `npm run build && node demo/serve.mjs` (open `/demo/`).
 
 ## Development
 

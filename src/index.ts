@@ -34,3 +34,12 @@ export {
   type TerminalOptions,
   type Theme,
 } from "./terminal.js";
+
+export {
+  CanvasRenderer,
+  Palette,
+  SCROLLBAR_WIDTH,
+  proposeDimensions,
+  type CellSize,
+  type FitInput,
+} from "./renderer.js";

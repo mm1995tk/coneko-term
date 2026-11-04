@@ -10,7 +10,7 @@ coneko-term は、ターミナルの部品のライブラリです。最初の�
 
 最初のゴールは、xterm.js と入れ替えても shijimi-editor の GUI が今と同じように動くことです。kitty のプロトコルはそのあとに足します。「xterm.js と同じ」の物差しは、[xterm.js 6.0.0 の対応表](https://xtermjs.org/docs/api/vtfeatures/)と、そのソースです。
 
-**状態:** WASM と TypeScript の API（`Terminal`）までできています。描画・キーボード・マウスはまだです。
+**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。キーボードとマウス（ホイール・選択）はまだです。
 
 ## パッケージ
 
@@ -27,7 +27,19 @@ term.registerOscHandler(133, (data) => console.log("OSC 133", data));
 term.write("hello\r\n", () => console.log("処理し終えた"));
 ```
 
-`Terminal` は DOM に依存しません（`open(host)` はフォーカスを受ける要素を作るだけで、描画は描画の部品で足します）。大きな `write` は小分けにして処理し、そのデータを処理し終えたら `done` を呼びます。`takeDirtyRows()` と `readRow(y)` で、変わった行を WASM のメモリ上のセルとして読めます。
+`Terminal` は `open(host)` を呼ぶまで DOM に依存しません。大きな `write` は小分けにして処理し、そのデータを処理し終えたら `done` を呼びます。`takeDirtyRows()` と `readRow(y)` で、変わった行を WASM のメモリ上のセルとして読めます。
+
+## 描画
+
+```ts
+const term = new Terminal({ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, lineHeight: 1 });
+await document.fonts.load("15px 'JetBrains Mono'"); // 省いてもよい: フォントを読み終えたときにセルの大きさを測り直す
+term.open(pane); // フォーカスを受ける要素を作り、canvas とスクロールバーを入れる
+term.fit(); // `pane` の大きさから列と行の数を出す（xterm.js の FitAddon と同じく、スクロールバーの幅を引く）
+term.onCellSizeChange(() => term.fit()); // フォントを読み終えた、devicePixelRatio が変わった
+```
+
+描画は Canvas 2D で、字はブラウザーのフォントで描きます（日本語は fallback で描けます）。`devicePixelRatio` が高くてもにじまず、`requestAnimationFrame` でまとめて、変わった行だけを描き直します。`viewportY`、`scrollLines(n)`、`scrollToTop()`、`scrollToBottom()`、`scrollToLine(n)`、`onScroll` でスクロールバックを見る位置を動かせます。一番下を見ているときは新しい出力に付いていきます。`npm run build && node demo/serve.mjs` のあと `/demo/` を開くと試せます。
 
 ## 開発
 
