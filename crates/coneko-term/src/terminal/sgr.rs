@@ -47,11 +47,16 @@ fn extended(p: &[u32], rest: &[&[u32]]) -> (Option<Color>, usize) {
 
 /// SGR のパラメーターを `pen` に当てる。
 pub(super) fn apply(pen: &mut Attrs, params: &Params) {
-    if params.is_empty() {
+    apply_list(pen, &params.iter().collect::<Vec<_>>());
+}
+
+/// [`apply`] の本体。パラメーターを 1 つずつ（サブパラメーター込みで）並べたものを当てる。
+/// 空なら `0`（全部戻す）。
+pub(super) fn apply_list(pen: &mut Attrs, list: &[&[u32]]) {
+    if list.is_empty() {
         *pen = Attrs::default();
         return;
     }
-    let list: Vec<&[u32]> = params.iter().collect();
     let mut i = 0;
     while i < list.len() {
         let p = list[i];
