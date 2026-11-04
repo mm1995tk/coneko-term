@@ -409,6 +409,7 @@ impl Graphics {
             width,
             height,
             data,
+            serial: 0,
         }))
     }
 }

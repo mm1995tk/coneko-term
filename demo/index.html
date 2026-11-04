@@ -36,6 +36,7 @@
       <button data-q="6">bar</button>
       <button id="blink">blink</button>
       <button id="more">add 200 lines</button>
+      <button id="icat">images (kitten icat)</button>
       <span id="size"></span>
       <span id="sent"></span>
     </div>
@@ -117,6 +118,74 @@
         for (let i = 0; i < 200; i++) s += `line ${n++}\r\n`;
         term.write(s);
       });
+      // `kitten icat` 相当: kitty graphics protocol で画像を送り、置く。
+      // 4096 バイトずつ分けて送る（m=1 が続き、最後が m=0）
+      const apc = (keys, b64) => {
+        let out = "";
+        for (let i = 0; i < b64.length || i === 0; i += 4096) {
+          const more = i + 4096 < b64.length ? 1 : 0;
+          const k = i === 0 ? `${keys},m=${more}` : `m=${more}`;
+          out += `\x1b_G${k};${b64.slice(i, i + 4096)}\x1b\\`;
+        }
+        return out;
+      };
+      const toBase64 = (bytes) => {
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(bin);
+      };
+      const gradient = (w, h) => {
+        const rgba = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const o = (y * w + x) * 4;
+            rgba.set([(x * 255) / w, (y * 255) / h, 160, 255], o);
+          }
+        }
+        return rgba;
+      };
+      const deflate = async (bytes) => {
+        const s = new Blob([bytes]).stream().pipeThrough(new CompressionStream("deflate"));
+        return new Uint8Array(await new Response(s).arrayBuffer());
+      };
+      const pngOf = async (w, h) => {
+        const c = document.createElement("canvas");
+        c.width = w;
+        c.height = h;
+        const g = c.getContext("2d");
+        g.fillStyle = "#e33";
+        g.fillRect(0, 0, w, h);
+        g.fillStyle = "#fd3";
+        g.beginPath();
+        g.arc(w / 2, h / 2, h / 3, 0, Math.PI * 2);
+        g.fill();
+        const blob = await new Promise((r) => c.toBlob(r, "image/png"));
+        return new Uint8Array(await blob.arrayBuffer());
+      };
+      document.getElementById("icat").addEventListener("click", async () => {
+        const raw = gradient(96, 64);
+        const rgb = new Uint8Array((raw.length / 4) * 3);
+        for (let i = 0, j = 0; i < raw.length; i += 4, j += 3) rgb.set(raw.subarray(i, i + 3), j);
+        const png = await pngOf(96, 64);
+        let s = "\r\nf=32 (native size):\r\n";
+        s += apc("a=T,f=32,s=96,v=64,i=101", toBase64(raw));
+        s += "\r\nf=24, o=z (stretched to 12 x 3 cells):\r\n";
+        s += apc("a=T,f=24,o=z,s=96,v=64,i=102,c=12,r=3", toBase64(await deflate(rgb)));
+        s += "\r\nf=100 (PNG), o=z (s and v are needed with o=z):\r\n";
+        s += apc("a=T,f=100,o=z,s=96,v=64,i=103", toBase64(await deflate(png)));
+        // z: 負は字の下、0 以上は字の上
+        s += "\r\n\r\nz=-1 (under the text) and z=1 (over the text):\r\n";
+        s += `${e}1;37mTEXT TEXT TEXT TEXT${e}0m\r${e}0C`;
+        s += apc("a=p,i=103,c=8,r=1,C=1,z=-1", "");
+        s += `\r\n${e}1;37mTEXT TEXT TEXT TEXT${e}0m\r`;
+        s += apc("a=p,i=103,c=8,r=1,C=1,z=1", "");
+        s += "\r\n\r\n";
+        term.write(s);
+        term.focus();
+      });
+      if (location.hash === "#icat") document.getElementById("icat").click();
       window.term = term;
     </script>
   </body>

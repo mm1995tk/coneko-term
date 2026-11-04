@@ -27,6 +27,15 @@ pub fn version() -> String {
 /// 5. 下線の色。
 pub const CELL_STRIDE: usize = 6;
 
+/// 画像の配置 1 つが使う数（`WasmTerminal::placements` の並び）の数。並びは次のとおり:
+///
+/// 0. 左上のセルの行（見えている画面の一番上を 0 とする。スクロールバックの中は負）。
+/// 1. 画像の ID。2. 配置の番号（0 は無い）。3. 左上のセルの列。
+/// 4 から 7. 元の画像の使う部分の左端・上端・幅・高さ（画素。幅と高さが 0 なら端まで）。
+/// 8, 9. 左上のセルの中でのずれ（横・縦、画素）。10, 11. 使うセルの列数・行数。
+/// 12. 重ねる順（`z`）。13. 画素のまま置くなら 1、セルいっぱいに引き伸ばすなら 0。
+pub const PLACEMENT_STRIDE: usize = 14;
+
 /// クラスター（結合文字を含む書記素）のセルの字に立てるビット。残りのビットが `cluster(番号)` の番号。
 pub const CLUSTER_FLAG: u32 = 0x8000_0000;
 
@@ -490,6 +499,72 @@ impl WasmTerminal {
     pub fn cluster(&self, index: usize) -> String {
         self.clusters.get(index).cloned().unwrap_or_default()
     }
+    /// セルの大きさ（画素）を教える。`c`・`r` が無い画像の配置の大きさを決めるのに使う。
+    pub fn set_cell_size(&mut self, width: u32, height: u32) {
+        self.term.set_cell_size(width, height);
+    }
+
+    /// 画像の配置を上の行から順に、`PLACEMENT_STRIDE` 個ずつの数で返す。
+    /// 並びは `PLACEMENT_STRIDE` の説明を参照。
+    pub fn placements(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for p in self.term.placements() {
+            let q = &p.placement;
+            out.extend_from_slice(&[
+                p.row as f64,
+                q.image_id as f64,
+                q.placement_id as f64,
+                q.col as f64,
+                q.src_x as f64,
+                q.src_y as f64,
+                q.src_w as f64,
+                q.src_h as f64,
+                q.offset_x as f64,
+                q.offset_y as f64,
+                q.cols as f64,
+                q.rows as f64,
+                q.z as f64,
+                q.native_size as u8 as f64,
+            ]);
+        }
+        out
+    }
+
+    /// 持っている画像の `[ID, 通し番号]` の並び。同じ ID で通し番号が変われば別の画像。
+    pub fn image_serials(&self) -> Vec<f64> {
+        self.term
+            .images()
+            .flat_map(|i| [i.id as f64, i.serial as f64])
+            .collect()
+    }
+
+    /// 画像の情報 `[通し番号, 形式（0 RGB、1 RGBA、2 PNG）, 圧縮されているか, 幅, 高さ]`。
+    /// 幅と高さが 0 なら分からない。画像が無ければ空。
+    pub fn image_info(&self, id: u32) -> Vec<f64> {
+        use coneko_term::graphics::ImageFormat;
+        match self.term.image(id) {
+            None => Vec::new(),
+            Some(i) => vec![
+                i.serial as f64,
+                match i.format {
+                    ImageFormat::Rgb => 0.0,
+                    ImageFormat::Rgba => 1.0,
+                    _ => 2.0,
+                },
+                i.compressed as u8 as f64,
+                i.width as f64,
+                i.height as f64,
+            ],
+        }
+    }
+
+    /// 画像のバイト列（base64 を戻したもの。圧縮も PNG もそのまま）。画像が無ければ空。
+    pub fn image_data(&self, id: u32) -> Vec<u8> {
+        self.term
+            .image(id)
+            .map(|i| i.data.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl WasmTerminal {
@@ -561,5 +636,32 @@ mod tests {
         assert_eq!(t.cells[CELL_STRIDE + 4] & 1, 1);
         assert_eq!(t.cells[2 * CELL_STRIDE + 1], 0);
         assert!(t.take_dirty_rows().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn placements_and_images_are_exported() {
+        let mut t = WasmTerminal::new(5, 20, 10);
+        t.set_cell_size(10, 20);
+        // 1x2 の RGB を、2 列 x 1 行で置く
+        t.write(b"\x1b_Ga=T,f=24,s=1,v=2,i=7,c=2,r=1,z=-1;AAAAAAAA\x1b\\");
+        let p = t.placements();
+        assert_eq!(p.len(), PLACEMENT_STRIDE);
+        // 行 0、ID 7、配置の番号 0、列 0、元の部分 (0, 0, 1, 2)、ずれ (0, 0)、2 列 1 行、z -1、引き伸ばし
+        assert_eq!(
+            p,
+            vec![0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, -1.0, 0.0]
+        );
+        let serials = t.image_serials();
+        assert_eq!(serials.len(), 2);
+        assert_eq!(serials[0], 7.0);
+        assert_eq!(t.image_info(7), vec![serials[1], 0.0, 0.0, 1.0, 2.0]);
+        assert_eq!(t.image_data(7), vec![0; 6]);
+        assert!(t.image_info(8).is_empty());
+        assert!(t.image_data(8).is_empty());
     }
 }

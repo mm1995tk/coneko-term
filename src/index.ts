@@ -53,6 +53,18 @@ export {
 } from "./renderer.js";
 
 export {
+  PLACEMENT_STRIDE,
+  Z_UNDER_BACKGROUND,
+  ImageCache,
+  browserImageDecoder,
+  parsePlacements,
+  type DrawableImage,
+  type ImageDecoder,
+  type ImagePlacement,
+  type ImageSource,
+} from "./images.js";
+
+export {
   SelectionModel,
   type BufferPosition,
   type SelectionHost,
