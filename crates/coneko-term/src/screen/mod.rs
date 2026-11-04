@@ -26,24 +26,33 @@ pub const DEFAULT_SCROLLBACK: usize = 5000;
 #[non_exhaustive]
 pub enum CursorShape {
     #[default]
+    /// ブロック。
     Block,
+    /// 下線。
     Underline,
+    /// 縦棒。
     Bar,
 }
 
 /// カーソルの状態。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cursor {
+    /// 列（0 始まり）。
     pub x: usize,
+    /// 行（0 始まり）。
     pub y: usize,
     /// 行末まで書いて、次の字で折り返す状態。
     pub pending_wrap: bool,
+    /// 見た目の形。
     pub shape: CursorShape,
+    /// 点滅するか。
     pub blinking: bool,
+    /// 表示するか。
     pub visible: bool,
 }
 
 #[derive(Clone, Debug)]
+/// 画面。主画面と代替画面を持ち、字の書き込み・カーソル・スクロール・タブ・大きさの変更を受ける。
 pub struct Screen {
     primary: Buffer,
     alt: Buffer,
@@ -52,8 +61,11 @@ pub struct Screen {
     pub pen: Attrs,
     /// 行末で折り返すか（DECAWM）。
     pub wraparound: bool,
+    /// カーソルの形。
     pub cursor_shape: CursorShape,
+    /// カーソルが点滅するか。
     pub cursor_blinking: bool,
+    /// カーソルを表示するか。
     pub cursor_visible: bool,
 }
 
@@ -94,10 +106,12 @@ impl Screen {
         }
     }
 
+    /// 行数。
     pub fn rows(&self) -> usize {
         self.buf().rows
     }
 
+    /// 列数。
     pub fn cols(&self) -> usize {
         self.buf().cols
     }
@@ -120,6 +134,7 @@ impl Screen {
         &self.buf().lines[i]
     }
 
+    /// カーソルの状態。
     pub fn cursor(&self) -> Cursor {
         let c = self.buf().cursor;
         Cursor {
@@ -132,6 +147,7 @@ impl Screen {
         }
     }
 
+    /// 保存したカーソル（DECSC）。
     pub fn saved_cursor(&self) -> Option<SavedCursor> {
         self.buf().saved
     }
@@ -141,10 +157,12 @@ impl Screen {
         (self.buf().scroll_top, self.buf().scroll_bottom)
     }
 
+    /// 代替画面に切り替わっているか。
     pub fn is_alt_screen(&self) -> bool {
         self.alt_active
     }
 
+    /// タブ位置の列（昇順）。
     pub fn tab_stops(&self) -> Vec<usize> {
         let tabs = &self.buf().tabs;
         (0..tabs.len()).filter(|&x| tabs[x]).collect()
@@ -175,6 +193,7 @@ impl Screen {
         self.buf_mut().print(c, width, &pen, wrap);
     }
 
+    /// 文字列を 1 字ずつ `print` する。
     pub fn print_str(&mut self, s: &str) {
         for c in s.chars() {
             self.print(c);
@@ -198,12 +217,14 @@ impl Screen {
         c.pending_wrap = false;
     }
 
+    /// カーソルを左端へ（CR）。
     pub fn carriage_return(&mut self) {
         let c = &mut self.buf_mut().cursor;
         c.x = 0;
         c.pending_wrap = false;
     }
 
+    /// カーソルを 1 つ左へ（BS）。左端では動かない。
     pub fn backspace(&mut self) {
         let c = &mut self.buf_mut().cursor;
         c.x = c.x.saturating_sub(1);
@@ -266,6 +287,7 @@ impl Screen {
         true
     }
 
+    /// スクロール範囲を画面全体に戻す。
     pub fn reset_scroll_region(&mut self) {
         let rows = self.rows();
         let b = self.buf_mut();
@@ -287,16 +309,19 @@ impl Screen {
 
     // ---- タブ ----
 
+    /// カーソルの列にタブ位置を置く（HTS）。
     pub fn set_tab_stop(&mut self) {
         let b = self.buf_mut();
         b.tabs[b.cursor.x] = true;
     }
 
+    /// カーソルの列のタブ位置を消す。
     pub fn clear_tab_stop(&mut self) {
         let b = self.buf_mut();
         b.tabs[b.cursor.x] = false;
     }
 
+    /// タブ位置をすべて消す。
     pub fn clear_all_tab_stops(&mut self) {
         self.buf_mut().tabs.fill(false);
     }

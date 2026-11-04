@@ -23,6 +23,7 @@ impl Line {
         }
     }
 
+    /// 行のセル。列数と同じ数ある。
     pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
@@ -71,9 +72,13 @@ pub(crate) struct CursorPos {
 /// 保存したカーソル（DECSC）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SavedCursor {
+    /// 列（0 始まり）。
     pub x: usize,
+    /// 行（0 始まり）。
     pub y: usize,
+    /// 折り返し待ちだったか。
     pub pending_wrap: bool,
+    /// そのときの字の属性。
     pub attrs: Attrs,
 }
 
@@ -237,11 +242,7 @@ impl Buffer {
             let attrs = cell.attrs;
             line.clear_overlap(tx + 1);
             line.cells[tx].width = 2;
-            line.cells[tx + 1] = Cell {
-                content: Content::WideTail,
-                width: 0,
-                attrs,
-            };
+            line.cells[tx + 1] = Cell::wide_tail(attrs);
             if !self.cursor.pending_wrap {
                 if tx + 2 >= self.cols {
                     self.cursor.x = self.cols - 1;
@@ -301,11 +302,7 @@ impl Buffer {
             attrs: *pen,
         };
         if width == 2 {
-            line.cells[x + 1] = Cell {
-                content: Content::WideTail,
-                width: 0,
-                attrs: *pen,
-            };
+            line.cells[x + 1] = Cell::wide_tail(*pen);
         }
         if x + width >= self.cols {
             self.cursor.x = self.cols - 1;
@@ -328,12 +325,13 @@ impl Buffer {
         for cell in &mut line.cells[x0..x1] {
             *cell = Cell::blank(erase);
         }
-        if x1 == line.cells.len() {
+        if x0 == 0 && x1 == line.cells.len() {
             line.wrapped = false;
         }
     }
 
     pub fn resize(&mut self, rows: usize, cols: usize) {
+        let mut shifted = 0;
         if cols != self.cols {
             for line in &mut self.lines {
                 line.resize(cols);
@@ -343,8 +341,8 @@ impl Buffer {
             let old = self.tabs.len();
             let defaults = default_tabs(cols);
             self.tabs.resize(cols, false);
-            for x in old..cols {
-                self.tabs[x] = defaults[x];
+            if old < cols {
+                self.tabs[old..].copy_from_slice(&defaults[old..]);
             }
         }
         if rows < self.rows {
@@ -355,7 +353,8 @@ impl Buffer {
             for _ in 0..drop_bottom {
                 self.lines.pop_back();
             }
-            self.cursor.y -= remove - drop_bottom;
+            shifted = remove - drop_bottom;
+            self.cursor.y -= shifted;
             self.rows = rows;
             while self.lines.len() > self.rows + self.max_scrollback {
                 self.lines.pop_front();
@@ -372,7 +371,7 @@ impl Buffer {
         self.cursor.x = self.cursor.x.min(cols - 1);
         self.cursor.pending_wrap = false;
         if let Some(s) = &mut self.saved {
-            s.y = s.y.min(rows - 1);
+            s.y = s.y.saturating_sub(shifted).min(rows - 1);
             s.x = s.x.min(cols - 1);
         }
         self.mark_all_dirty();
