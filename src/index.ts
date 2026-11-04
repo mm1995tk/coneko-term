@@ -73,8 +73,14 @@ export {
 export {
   bracketTextForPaste,
   evaluateKeyboardEvent,
+  KITTY_DISAMBIGUATE,
+  KITTY_REPORT_ALL_KEYS,
+  KITTY_REPORT_ALTERNATE_KEYS,
+  KITTY_REPORT_EVENT_TYPES,
+  KITTY_REPORT_TEXT,
   prepareTextForTerminal,
   type KeyEventLike,
+  type KeyEventType,
   type KeyResult,
   type KeyResultType,
 } from "./keyboard.js";

@@ -395,7 +395,8 @@ export class Terminal {
 
   /**
    * kitty keyboard protocol のいまのフラグ（アプリが `CSI > u` などで決める）。
-   * 1 が立っていれば disambiguate escape codes。対応しているのは 1 だけ。
+   * ビットは 1 disambiguate、2 report event types、4 report alternate keys、
+   * 8 report all keys as escape codes、16 report associated text。
    */
   get keyboardFlags(): number {
     return this.core.keyboard_flags();
@@ -807,6 +808,7 @@ export class Terminal {
     on<ClipboardEvent>(el, "paste", onPaste);
     on<FocusEvent>(textarea, "focus", () => this.setFocused(true));
     on<FocusEvent>(textarea, "blur", () => {
+      keys.reset();
       textarea.value = "";
       this.setFocused(false);
     });

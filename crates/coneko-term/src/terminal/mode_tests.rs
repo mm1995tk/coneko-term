@@ -479,8 +479,18 @@ fn kitty_flags_set_modes() {
     assert_eq!(t.keyboard_flags(), 0);
     w(&mut t, "\x1b[=1;9u"); // 知らない mode は捨てる
     assert_eq!(t.keyboard_flags(), 0);
-    // 対応していないフラグ（2・4・8・16）は立てない
-    w(&mut t, "\x1b[=31u\x1b[>30u");
+    // 2・4・8・16 も立つ。ほかのビット（32 以上）は捨てる
+    w(&mut t, "\x1b[=31u");
+    assert_eq!(t.keyboard_flags(), 31);
+    w(&mut t, "\x1b[>30u");
+    assert_eq!(t.keyboard_flags(), 30);
+    w(&mut t, "\x1b[?u");
+    assert_eq!(out(&mut t), "\x1b[?30u");
+    w(&mut t, "\x1b[=255;1u");
+    assert_eq!(t.keyboard_flags(), 31);
+    w(&mut t, "\x1b[=8;3u"); // 8 だけ引く
+    assert_eq!(t.keyboard_flags(), 23);
+    w(&mut t, "\x1b[=32u");
     assert_eq!(t.keyboard_flags(), 0);
 }
 

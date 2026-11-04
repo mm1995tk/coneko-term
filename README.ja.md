@@ -10,7 +10,7 @@ coneko-term は、ターミナルの部品のライブラリです。最初の�
 
 最初のゴールは、xterm.js と入れ替えても shijimi-editor の GUI が今と同じように動くことです。kitty のプロトコルはそのあとに足します。「xterm.js と同じ」の物差しは、[xterm.js 6.0.0 の対応表](https://xtermjs.org/docs/api/vtfeatures/)と、そのソースです。
 
-**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。マウスの報告・ホイール・選択とコピーまでできています。kitty keyboard protocol は一部できています。モードのフラグ（`CSI > u`、`CSI < u`、`CSI = u`、`CSI ? u`）とフラグ 1（disambiguate escape codes）で、ほかのフラグはまだです。コアは kitty graphics protocol で送られた画像（APC の `a=t`・`a=T`・`a=q`、分割送信、直接の送り方だけ）を受け取って持ち、セルに置き（`a=p`、`a=T`）、消し（`a=d`）、置いた配置を描く側へ一覧で渡せます。Canvas には描く側が描きます。`f=24`・`f=32`・`f=100` を、`o=z` ありでもなしでも描けます（PNG と zlib はブラウザーの `createImageBitmap` と `DecompressionStream` で読み解き、読み解けない画像は描きません）。`z` が 0 より小さいと字の下、-1073741824 より小さいとセルの背景色の下に描きます。Unicode placeholder とアニメーションはまだです。
+**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。マウスの報告・ホイール・選択とコピーまでできています。kitty keyboard protocol は一部できています。モードのフラグ（`CSI > u`、`CSI < u`、`CSI = u`、`CSI ? u`）と、エンコードのフラグ 5 つ（1 disambiguate escape codes、2 report event types、4 report alternate keys、8 report all keys as escape codes、16 report associated text）までできています。まだなのは、ロックの修飾キー（Caps Lock・Num Lock のビット）、Hyper と Meta、メディアキーです。コアは kitty graphics protocol で送られた画像（APC の `a=t`・`a=T`・`a=q`、分割送信、直接の送り方だけ）を受け取って持ち、セルに置き（`a=p`、`a=T`）、消し（`a=d`）、置いた配置を描く側へ一覧で渡せます。Canvas には描く側が描きます。`f=24`・`f=32`・`f=100` を、`o=z` ありでもなしでも描けます（PNG と zlib はブラウザーの `createImageBitmap` と `DecompressionStream` で読み解き、読み解けない画像は描きません）。`z` が 0 より小さいと字の下、-1073741824 より小さいとセルの背景色の下に描きます。Unicode placeholder とアニメーションはまだです。
 
 ## パッケージ
 
@@ -54,6 +54,7 @@ term.onCellSizeChange(() => term.fit()); // フォントを読み終えた、dev
 - IME: 変換している間は送らず、確定した字を送ります。変換中の字はカーソルの位置に見せます。
 - `paste` イベントを受けます。`term.paste(text)` でも同じことができます。改行は `\r` にそろえ、bracketed paste（2004）が有効なら `ESC [200~` と `ESC [201~` で囲みます。
 - フォーカスの報告（1004）が有効なら、`textarea` がフォーカスを得たときと失ったときに `CSI I` と `CSI O` を送ります。
+- kitty keyboard protocol が有効なとき（アプリがフラグを立てたとき）は、仕様どおり `CSI ... u` で送ります。フラグ 2 のため `KeyHandler` は `keyup` も受けますが、離すを送るのは、押したのをエスケープコードで送ったキーだけです（IME の変換を確定する Enter が、押していないのに離すだけ送られることはありません）。変換中の動きは変わらず、エスケープコードにせず、確定した字はそのままの文字で送ります。ベースのレイアウトのキー（フラグ 4）は `KeyboardEvent.code` から決めます（PC-101 の US 配列を基準にします）。
 - `attachCustomKeyEventHandler(fn)` はキーのイベントを先に見ます。`false` を返したキーは処理しません。`scrollOnUserInput`（既定は true）は、入力したら一番下へ戻します。
 
 ## 開発
