@@ -1,4 +1,9 @@
-import { CELL_STRIDE, CLUSTER_FLAG, type RowView } from "./terminal.js";
+import {
+  CELL_STRIDE,
+  CLUSTER_FLAG,
+  type RowView,
+  type SizedInfo,
+} from "./terminal.js";
 import {
   ImageCache,
   Z_UNDER_BACKGROUND,
@@ -250,9 +255,9 @@ export class CanvasRenderer {
     this.measure();
   }
 
-  private font(bold: boolean, italic: boolean): string {
+  private font(bold: boolean, italic: boolean, scale = 1): string {
     const { fontFamily, fontSize } = this.options;
-    return `${italic ? "italic " : ""}${bold ? "bold " : ""}${fontSize * this.dpr}px ${fontFamily}`;
+    return `${italic ? "italic " : ""}${bold ? "bold " : ""}${fontSize * this.dpr * scale}px ${fontFamily}`;
   }
 
   /**
@@ -610,6 +615,12 @@ export class CanvasRenderer {
       if (width === 0) continue;
       const { fg, flags } = colors[x];
       if (flags & 32) continue; // 不可視
+      const mark = cells[o + 6];
+      // 複数のセルにまたがる字は、この行にかかる四角の一番左のセルで、四角ごと描く
+      if ((mark & 0xffff) !== 0 && ((mark >>> 16) & 0xff) === 0) {
+        ctx.globalAlpha = flags & 2 ? 0.5 : 1;
+        this.drawSized(row.sized((mark & 0xffff) - 1), mark >>> 24, x, top, fg);
+      }
       const cp = cells[o];
       const ul = (flags >>> 8) & 7;
       const strike = (flags & 64) !== 0;
@@ -650,6 +661,44 @@ export class CanvasRenderer {
         );
       }
     }
+  }
+
+  /**
+   * 複数のセルにまたがる字（OSC 66）を描く。`dy` は、いまの行が四角の上から何行目か。
+   * 描くのは四角のうち、いまの行にかかる横長の帯だけ（行ごとに描き直すため）。
+   * 分数の大きさのときだけ、`v`・`h` の寄せ方で四角の中に置く。
+   */
+  private drawSized(
+    info: SizedInfo,
+    dy: number,
+    x: number,
+    top: number,
+    fill: string,
+  ): void {
+    const frac =
+      info.denominator > info.numerator ? info.numerator / info.denominator : 1;
+    const k = info.scale * frac;
+    if (k <= 0) return;
+    const ctx = this.ctx;
+    const left = x * this.cellW;
+    const blockW = info.cols * this.cellW;
+    const blockH = info.scale * this.cellH;
+    const blockTop = top - dy * this.cellH;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, top, blockW, this.cellH);
+    ctx.clip();
+    ctx.font = this.font(false, false, k);
+    ctx.fillStyle = fill;
+    const align = (a: number, space: number, size: number): number =>
+      a === 1 ? space - size : a === 2 ? (space - size) / 2 : 0;
+    const textW = ctx.measureText(info.text).width;
+    const x0 =
+      left + (frac < 1 ? align(info.horizontal, blockW, textW) : 0);
+    const y0 =
+      blockTop + (frac < 1 ? align(info.vertical, blockH, this.cellH * k) : 0);
+    ctx.fillText(info.text, x0, y0 + this.baseline * k);
+    ctx.restore();
   }
 
   private lineThickness(): number {

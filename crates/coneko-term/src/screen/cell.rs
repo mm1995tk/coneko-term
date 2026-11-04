@@ -1,5 +1,7 @@
 //! セルと、セルに付く属性。
 
+use std::sync::Arc;
+
 /// 色。`Palette(0..=15)` が 16 色、`Palette(16..=255)` が 256 色の残り。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -88,6 +90,53 @@ pub struct Attrs {
     pub underline: Underline,
 }
 
+/// 寄せ方（kitty の text sizing の `v`・`h`）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Align {
+    /// 上（縦）または左（横）。
+    #[default]
+    Start,
+    /// 下（縦）または右（横）。
+    End,
+    /// 中央。
+    Center,
+}
+
+/// 複数のセルにまたがる字（kitty の text sizing、OSC 66）。幅 `cols` セル、高さ `scale` セルの
+/// 四角に収めて描く。四角の左上はカーソルがあったセルで、右と下へ広がる。
+/// 四角の全部のセルがこの値を（`Arc` で）共有する。
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SizedBlock {
+    /// 字。`w` を決めたときは複数の字でもよい。
+    pub text: Box<str>,
+    /// 四角の幅（セルの数。`w * s`。`w` が 0 なら、字の幅 × `s`）。
+    pub cols: u8,
+    /// 大きさ `s`。四角の高さ（セルの数）でもある。
+    pub scale: u8,
+    /// 分数の大きさの分子。
+    pub numerator: u8,
+    /// 分数の大きさの分母。0 なら分数の大きさは無い。
+    pub denominator: u8,
+    /// 縦の寄せ方（分数の大きさのときだけ効く）。
+    pub vertical: Align,
+    /// 横の寄せ方（分数の大きさのときだけ効く）。
+    pub horizontal: Align,
+}
+
+impl SizedBlock {
+    /// 字を描く大きさの倍率（`scale` に分数を掛けたもの）。
+    pub fn font_scale(&self) -> f64 {
+        let s = f64::from(self.scale);
+        if self.denominator > self.numerator {
+            s * f64::from(self.numerator) / f64::from(self.denominator)
+        } else {
+            s
+        }
+    }
+}
+
 /// セルの中身。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -101,6 +150,16 @@ pub enum Content {
     Cluster(Box<str>),
     /// 全角の字の右半分。字そのものは左のセルが持つ。
     WideTail,
+    /// 複数のセルにまたがる字（[`SizedBlock`]）の一部。四角の左上から右へ `dx`、下へ `dy` 番目のセル。
+    /// 左上（`dx == 0 && dy == 0`）のセルだけが `width` を持つ。
+    Sized {
+        /// 四角全体。
+        block: Arc<SizedBlock>,
+        /// 左上から右へ何セル目か。
+        dx: u8,
+        /// 左上から下へ何セル目か。
+        dy: u8,
+    },
 }
 
 /// 画面の 1 マス。
@@ -111,7 +170,7 @@ pub enum Content {
 pub struct Cell {
     /// セルの中身。
     pub content: Content,
-    /// 字が使うセルの数（1 か 2。全角の右半分は 0）。
+    /// 字が使うセルの数（1 か 2。全角の右半分は 0。複数のセルにまたがる字の左上は四角の幅、残りは 0）。
     pub width: u8,
     /// 属性。
     pub attrs: Attrs,
@@ -143,6 +202,30 @@ impl Cell {
         self.content == Content::WideTail
     }
 
+    /// 複数のセルにまたがる字の一部か。
+    pub fn is_sized(&self) -> bool {
+        matches!(self.content, Content::Sized { .. })
+    }
+
+    /// 全角の字（幅 2）の左半分か。
+    pub(crate) fn is_wide(&self) -> bool {
+        self.width == 2 && !self.is_sized()
+    }
+
+    /// 複数のセルにまたがる字の、左上と同じ行にある左上以外のセルか。
+    pub(crate) fn is_sized_tail_right(&self) -> bool {
+        matches!(self.content, Content::Sized { dx, dy: 0, .. } if dx != 0)
+    }
+
+    /// 字の続き（全角の右半分、または複数のセルにまたがる字の左上以外）か。
+    pub fn is_continuation(&self) -> bool {
+        match &self.content {
+            Content::WideTail => true,
+            Content::Sized { dx, dy, .. } => *dx != 0 || *dy != 0,
+            _ => false,
+        }
+    }
+
     /// 全角の字の右半分のセル。幅は 0 と決めている。
     pub fn wide_tail(attrs: Attrs) -> Cell {
         Cell {
@@ -157,7 +240,12 @@ impl Cell {
         match &self.content {
             Content::Char(c) => c.to_string(),
             Content::Cluster(s) => s.to_string(),
-            Content::Empty | Content::WideTail => String::new(),
+            Content::Sized {
+                block,
+                dx: 0,
+                dy: 0,
+            } => block.text.to_string(),
+            Content::Empty | Content::WideTail | Content::Sized { .. } => String::new(),
         }
     }
 
