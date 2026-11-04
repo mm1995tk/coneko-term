@@ -806,6 +806,7 @@ export class Terminal {
     on<ClipboardEvent>(el, "paste", onPaste);
     on<FocusEvent>(textarea, "focus", () => this.setFocused(true));
     on<FocusEvent>(textarea, "blur", () => {
+      keys.reset();
       textarea.value = "";
       this.setFocused(false);
     });

@@ -570,7 +570,7 @@ test("kitty flag 16: the text the key makes", () => {
   // 現在の配列の字。キーの番号はその字、ベースのレイアウトの字は別
   assert.equal(ek(ev(50, { key: "é", code: "Digit2" }), all), `${ESC}[233;;233u`);
   // 絵文字などの 1 コードポイント
-  assert.equal(ek(ev(0, { key: "😀", code: "" }), all), `${ESC}[128512;;128512u`);
+  assert.equal(ek(ev(0, { key: "😀", code: "" }), all), `${ESC}[0;;128512u`);
   // 繰り返しは字つき、離すは字なし
   assert.equal(ek(letter("a"), all | F2, REPEAT), `${ESC}[97;1:2;97u`);
   assert.equal(ek(letter("a"), all | F2, RELEASE), `${ESC}[97;1:3u`);
@@ -647,6 +647,26 @@ test("KeyHandler sends repeat and release with flag 2, only for keys it reported
   h.handler.keyDown(domEvent(65, { key: "A", code: "KeyA", shiftKey: true }));
   h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
   assert.deepEqual(h.sent, [`${ESC}[97;2;65u`, `${ESC}[97;1:3u`]);
+});
+
+test("KeyHandler releases arrows pressed as SS3 (application cursor keys)", () => {
+  const h = makeHandler({ app: true, flags: F2 });
+  h.handler.keyDown(domEvent(38, { key: "ArrowUp", code: "ArrowUp" }));
+  h.handler.keyDown(domEvent(38, { key: "ArrowUp", code: "ArrowUp", repeat: true }));
+  h.handler.keyUp(domEvent(38, { key: "ArrowUp", code: "ArrowUp" }));
+  assert.deepEqual(h.sent, [`${ESC}OA`, `${ESC}[1;1:2A`, `${ESC}[1;1:3A`]);
+});
+
+test("KeyHandler does not send a stale release after reset (blur)", () => {
+  const h = makeHandler({ flags: F2 | F8 });
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA" }));
+  h.handler.reset();
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, [`${ESC}[97u`]);
+});
+
+test("kitty flag 8: a dead key is left to the legacy path", () => {
+  assert.equal(ek(ev(69, { key: "Dead", code: "KeyE" }), F8), undefined);
 });
 
 test("KeyHandler reports modifier keys alone with flag 8", () => {

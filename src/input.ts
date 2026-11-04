@@ -263,7 +263,7 @@ export class KeyHandler {
       h.isMac,
       h.macOptionIsMeta,
       flags,
-      flags & KITTY_REPORT_EVENT_TYPES && ev.repeat ? 2 : 1,
+      ev.repeat ? 2 : 1, // フラグ 2 が無ければ evaluateKeyboardEvent が無視する
     );
 
     if (result.type === "pageUp" || result.type === "pageDown") {
@@ -301,12 +301,21 @@ export class KeyHandler {
       this.textarea.value = "";
     }
 
-    if (flags & KITTY_REPORT_EVENT_TYPES && result.key.startsWith("\x1b[")) {
+    // アプリケーションカーソルキーの `ESC O A` などもここに入れる
+    if (
+      flags & KITTY_REPORT_EVENT_TYPES &&
+      (result.key.startsWith("\x1b[") || result.key.startsWith("\x1bO"))
+    ) {
       this.reported.add(keyId(ev));
     }
     h.send(result.key);
     this.cancel(ev);
     return false;
+  }
+
+  /** 押したままフォーカスを失うと keyup が来ないので、`textarea` の blur で呼ぶ。 */
+  reset(): void {
+    this.reported.clear();
   }
 
   keyUp(ev: KeyDownLike): void {

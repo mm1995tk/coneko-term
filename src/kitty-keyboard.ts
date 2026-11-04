@@ -21,10 +21,13 @@ export const KITTY_REPORT_TEXT = 16;
 /** キーの動き。1 押す、2 繰り返し、3 離す（仕様の event-type の値）。 */
 export type KeyEventType = 1 | 2 | 3;
 
-// 修飾キーのビット（modifiers は 1 + ビットの和）
+/** 修飾キーのビット。modifiers の値は 1 + ビットの和。Shift。 */
 export const MOD_SHIFT = 1;
+/** 修飾キーのビット。Alt（Option）。 */
 export const MOD_ALT = 2;
+/** 修飾キーのビット。Ctrl。 */
 export const MOD_CTRL = 4;
+/** 修飾キーのビット。Super（`metaKey`）。 */
 export const MOD_SUPER = 8;
 
 /** エンコードするキー 1 つ。 */
@@ -117,6 +120,19 @@ function upperSingle(s: string): string {
 
 const cp = (s: string) => s.codePointAt(0)!;
 
+/** Shift なしの字。Shift の英字は小文字、記号は US 配列で戻し、戻せなければそのまま。 */
+function unshiftedOf(
+  k: string,
+  lower: string,
+  shift: boolean,
+  us: [string, string] | undefined,
+): string {
+  if (!shift) return lower;
+  if (lower !== k) return lower;
+  if (us && us[1] === k) return us[0];
+  return k;
+}
+
 interface TextKey {
   /** Shift なしの字（キーの番号になる）。 */
   code: number;
@@ -138,16 +154,12 @@ function textKey(ev: KeyEventLike): TextKey | undefined {
   if (ev.code.startsWith("Numpad")) return undefined;
   const shift = ev.shiftKey;
   const us = baseLayoutOf(ev);
+  // dead key の途中は、合成を止めないように従来の送り方に任せる
+  if (ev.key === "Dead") return undefined;
   const k = singleChar(ev.key) ?? us?.[shift ? 1 : 0];
   if (k === undefined) return undefined;
   const lower = lowerSingle(k);
-  const unshifted = shift
-    ? lower !== k
-      ? lower
-      : us && us[1] === k
-        ? us[0]
-        : k
-    : lower;
+  const unshifted = unshiftedOf(k, lower, shift, us);
   const out: TextKey = { code: cp(unshifted) };
   if (shift) {
     const shifted = k !== unshifted ? k : upperSingle(unshifted);
@@ -327,7 +339,8 @@ export function kittyKeyOf(
   if (isMac && !macOptionIsMeta && ev.altKey && !ev.ctrlKey && !ev.metaKey) return undefined;
   const tk = textKey(ev);
   if (!tk) return undefined;
-  const k = pressKey(tk.code);
+  // どのキーか分からない字だけのイベント（keyCode 0 で code が空）は、仕様どおり番号 0
+  const k = pressKey(ev.code === "" && ev.keyCode === 0 ? 0 : tk.code);
   if (withAlternates && (tk.shifted !== undefined || tk.base !== undefined)) {
     k.alternates = `:${tk.shifted ?? ""}${tk.base !== undefined ? `:${tk.base}` : ""}`;
   }
