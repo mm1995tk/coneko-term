@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { before, test } from "node:test";
 import {
   CanvasRenderer,
+  CELL_STRIDE,
   init,
   Palette,
   proposeDimensions,
@@ -133,7 +134,7 @@ test("viewport: keeps looking at the same lines when new output comes", async ()
   assert.equal(t.isAtBottom, false);
   // 一番上の行はいまも L0
   const row = t.readViewportRow(0);
-  assert.equal(String.fromCodePoint(row.cells[0], row.cells[6]), "L0");
+  assert.equal(String.fromCodePoint(row.cells[0], row.cells[CELL_STRIDE]), "L0");
   t.scrollToBottom();
   assert.equal(t.isAtBottom, true);
   t.dispose();
@@ -351,5 +352,69 @@ test("renderer: scrolled back, the old lines are drawn and the cursor is hidden"
   t.scrollToTop();
   const drawn = flush();
   assert.deepEqual(drawn, ["A", "B"]);
+  t.dispose();
+});
+
+// ---- OSC 66（kitty の text sizing）
+
+test("sized text: the cells carry the block, and the row text has the characters once", async () => {
+  const t = new Terminal({ cols: 10, rows: 3 });
+  await write(t, "\x1b]66;s=2;Hi\x07x");
+  const row0 = t.readRow(0);
+  // 左上のセルは字が空で、幅 1。印に「番号 + 1」・右へ 0・下へ 0
+  assert.equal(row0.cells[0], 0);
+  assert.equal(row0.cells[1], 1);
+  const mark = row0.cells[6];
+  assert.equal(mark & 0xffff, 1);
+  assert.equal(row0.sized(0).text, "H");
+  assert.deepEqual(
+    {
+      cols: row0.sized(0).cols,
+      scale: row0.sized(0).scale,
+      denominator: row0.sized(0).denominator,
+    },
+    { cols: 2, scale: 2, denominator: 0 },
+  );
+  // 2 行目の 2 セル目は、右へ 1・下へ 1
+  const mark11 = t.readRow(1).cells[CELL_STRIDE + 6];
+  assert.equal(mark11 >>> 16, 1 | (1 << 8));
+  assert.equal(t.getRowText(0), "Hix     ");
+  assert.equal(t.getRowText(1).trim(), "");
+  t.dispose();
+});
+
+test("sized text: each row draws its own slice of the block, scaled by s", async () => {
+  const t = new Terminal({ cols: 10, rows: 3 });
+  const { fake, flush } = setup(t);
+  flush();
+  await write(t, "\x1b]66;s=2;H\x07");
+  flush();
+  const texts = fake.calls.filter((c) => c[0] === "fillText");
+  // 1 行目と 2 行目の両方で、同じ位置に大きく描く（2 行目は 1 行目の帯の続きを見せるために切り抜く）
+  assert.equal(texts.length, 2);
+  assert.deepEqual(texts[0], ["fillText", "H", 0, 24]);
+  assert.deepEqual(texts[1], ["fillText", "H", 0, 24]);
+  const fonts = fake.calls.filter((c) => c[0] === "set font").map((c) => c[1]);
+  assert.ok(fonts.some((f) => String(f).startsWith("32px ")));
+  // 切り抜きは行ごとの帯（幅 2 セル、高さ 1 セル）
+  const rects = fake.calls.filter((c) => c[0] === "rect");
+  assert.deepEqual(rects[0], ["rect", 0, 0, 18, 16]);
+  assert.deepEqual(rects[1], ["rect", 0, 16, 18, 16]);
+  t.dispose();
+});
+
+test("sized text: a fractional scale shrinks the font and the alignment places it in the block", async () => {
+  const t = new Terminal({ cols: 10, rows: 3 });
+  const { fake, flush } = setup(t);
+  flush();
+  // 2 セルの四角に半分の大きさで、下・右に寄せる
+  await write(t, "\x1b]66;n=1:d=2:w=2:v=1:h=1;a\x07");
+  flush();
+  const texts = fake.calls.filter((c) => c[0] === "fillText");
+  // 幅 18 - 字の幅 9 = 9、高さ 16 - 8 = 8、ベースライン 8 + 12 * 0.5
+  assert.deepEqual(texts[0], ["fillText", "a", 9, 14]);
+  assert.ok(
+    fake.calls.some((c) => c[0] === "set font" && String(c[1]).startsWith("8px ")),
+  );
   t.dispose();
 });
