@@ -10,7 +10,7 @@ coneko-term is a library of terminal building blocks. The first user is the GUI 
 
 The first goal is that shijimi-editor's GUI works with coneko-term as it does with xterm.js. kitty's protocol comes after that. "The same as xterm.js" is measured against the [xterm.js 6.0.0 feature table](https://xtermjs.org/docs/api/vtfeatures/) and its source.
 
-**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Mouse reporting, the wheel, and selection with copy are in place. Keyboard and IME input are not. The core receives images sent with the kitty graphics protocol (APC `a=t` and `a=q`, chunked, direct transmission only) and keeps them; placing and drawing them is not done yet.
+**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Mouse reporting, the wheel, and selection with copy are in place. Keyboard and IME input are not. The core receives images sent with the kitty graphics protocol (APC `a=t`, `a=T` and `a=q`, chunked, direct transmission only), keeps them, places them on the cells (`a=p`, `a=T`) and deletes them (`a=d`), and lists the placements for the renderer. Drawing them is not done yet.
 
 ## Packages
 
