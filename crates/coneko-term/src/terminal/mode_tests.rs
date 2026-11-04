@@ -440,3 +440,89 @@ fn reverse_wraparound_stops_at_region_top() {
     w(&mut t, "abcde\x1b[?45h\x1b[2;4r\x1b[2;1H\x08");
     assert_eq!(pos(&t), (0, 1));
 }
+
+// ---- kitty keyboard protocol のフラグ ----
+
+#[test]
+fn kitty_flags_query_push_pop() {
+    let mut t = term(3, 10);
+    w(&mut t, "\x1b[?u");
+    assert_eq!(out(&mut t), "\x1b[?0u");
+    w(&mut t, "\x1b[>1u");
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[?u");
+    assert_eq!(out(&mut t), "\x1b[?1u");
+    // 空のパラメーターは 0 を積む
+    w(&mut t, "\x1b[>u");
+    assert_eq!(t.keyboard_flags(), 0);
+    w(&mut t, "\x1b[<u");
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[<u");
+    assert_eq!(t.keyboard_flags(), 0);
+    // 積んでいる数より多く降ろしても panic せず、0 になる
+    w(&mut t, "\x1b[>1u\x1b[>1u\x1b[<99u");
+    assert_eq!(t.keyboard_flags(), 0);
+    w(&mut t, "\x1b[<u");
+    assert_eq!(t.keyboard_flags(), 0);
+}
+
+#[test]
+fn kitty_flags_set_modes() {
+    let mut t = term(3, 10);
+    w(&mut t, "\x1b[=1u"); // mode 省略 = 置き換え
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[=1;3u"); // 引く
+    assert_eq!(t.keyboard_flags(), 0);
+    w(&mut t, "\x1b[=1;2u"); // 足す
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[=0;1u"); // 置き換え
+    assert_eq!(t.keyboard_flags(), 0);
+    w(&mut t, "\x1b[=1;9u"); // 知らない mode は捨てる
+    assert_eq!(t.keyboard_flags(), 0);
+    // 対応していないフラグ（2・4・8・16）は立てない
+    w(&mut t, "\x1b[=31u\x1b[>30u");
+    assert_eq!(t.keyboard_flags(), 0);
+}
+
+#[test]
+fn kitty_flags_are_per_screen() {
+    let mut t = term(3, 10);
+    w(&mut t, "\x1b[>1u");
+    w(&mut t, "\x1b[?1049h");
+    assert_eq!(t.keyboard_flags(), 0);
+    w(&mut t, "\x1b[?u");
+    assert_eq!(out(&mut t), "\x1b[?0u");
+    w(&mut t, "\x1b[>1u\x1b[>0u\x1b[<u");
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[?1049l");
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[<u");
+    assert_eq!(t.keyboard_flags(), 0);
+    w(&mut t, "\x1b[?1049h");
+    assert_eq!(t.keyboard_flags(), 1);
+}
+
+#[test]
+fn kitty_stack_drops_oldest_when_full() {
+    let mut t = term(3, 10);
+    w(&mut t, "\x1b[>0u");
+    for _ in 0..KEYBOARD_STACK_DEPTH {
+        w(&mut t, "\x1b[>1u");
+    }
+    // 最初に積んだ 0 は捨てられている。全部降ろすと 0 になるが、深さは上限のまま
+    w(&mut t, &"\x1b[<u".repeat(KEYBOARD_STACK_DEPTH - 1));
+    assert_eq!(t.keyboard_flags(), 1);
+    w(&mut t, "\x1b[<u");
+    assert_eq!(t.keyboard_flags(), 0);
+}
+
+#[test]
+fn kitty_flags_reset_and_csi_u_restore_cursor_unchanged() {
+    let mut t = term(3, 10);
+    w(&mut t, "\x1b[>1u\x1bc");
+    assert_eq!(t.keyboard_flags(), 0);
+    // パラメーターの無い CSI u はカーソルの復元のまま
+    w(&mut t, "\x1b[2;3H\x1b[s\x1b[1;1H\x1b[u");
+    assert_eq!(pos(&t), (2, 1));
+    assert!(out(&mut t).is_empty());
+}

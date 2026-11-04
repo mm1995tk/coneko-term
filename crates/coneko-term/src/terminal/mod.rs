@@ -33,6 +33,7 @@
 //!
 //! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合。
 
+mod kitty_keyboard;
 #[cfg(test)]
 mod mode_tests;
 mod modes;
@@ -41,6 +42,7 @@ mod sgr;
 mod tests;
 mod theme;
 
+pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_STACK_DEPTH};
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
 pub use theme::{Rgb, Theme};
 
@@ -165,6 +167,8 @@ struct State {
     saved_charsets: Option<([Charset; 4], usize)>,
     last_char: Option<char>,
     modes: Modes,
+    /// kitty keyboard protocol のフラグの積み重ね。主画面（0）と代替画面（1）で別々。
+    keyboard_flags: [KeyboardFlagStack; 2],
     theme: Theme,
     /// PTY へ送るバイト列。
     output: Vec<u8>,
@@ -193,6 +197,7 @@ impl Terminal {
                 saved_charsets: None,
                 last_char: None,
                 modes: Modes::default(),
+                keyboard_flags: Default::default(),
                 theme: Theme::default(),
                 output: Vec::new(),
                 osc_handlers: Vec::new(),
@@ -255,6 +260,11 @@ impl Terminal {
     /// モードの状態。
     pub fn modes(&self) -> &Modes {
         &self.state.modes
+    }
+
+    /// いまの画面の kitty keyboard protocol のフラグ（`CSI ? u` で答える値）。
+    pub fn keyboard_flags(&self) -> u32 {
+        self.state.active_keyboard_flags().flags()
     }
 
     /// PTY へ送るバイト列を取り出す。問い合わせへの返事など、ターミナルが出したものが
@@ -637,6 +647,7 @@ impl State {
         self.saved_charsets = None;
         self.last_char = None;
         self.modes = Modes::default();
+        self.keyboard_flags = Default::default();
         self.graphics.clear();
     }
 
@@ -787,9 +798,30 @@ impl State {
                 let q = if private { "?" } else { "" };
                 self.reply(&format!("\x1b[{q}{first};{status}$y"));
             }
+            (Some(b'>'), [], b'u') => self.active_keyboard_flags_mut().push(first),
+            (Some(b'<'), [], b'u') => {
+                let n = if first == 0 { 1 } else { first as usize };
+                self.active_keyboard_flags_mut().pop(n);
+            }
+            (Some(b'='), [], b'u') => {
+                let mode = raw(params, 1).filter(|&m| m != 0).unwrap_or(1);
+                self.active_keyboard_flags_mut().modify(first, mode);
+            }
+            (Some(b'?'), [], b'u') => {
+                let flags = self.active_keyboard_flags().flags();
+                self.reply(&format!("\x1b[?{flags}u"));
+            }
             _ => return false,
         }
         true
+    }
+
+    fn active_keyboard_flags(&self) -> &KeyboardFlagStack {
+        &self.keyboard_flags[usize::from(self.screen.is_alt_screen())]
+    }
+
+    fn active_keyboard_flags_mut(&mut self) -> &mut KeyboardFlagStack {
+        &mut self.keyboard_flags[usize::from(self.screen.is_alt_screen())]
     }
 
     /// CPR。原点モードでは、スクロール範囲の上端からの行を返す。

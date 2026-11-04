@@ -209,7 +209,7 @@ test("Terminal.paste returns to the bottom when scrolled back", async () => {
 
 // ---- KeyHandler と CompositionHelper（DOM の代わりに偽物を使う）
 
-function makeHandler(opts: { isMac?: boolean; macOptionIsMeta?: boolean; app?: boolean } = {}) {
+function makeHandler(opts: { isMac?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number } = {}) {
   const sent: string[] = [];
   const pages: number[] = [];
   const timers: (() => void)[] = [];
@@ -239,6 +239,7 @@ function makeHandler(opts: { isMac?: boolean; macOptionIsMeta?: boolean; app?: b
     {
       send: (d) => sent.push(d),
       applicationCursorKeys: () => opts.app ?? false,
+      keyboardFlags: () => opts.flags ?? 0,
       scrollPages: (n) => pages.push(n),
       scrollToBottom: () => {},
       isMac: opts.isMac ?? false,
@@ -355,4 +356,71 @@ test("composition: a Cmd key while converting confirms the text, then is left to
   assert.equal(h.handler.keyDown(e), true);
   assert.deepEqual(h.sent, ["かな"]);
   assert.equal(e.prevented, false);
+});
+
+// ---- kitty keyboard protocol: フラグ 1（disambiguate escape codes） ----
+
+const kkey = (e: KeyEventLike, flags = 1, isMac = false, optMeta = false) =>
+  evaluateKeyboardEvent(e, false, isMac, optMeta, flags).key;
+
+test("kitty flag 1: Esc and modified Esc", () => {
+  assert.equal(kkey(ev(27)), `${ESC}[27u`);
+  assert.equal(kkey(ev(27, { shiftKey: true })), `${ESC}[27;2u`);
+  assert.equal(kkey(ev(27, { altKey: true })), `${ESC}[27;3u`);
+});
+
+test("kitty flag 1: Ctrl/Alt/Super with text keys use the unshifted code", () => {
+  assert.equal(kkey(ev(65, { ctrlKey: true })), `${ESC}[97;5u`); // Ctrl+A
+  assert.equal(kkey(ev(65, { altKey: true })), `${ESC}[97;3u`);
+  assert.equal(kkey(ev(65, { altKey: true, shiftKey: true })), `${ESC}[97;4u`);
+  assert.equal(kkey(ev(65, { ctrlKey: true, altKey: true })), `${ESC}[97;7u`);
+  assert.equal(kkey(ev(65, { metaKey: true })), `${ESC}[97;9u`);
+  assert.equal(kkey(ev(32, { ctrlKey: true })), `${ESC}[32;5u`);
+  assert.equal(kkey(ev(49, { ctrlKey: true })), `${ESC}[49;5u`); // Ctrl+1
+  assert.equal(kkey(ev(49, { altKey: true, shiftKey: true })), `${ESC}[49;4u`); // Alt+Shift+1
+  assert.equal(kkey(ev(219, { ctrlKey: true })), `${ESC}[91;5u`); // Ctrl+[
+});
+
+test("kitty flag 1: plain and Shift-only text keys stay text", () => {
+  assert.equal(kkey(ev(65, { key: "a" })), "a");
+  assert.equal(kkey(ev(65, { key: "A", shiftKey: true })), "A");
+  assert.equal(kkey(ev(32, { key: " " })), kkey(ev(32, { key: " " }), 0));
+});
+
+test("kitty flag 1: Enter, Tab, Backspace stay legacy unless modified", () => {
+  assert.equal(kkey(ev(13)), "\r");
+  assert.equal(kkey(ev(9)), "\t");
+  assert.equal(kkey(ev(8)), "\x7f");
+  assert.equal(kkey(ev(13, { ctrlKey: true })), `${ESC}[13;5u`);
+  assert.equal(kkey(ev(13, { altKey: true })), `${ESC}[13;3u`);
+  assert.equal(kkey(ev(9, { shiftKey: true })), `${ESC}[9;2u`);
+  assert.equal(kkey(ev(8, { ctrlKey: true })), `${ESC}[127;5u`);
+});
+
+test("kitty flag 1: F3 avoids CSI R; other functional keys are unchanged", () => {
+  assert.equal(kkey(ev(114)), `${ESC}[13~`);
+  assert.equal(kkey(ev(114, { shiftKey: true })), `${ESC}[13;2~`);
+  for (const k of [ev(37), ev(38, { ctrlKey: true }), ev(36), ev(46), ev(112), ev(115), ev(116), ev(45)]) {
+    assert.equal(kkey(k), kkey(k, 0));
+  }
+});
+
+test("kitty flag 1: macOS Option without macOptionIsMeta stays a text key", () => {
+  assert.equal(kkey(ev(65, { altKey: true }), 1, true, false), undefined);
+  assert.equal(kkey(ev(65, { altKey: true }), 1, true, true), `${ESC}[97;3u`);
+});
+
+test("flag 0 leaves the legacy bytes unchanged", () => {
+  assert.equal(kkey(ev(27), 0), ESC);
+  assert.equal(kkey(ev(65, { ctrlKey: true }), 0), "\x01");
+  assert.equal(kkey(ev(114), 0), `${ESC}OR`);
+  // 対応していないフラグだけが立っていても変わらない
+  assert.equal(kkey(ev(27), 2), ESC);
+});
+
+test("KeyHandler sends the kitty form when the terminal's flag is 1", () => {
+  const h = makeHandler({ flags: 1 });
+  h.handler.keyDown(domEvent(27));
+  h.handler.keyDown(domEvent(65, { ctrlKey: true }));
+  assert.deepEqual(h.sent, [`${ESC}[27u`, `${ESC}[97;5u`]);
 });
