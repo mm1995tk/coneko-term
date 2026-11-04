@@ -6,7 +6,7 @@
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
-//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）・drag and drop（OSC 72）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
+//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）・drag and drop（OSC 72）・file transfer（OSC 5113）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
 //! 呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
 //! # PTY へ送るバイト列（出口は 1 つ）
@@ -37,6 +37,7 @@ mod clipboard;
 mod dnd;
 #[cfg(test)]
 mod dnd_tests;
+mod file_transfer;
 mod kitty_keyboard;
 #[cfg(test)]
 mod mode_tests;
@@ -57,6 +58,10 @@ pub use clipboard::{
 pub use dnd::{
     DndError, DndEvent, DndLocation, DndOperation, DndOperations, DragEntryForm, DragEntryKey,
     DragImage, DragImageFormat, DragOffer, DropForm, DropRequest,
+};
+pub use file_transfer::{
+    FileCompression, FileTransferData, FileTransferError, FileTransferEvent, FileTransferFile,
+    FileTransferListing, FileTransferStart, FileTransmission, FileType,
 };
 pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_STACK_DEPTH};
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
@@ -115,6 +120,9 @@ pub enum Event {
     },
     /// kitty の drag and drop protocol（OSC 72）のイベント。
     Dnd(Box<DndEvent>),
+    /// kitty の file transfer protocol（OSC 5113）の、クライアントからの命令。許すかどうかとファイルの
+    /// 読み書きは呼ぶ側が決め、`Terminal::file_transfer_*` で答える。
+    FileTransfer(Box<FileTransferEvent>),
     /// [`Terminal::register_osc`] で登録した番号の OSC が来た。`data` は番号と `;` のあとの
     /// バイト列（`;` が無ければ空）。
     Osc {
@@ -233,6 +241,8 @@ struct State {
     clipboard: clipboard::Clipboard,
     /// kitty の drag and drop protocol（OSC 72）の状態。
     dnd: dnd::Dnd,
+    /// kitty の file transfer protocol（OSC 5113）の、セッションごとの quiet。
+    file_transfer: file_transfer::FileTransfer,
 }
 
 impl Terminal {
@@ -262,6 +272,7 @@ impl Terminal {
                 notifications: Default::default(),
                 clipboard: Default::default(),
                 dnd: Default::default(),
+                file_transfer: Default::default(),
             },
         }
     }
@@ -530,6 +541,115 @@ impl Terminal {
         let ok = self.state.dnd.drag_entry_request(index);
         self.state.flush_dnd();
         ok
+    }
+
+    /// ファイル転送のセッションの始まり（[`FileTransferEvent::Send`]・[`FileTransferEvent::Receive`]）を
+    /// 許す（`status=OK`）。`file_id` が `Some` なら、そのファイル（ディレクトリ）の受け付け。
+    /// `size` は書き終えたバイト数（`end_data` のあと）、`name` は受け取りの一覧の終わりに付ける
+    /// ホームディレクトリ。`q` に従って、省くことがある。
+    pub fn file_transfer_ok(
+        &mut self,
+        id: &str,
+        file_id: Option<&str>,
+        size: Option<u64>,
+        name: Option<&str>,
+    ) {
+        self.file_transfer_status(file_transfer::Status {
+            id,
+            file_id,
+            text: "OK",
+            error: None,
+            size,
+            rsync: false,
+            name,
+        });
+    }
+
+    /// ファイルを受け付けた（`status=STARTED`）。`rsync` は、署名を送れる（`tt=rsync`）とき。
+    pub fn file_transfer_started(&mut self, id: &str, file_id: &str, rsync: bool) {
+        self.file_transfer_status(file_transfer::Status {
+            id,
+            file_id: Some(file_id),
+            text: "STARTED",
+            error: None,
+            size: None,
+            rsync,
+            name: None,
+        });
+    }
+
+    /// データのパケットを書いた（`status=PROGRESS`）。`written` は、ここまでに書いたバイト数。
+    pub fn file_transfer_progress(&mut self, id: &str, file_id: &str, written: u64) {
+        self.file_transfer_status(file_transfer::Status {
+            id,
+            file_id: Some(file_id),
+            text: "PROGRESS",
+            error: None,
+            size: Some(written),
+            rsync: false,
+            name: None,
+        });
+    }
+
+    /// エラーで答える。`file_id` が `None` ならセッション全体のエラー（`finish` のときなど）。
+    /// `message` は省いてよい。
+    pub fn file_transfer_error(
+        &mut self,
+        id: &str,
+        file_id: Option<&str>,
+        error: FileTransferError,
+        message: &str,
+    ) {
+        self.file_transfer_status(file_transfer::Status {
+            id,
+            file_id,
+            text: "",
+            error: Some((error, message)),
+            size: None,
+            rsync: false,
+            name: None,
+        });
+    }
+
+    /// セッションの始まりを断る（`status=EPERM:User refused the transfer`）。
+    pub fn file_transfer_refuse(&mut self, id: &str) {
+        self.file_transfer_error(
+            id,
+            None,
+            FileTransferError::Eperm,
+            "User refused the transfer",
+        );
+    }
+
+    /// 取り消し（[`FileTransferEvent::Cancel`]）に答える（`status=CANCELED`）。
+    pub fn file_transfer_canceled(&mut self, id: &str) {
+        self.file_transfer_status(file_transfer::Status {
+            id,
+            file_id: None,
+            text: "CANCELED",
+            error: None,
+            size: None,
+            rsync: false,
+            name: None,
+        });
+    }
+
+    /// 受け取りの一覧に項目を 1 つ足す（`ac=file`）。全部並べたら、`file_transfer_ok` に `name`
+    /// （ホームディレクトリ）を付けて終える。
+    pub fn file_transfer_listing(&mut self, id: &str, entry: &FileTransferListing) {
+        self.queue_output(&file_transfer::listing(id, entry));
+    }
+
+    /// 受け取るファイルのデータを送る（`ac=data`、4096 バイトごとのパケット）。`last` が真なら、
+    /// 最後のパケットを `end_data` にする（`bytes` が空でも `end_data` を 1 つ送る）。圧縮と rsync の
+    /// 差分は、呼ぶ側が作ったバイト列をそのまま渡す。
+    pub fn file_transfer_data(&mut self, id: &str, file_id: &str, bytes: &[u8], last: bool) {
+        self.queue_output(&file_transfer::data(id, file_id, bytes, last));
+    }
+
+    fn file_transfer_status(&mut self, reply: file_transfer::Status) {
+        let out = self.state.file_transfer.status(&reply);
+        self.queue_output(&out);
     }
 
     /// 受け取った画像を ID で引く（kitty graphics の `i=`）。
@@ -918,6 +1038,7 @@ impl State {
         self.notifications.clear();
         self.clipboard.clear();
         self.dnd.reset();
+        self.file_transfer.clear();
         self.flush_dnd();
     }
 
@@ -1200,6 +1321,11 @@ impl State {
                 Some(clipboard::Output::Reply(bytes)) => self.output.extend_from_slice(&bytes),
                 None => {}
             },
+            b"5113" => {
+                if let Some(ev) = self.file_transfer.osc(&data[sep + 1..]) {
+                    self.events.push(ev);
+                }
+            }
             b"66" => match text_sizing::parse(&data[sep + 1..]) {
                 Some(text_sizing::Parsed::Plain(s)) => {
                     for c in s.chars() {
