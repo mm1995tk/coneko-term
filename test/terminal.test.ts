@@ -363,7 +363,7 @@ test("clipboard (OSC 5522): read requests and answers", async () => {
       `\x1b]5522;type=read:status=DATA:mime=${b64(".")};${b64("text/plain image/png")}\x1b\\` +
       `\x1b]5522;type=read:status=DONE\x1b\\`,
     "\x1b]5522;type=read:status=EPERM:id=r2\x1b\\",
-    "\x1b]5522;type=read:status=ENOSYS:id=r3\x1b\\",
+    "\x1b]5522;type=read:status=OK:id=r3\x1b\\\x1b]5522;type=read:status=DONE:id=r3\x1b\\",
   ]);
   t.dispose();
 });

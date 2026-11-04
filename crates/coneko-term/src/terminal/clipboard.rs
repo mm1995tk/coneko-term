@@ -103,7 +103,7 @@ impl ClipboardWriteError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ClipboardReadError {
-    /// 頼まれた種類が無い。
+    /// 頼まれた場所が無い（`loc=primary` に対応していないなど）。
     Enosys,
     /// 許されない。
     Eperm,
@@ -135,7 +135,8 @@ pub(super) enum Output {
 struct Pending {
     id: String,
     location: ClipboardLocation,
-    items: Vec<ClipboardItem>,
+    /// MIME の種類ごとの、戻す前の base64（パケットをつなげたもの）。
+    items: Vec<(String, Vec<u8>)>,
     aliases: Vec<(String, Vec<String>)>,
     total: usize,
 }
@@ -245,20 +246,21 @@ impl Clipboard {
                 Err((id, e)) => error(&id, e),
             });
         };
-        let (Some(mime), Some(data)) = (decode_mime(mime), decode_base64(payload)) else {
+        let Some(mime) = decode_mime(mime) else {
             return Some(error(&p.id, ClipboardWriteError::Einval));
         };
-        p.total += data.len();
+        // 大きさは、戻したあとの大きさを base64 の長さから見積もる。
+        p.total += payload.len() / 4 * 3;
         if p.total > MAX_WRITE_BYTES {
             return Some(error(&p.id, ClipboardWriteError::Efbig));
         }
-        match p.items.iter_mut().find(|i| i.mime == mime) {
-            Some(item) => item.data.extend_from_slice(&data),
+        match p.items.iter_mut().find(|i| i.0 == mime) {
+            Some(item) => item.1.extend_from_slice(payload),
             None => {
                 if p.items.len() >= MAX_ITEMS {
                     return Some(error(&p.id, ClipboardWriteError::Efbig));
                 }
-                p.items.push(ClipboardItem { mime, data });
+                p.items.push((mime, payload.to_vec()));
             }
         }
         self.pending = Some(p);
@@ -292,7 +294,14 @@ impl Clipboard {
 impl Pending {
     /// 別名を広げて書き込みにする。大きすぎれば `EFBIG`。
     fn finish(mut self) -> Result<ClipboardWrite, (String, ClipboardWriteError)> {
-        let mut items = std::mem::take(&mut self.items);
+        // 分けて送られたパケットは、つなげてから戻す（個々の長さは 4 の倍数でなくてよい）。
+        let mut items = Vec::new();
+        for (mime, b64) in std::mem::take(&mut self.items) {
+            let Some(data) = decode_base64(&b64) else {
+                return Err((self.id, ClipboardWriteError::Einval));
+            };
+            items.push(ClipboardItem { mime, data });
+        }
         let mut total = self.total;
         for (target, names) in &self.aliases {
             let Some(data) = items
@@ -457,24 +466,21 @@ fn data_packets(out: &mut String, id: &str, mime: &str, data: &[u8]) {
     }
 }
 
-/// 種類の一覧（`.`）への返事。`mimes` が空なら `ENOSYS`。
+/// 種類の一覧（`.`）への返事。`mimes` が空なら、データの無い `OK` と `DONE` だけを返す。
 ///
 /// 一覧は、`mime` が `.` の `status=DATA` に、空白で区切った MIME の種類を入れて送る。
 pub fn read_types_reply(id: &str, mimes: &[String]) -> Vec<u8> {
-    if mimes.is_empty() {
-        return read_error_reply(id, ClipboardReadError::Enosys);
-    }
     let mut out = packet("type=read:status=OK", id, "");
-    data_packets(&mut out, id, ".", mimes.join(" ").as_bytes());
+    if !mimes.is_empty() {
+        data_packets(&mut out, id, ".", mimes.join(" ").as_bytes());
+    }
     out.push_str(&packet("type=read:status=DONE", id, ""));
     out.into_bytes()
 }
 
-/// データの読み取りへの返事。`items` が空なら `ENOSYS`。
+/// データの読み取りへの返事。`items` が空（頼まれた種類のデータが 1 つも無い）なら、データの無い
+/// `OK` と `DONE` だけを返す。場所が無いときは [`read_error_reply`] を使う。
 pub fn read_data_reply(id: &str, items: &[ClipboardItem]) -> Vec<u8> {
-    if items.is_empty() {
-        return read_error_reply(id, ClipboardReadError::Enosys);
-    }
     let mut out = packet("type=read:status=OK", id, "");
     for item in items {
         data_packets(&mut out, id, &item.mime, &item.data);
@@ -576,6 +582,22 @@ mod tests {
         assert_eq!(w.location, ClipboardLocation::Primary);
         assert_eq!(w.id, "xyz");
         assert!(w.items.is_empty());
+    }
+
+    #[test]
+    fn payloads_split_off_the_4_boundary_are_joined_before_decoding() {
+        let m = b64("text/plain");
+        // "abc" = YWJj を YW と Jj に分ける。
+        let w = write_of(&format!(
+            "\x1b]5522;type=write\x1b\\\x1b]5522;type=wdata:mime={m};YW\x1b\\\x1b]5522;type=wdata:mime={m};Jj\x1b\\\x1b]5522;type=wdata\x1b\\"
+        ));
+        assert_eq!(w.items, vec![item("text/plain", b"abc")]);
+        // 途中の詰め物（YWI= + YWJj）は、つなげると不正。
+        let (mut t, ev) = run(&format!(
+            "\x1b]5522;type=write\x1b\\\x1b]5522;type=wdata:mime={m};YWI=\x1b\\\x1b]5522;type=wdata:mime={m};YWJj\x1b\\\x1b]5522;type=wdata\x1b\\"
+        ));
+        assert!(ev.is_empty());
+        assert_eq!(t.take_output(), b"\x1b]5522;type=write:status=EINVAL\x1b\\");
     }
 
     #[test]
@@ -742,7 +764,7 @@ mod tests {
         );
         assert_eq!(
             read_data_reply("", &[]),
-            b"\x1b]5522;type=read:status=ENOSYS\x1b\\"
+            b"\x1b]5522;type=read:status=OK\x1b\\\x1b]5522;type=read:status=DONE\x1b\\"
         );
         assert_eq!(
             read_error_reply("", ClipboardReadError::Eperm),

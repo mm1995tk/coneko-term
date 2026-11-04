@@ -351,13 +351,13 @@ impl Terminal {
         self.queue_output(&clipboard::write_reply(id, result));
     }
 
-    /// 種類の一覧の頼み（[`ClipboardReadRequest::Types`]）に答える。`mimes` が空なら `ENOSYS`。
+    /// 種類の一覧の頼み（[`ClipboardReadRequest::Types`]）に答える。`mimes` が空なら、データの無い `OK` と `DONE` だけを返す。
     pub fn clipboard_read_reply_types(&mut self, id: &str, mimes: &[String]) {
         self.queue_output(&clipboard::read_types_reply(id, mimes));
     }
 
     /// データの頼み（[`ClipboardReadRequest::Mimes`]）に答える。`items` は、頼まれた種類のうち
-    /// 渡せるもの。空なら `ENOSYS`。
+    /// 渡せるもの。空なら、データの無い `OK` と `DONE` だけを返す。場所が無いときは `clipboard_read_reply_error` の `Enosys`。
     pub fn clipboard_read_reply_data(&mut self, id: &str, items: &[ClipboardItem]) {
         self.queue_output(&clipboard::read_data_reply(id, items));
     }

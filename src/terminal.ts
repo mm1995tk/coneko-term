@@ -194,6 +194,11 @@ export interface NotificationSupport {
 /** どちらのクリップボードか。 */
 export type ClipboardLocation = "clipboard" | "primary";
 
+// wasm 側の場所の番号（0 が主のクリップボード、1 が primary selection）。
+function clipboardLocationOf(code: number): ClipboardLocation {
+  return code === 1 ? "primary" : "clipboard";
+}
+
 /** クリップボードの、ある MIME の種類のデータ。 */
 export interface ClipboardItem {
   /** MIME の種類（`text/plain` など）。 */
@@ -636,7 +641,7 @@ export class Terminal {
             break;
           }
           const location: ClipboardLocation =
-            ev.clipboard_location === 1 ? "primary" : "clipboard";
+            clipboardLocationOf(ev.clipboard_location);
           const items = ev.clipboard_mimes.map((mime, i) => ({
             mime,
             data: ev.clipboard_item_data(i),
@@ -655,7 +660,7 @@ export class Terminal {
           }
           const request: ClipboardReadRequest = {
             id,
-            location: ev.clipboard_location === 1 ? "primary" : "clipboard",
+            location: clipboardLocationOf(ev.clipboard_location),
             list: ev.clipboard_list,
             mimes: ev.clipboard_mimes,
           };
@@ -834,7 +839,7 @@ export class Terminal {
     this.flush();
   }
 
-  /** 種類の一覧の頼み（`list` が真）に答える。`mimes` が空なら `ENOSYS`。 */
+  /** 種類の一覧の頼み（`list` が真）に答える。`mimes` が空なら、データの無い OK と DONE だけを返す。 */
   replyClipboardReadTypes(id: string, mimes: string[]): void {
     if (this.disposed) return;
     this.core.clipboard_read_reply_types(id, mimes);
@@ -842,7 +847,7 @@ export class Terminal {
   }
 
   /**
-   * データの頼みに答える。`items` は、頼まれた種類のうち渡せるもの。空なら `ENOSYS`。
+   * データの頼みに答える。`items` は、頼まれた種類のうち渡せるもの。空なら、データの無い OK と DONE だけを返す。
    * 4096 バイトごとのパケットに分けて送る。
    */
   replyClipboardReadData(id: string, items: ClipboardItem[]): void {

@@ -67,8 +67,8 @@ fn underline_code(s: UnderlineStyle) -> u32 {
 
 fn location_code(l: ClipboardLocation) -> u8 {
     match l {
+        ClipboardLocation::Clipboard => 0,
         ClipboardLocation::Primary => 1,
-        _ => 0,
     }
 }
 
@@ -393,7 +393,7 @@ impl WasmTerminal {
             .push(ClipboardItem { mime, data });
     }
 
-    /// 読み取りの頼みのデータに、`clipboard_reply_item` で足したものを答える。足していなければ `ENOSYS`。
+    /// 読み取りの頼みのデータに、`clipboard_reply_item` で足したものを答える。足していなければ、データの無い `OK` と `DONE` だけを返す。
     pub fn clipboard_read_reply_data(&mut self, id: &str) {
         let items = std::mem::take(&mut self.clipboard_reply_items);
         self.term.clipboard_read_reply_data(id, &items);
