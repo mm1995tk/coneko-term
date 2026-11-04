@@ -6,7 +6,7 @@
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
-//! BEL と題名の変更は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
+//! BEL・題名の変更・通知（OSC 99）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
 //! 呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
 //! # PTY へ送るバイト列（出口は 1 つ）
@@ -37,6 +37,7 @@ mod kitty_keyboard;
 #[cfg(test)]
 mod mode_tests;
 mod modes;
+mod notification;
 mod sgr;
 #[cfg(test)]
 mod tests;
@@ -44,6 +45,7 @@ mod theme;
 
 pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_STACK_DEPTH};
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
+pub use notification::{Actions, Notification, NotificationSupport, When};
 pub use theme::{Rgb, Theme};
 
 use crate::graphics::{DeleteSpec, DeleteTarget, Effect, Graphics, Image, PlacedImage, Placement};
@@ -64,6 +66,24 @@ pub enum Event {
     Title(String),
     /// アイコンの名前が変わった（OSC 0、OSC 1）。
     IconName(String),
+    /// 通知（OSC 99）が 1 つそろった。
+    Notification(Box<Notification>),
+    /// アプリケーションが通知を閉じるよう求めた（`p=close`）。
+    NotificationClose {
+        /// `i=`。
+        id: String,
+    },
+    /// アプリケーションが対応を尋ねた（`p=?`）。[`Terminal::notification_query_reply`] で答える。
+    NotificationQuery {
+        /// `i=`（無ければ空）。
+        id: String,
+    },
+    /// アプリケーションが生きている通知を尋ねた（`p=alive`）。
+    /// [`Terminal::notification_alive_reply`] で答える。
+    NotificationAlive {
+        /// `i=`（無ければ空）。
+        id: String,
+    },
     /// [`Terminal::register_osc`] で登録した番号の OSC が来た。`data` は番号と `;` のあとの
     /// バイト列（`;` が無ければ空）。
     Osc {
@@ -176,6 +196,8 @@ struct State {
     osc_handlers: Vec<u32>,
     /// kitty graphics で受け取った画像。
     graphics: Graphics,
+    /// 組み立て中の通知（OSC 99）。
+    notifications: notification::Notifications,
 }
 
 impl Terminal {
@@ -202,6 +224,7 @@ impl Terminal {
                 output: Vec::new(),
                 osc_handlers: Vec::new(),
                 graphics: Graphics::default(),
+                notifications: Default::default(),
             },
         }
     }
@@ -277,6 +300,27 @@ impl Terminal {
     /// 同じ出口から出す。
     pub fn queue_output(&mut self, bytes: &[u8]) {
         self.state.output.extend_from_slice(bytes);
+    }
+
+    /// 通知（OSC 99）が押されたことを、アプリケーションへ返す。`button` はボタンの番号（1 始まり）。
+    /// 通知の `a` に `report` があるときだけ送ること。`i=` の無い通知には `i=0` で返す（仕様）。
+    pub fn notification_activated(&mut self, id: &str, button: Option<u32>) {
+        self.queue_output(&notification::activated(id, button));
+    }
+
+    /// 通知が閉じられたことを、アプリケーションへ返す。通知の `c=1` のときだけ送ること。
+    pub fn notification_closed(&mut self, id: &str) {
+        self.queue_output(&notification::closed(id));
+    }
+
+    /// `p=?` の問い合わせ（[`Event::NotificationQuery`]）に答える。
+    pub fn notification_query_reply(&mut self, id: &str, support: &NotificationSupport) {
+        self.queue_output(&notification::query_reply(id, support));
+    }
+
+    /// `p=alive` の問い合わせ（[`Event::NotificationAlive`]）に答える。`ids` は生きている通知の `i=`。
+    pub fn notification_alive_reply(&mut self, id: &str, ids: &[String]) {
+        self.queue_output(&notification::alive_reply(id, ids));
     }
 
     /// 受け取った画像を ID で引く（kitty graphics の `i=`）。
@@ -655,6 +699,7 @@ impl State {
         self.modes = Modes::default();
         self.keyboard_flags = Default::default();
         self.graphics.clear();
+        self.notifications.clear();
     }
 
     /// 主画面と代替画面を切り替える。カーソルの位置は引き継ぐ（xterm.js と同じ）。
@@ -909,6 +954,17 @@ impl State {
             }
             b"1" => self.events.push(Event::IconName(text())),
             b"2" => self.events.push(Event::Title(text())),
+            b"99" => {
+                use notification::Output;
+                let ev = match self.notifications.osc(&data[sep + 1..]) {
+                    Some(Output::Notification(n)) => Event::Notification(n),
+                    Some(Output::Close(id)) => Event::NotificationClose { id },
+                    Some(Output::Query(id)) => Event::NotificationQuery { id },
+                    Some(Output::Alive(id)) => Event::NotificationAlive { id },
+                    None => return,
+                };
+                self.events.push(ev);
+            }
             cmd @ (b"4" | b"10" | b"11" | b"12") => {
                 let rest = text();
                 self.osc_color_query(cmd, &rest, bell);

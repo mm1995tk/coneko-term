@@ -30,6 +30,8 @@ export {
   Terminal,
   type CursorState,
   type MouseInput,
+  type NotificationSupport,
+  type TerminalNotification,
   type WheelInput,
   type Disposable,
   type RowView,

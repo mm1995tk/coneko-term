@@ -136,6 +136,61 @@ export interface TerminalOptions {
   scrollOnUserInput?: boolean;
 }
 
+/**
+ * 組み立て終わった通知（kitty の desktop notifications、OSC 99）。
+ * 仕様のキーを読んだ形で持つ。OS の通知につなぐのは呼ぶ側。
+ */
+export interface TerminalNotification {
+  /** `i`。無ければ空文字列。 */
+  id: string;
+  /** 題名（`p=title`）。 */
+  title: string;
+  /** 本文（`p=body`）。 */
+  body: string;
+  /** 緊急度（`u`）。指定が無ければ `undefined`。 */
+  urgency?: 0 | 1 | 2;
+  /** 押されたときの動き（`a`）。既定は `{ focus: true, report: false }`。 */
+  actions: { focus: boolean; report: boolean };
+  /** いつ出すか（`o`）。 */
+  when: "always" | "unfocused" | "invisible";
+  /** 閉じられたときに知らせるか（`c=1`）。 */
+  reportClose: boolean;
+  /** アプリケーションの名前（`f`）。 */
+  appName?: string;
+  /** 通知の種類（`t`）。 */
+  types: string[];
+  /** 消えるまでの時間（`w`、ミリ秒。-1 は OS の既定、0 は消えない）。指定が無ければ `undefined`。 */
+  timeout?: number;
+  /** 音（`s`）。 */
+  sound?: string;
+  /** アイコンの名前（`n`）。 */
+  iconNames: string[];
+  /** アイコンの画像を指す ID（`g`）。画像そのものは読まない。 */
+  iconCacheId?: string;
+  /** ボタンの文字（`p=buttons`）。 */
+  buttons: string[];
+}
+
+/** `p=?` への返事に書く、対応していることの一覧。省いた項目は既定（下記）。 */
+export interface NotificationSupport {
+  /** 対応する `a` の値。既定は `["focus", "report"]`。 */
+  actions?: string[];
+  /** 対応する `o` の値。既定は `["always", "unfocused", "invisible"]`。 */
+  when?: string[];
+  /** 対応する `p` の値。既定は `["title", "body", "?", "close", "alive"]`。 */
+  payloads?: string[];
+  /** 対応する `u` の値。既定は `[0, 1, 2]`。 */
+  urgencies?: number[];
+  /** `c=1` に対応するか。既定は `true`。 */
+  closeReport?: boolean;
+  /** `w` に対応するか。既定は `false`。 */
+  timeout?: boolean;
+  /** 対応する `s` の値。既定は無し。 */
+  sounds?: string[];
+  /** 対応する `t` の値。既定は無し。 */
+  types?: string[];
+}
+
 /** カーソルの状態。 */
 export interface CursorState {
   x: number;
@@ -290,6 +345,10 @@ export class Terminal {
   private dataListeners = new Set<(data: Uint8Array) => void>();
   private titleListeners = new Set<(title: string) => void>();
   private bellListeners = new Set<() => void>();
+  private notificationListeners = new Set<(n: TerminalNotification) => void>();
+  private notificationCloseListeners = new Set<(id: string) => void>();
+  private notificationQueryListeners = new Set<(id: string) => void>();
+  private notificationAliveListeners = new Set<(id: string) => void>();
   private oscHandlers = new Map<number, Set<(data: string) => void>>();
   private element?: HTMLElement;
   private cleanups: (() => void)[] = [];
@@ -478,6 +537,45 @@ export class Terminal {
           for (const l of [...this.titleListeners]) l(title);
           break;
         }
+        case 4: {
+          if (this.notificationListeners.size === 0) break;
+          const urgency = ev.notification_urgency;
+          const actions = ev.notification_actions;
+          const timeout = ev.notification_timeout;
+          const n: TerminalNotification = {
+            id: ev.notification_id,
+            title: ev.notification_title,
+            body: ev.notification_body,
+            urgency: urgency < 0 ? undefined : (urgency as 0 | 1 | 2),
+            actions: { focus: (actions & 1) !== 0, report: (actions & 2) !== 0 },
+            when: (["always", "unfocused", "invisible"] as const)[
+              ev.notification_when
+            ] ?? "always",
+            reportClose: ev.notification_report_close,
+            appName: ev.notification_app_name,
+            types: ev.notification_types,
+            timeout: timeout === -2 ? undefined : timeout,
+            sound: ev.notification_sound,
+            iconNames: ev.notification_icon_names,
+            iconCacheId: ev.notification_icon_cache_id,
+            buttons: ev.notification_buttons,
+          };
+          for (const l of [...this.notificationListeners]) l(n);
+          break;
+        }
+        case 5:
+        case 6:
+        case 7: {
+          const id = this.decoder.decode(data);
+          const set =
+            ev.kind === 5
+              ? this.notificationCloseListeners
+              : ev.kind === 6
+                ? this.notificationQueryListeners
+                : this.notificationAliveListeners;
+          for (const l of [...set]) l(id);
+          break;
+        }
         case 3: {
           const text = this.decoder.decode(data);
           for (const l of [...(this.oscHandlers.get(ev.ident) ?? [])]) l(text);
@@ -554,6 +652,75 @@ export class Terminal {
   /** BEL が来た。 */
   onBell(listener: () => void): Disposable {
     return addListener(this.bellListeners, listener);
+  }
+
+  /**
+   * 通知（kitty の desktop notifications、OSC 99）がそろった。分けて送られた通知は、
+   * そろった時点で 1 回だけ呼ぶ。OS の通知を出すのは呼ぶ側。聞き手がいなければ何もしない。
+   */
+  onNotification(listener: (n: TerminalNotification) => void): Disposable {
+    return addListener(this.notificationListeners, listener);
+  }
+
+  /** アプリケーションが通知を閉じるよう求めた（`p=close`）。`id` は `i`。 */
+  onNotificationClose(listener: (id: string) => void): Disposable {
+    return addListener(this.notificationCloseListeners, listener);
+  }
+
+  /**
+   * アプリケーションが対応を尋ねた（`p=?`）。`replyNotificationQuery` で答える。
+   * `id` は `i`（無ければ空文字列）。
+   */
+  onNotificationQuery(listener: (id: string) => void): Disposable {
+    return addListener(this.notificationQueryListeners, listener);
+  }
+
+  /**
+   * アプリケーションが生きている通知を尋ねた（`p=alive`）。`replyNotificationAlive` で答える。
+   */
+  onNotificationAlive(listener: (id: string) => void): Disposable {
+    return addListener(this.notificationAliveListeners, listener);
+  }
+
+  /**
+   * 通知が押されたことをアプリケーションへ返す（`onData` から出る）。通知の `actions.report` が
+   * 真のときだけ呼ぶ。`button` はボタンを押したときの番号（1 始まり）。`id` が空なら `i=0` で送る（仕様）。
+   */
+  notificationActivated(id: string, button?: number): void {
+    if (this.disposed) return;
+    this.core.notification_activated(id, button && button > 0 ? button : 0);
+    this.flush();
+  }
+
+  /** 通知が閉じられたことを返す。通知の `reportClose` が真のときだけ呼ぶ。 */
+  notificationClosed(id: string): void {
+    if (this.disposed) return;
+    this.core.notification_closed(id);
+    this.flush();
+  }
+
+  /** `p=?` の問い合わせ（`onNotificationQuery`）に答える。 */
+  replyNotificationQuery(id: string, support: NotificationSupport = {}): void {
+    if (this.disposed) return;
+    this.core.notification_query_reply(
+      id,
+      support.actions ?? ["focus", "report"],
+      support.when ?? ["always", "unfocused", "invisible"],
+      support.payloads ?? ["title", "body", "?", "close", "alive"],
+      Uint8Array.from(support.urgencies ?? [0, 1, 2]),
+      support.closeReport ?? true,
+      support.timeout ?? false,
+      support.sounds ?? [],
+      support.types ?? [],
+    );
+    this.flush();
+  }
+
+  /** `p=alive` の問い合わせ（`onNotificationAlive`）に答える。`ids` はまだ生きている通知の `i`。 */
+  replyNotificationAlive(id: string, ids: string[]): void {
+    if (this.disposed) return;
+    this.core.notification_alive_reply(id, ids);
+    this.flush();
   }
 
   /**
@@ -1426,6 +1593,10 @@ export class Terminal {
     this.dataListeners.clear();
     this.titleListeners.clear();
     this.bellListeners.clear();
+    this.notificationListeners.clear();
+    this.notificationCloseListeners.clear();
+    this.notificationQueryListeners.clear();
+    this.notificationAliveListeners.clear();
     this.oscHandlers.clear();
     this.wasm.free();
   }
