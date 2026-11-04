@@ -1,6 +1,13 @@
 import { WasmTerminal } from "./wasm/coneko_term_wasm.js";
 import { getMemory } from "./memory.js";
 import {
+  CompositionHelper,
+  KeyHandler,
+  detectPlatform,
+  type CompositionViewLike,
+} from "./input.js";
+import { bracketTextForPaste, prepareTextForTerminal } from "./keyboard.js";
+import {
   CanvasRenderer,
   Palette,
   Scrollbar,
@@ -66,6 +73,13 @@ export interface TerminalOptions {
   scrollback?: number;
   /** テーマ。 */
   theme?: Theme;
+  /**
+   * macOS で Option を Meta（ESC の前置き）として送るか。既定は false（xterm.js と同じ。
+   * Option は字を打つキーとして扱う）。
+   */
+  macOptionIsMeta?: boolean;
+  /** キーを打ったとき、さかのぼって見ていたら一番下へ戻すか。既定は true（xterm.js と同じ）。 */
+  scrollOnUserInput?: boolean;
 }
 
 /** カーソルの状態。 */
@@ -196,6 +210,9 @@ export class Terminal {
   private oscHandlers = new Map<number, Set<(data: string) => void>>();
   private element?: HTMLElement;
   private cleanups: (() => void)[] = [];
+  private textarea?: HTMLTextAreaElement;
+  private composition?: CompositionHelper;
+  private customKeyHandler?: (ev: KeyboardEvent) => boolean;
   private decoder = new TextDecoder();
   private encoder = new TextEncoder();
 
@@ -254,12 +271,12 @@ export class Terminal {
     return this.core.is_alt_screen();
   }
 
-  /** bracketed paste が有効か（#9 が貼り付けで使う）。 */
+  /** bracketed paste（2004）が有効か。`paste` が使う。 */
   get bracketedPaste(): boolean {
     return this.core.bracketed_paste();
   }
 
-  /** アプリケーションカーソルキーか（#9 が使う）。 */
+  /** アプリケーションカーソルキー（DECCKM）か。矢印・Home・End の送り方が変わる。 */
   get applicationCursorKeys(): boolean {
     return this.core.application_cursor_keys();
   }
@@ -360,6 +377,38 @@ export class Terminal {
       typeof data === "string" ? this.encoder.encode(data) : data,
     );
     this.flush();
+  }
+
+  /**
+   * ユーザーの入力（キー・変換の確定・貼り付け）を出口から出す。`scrollOnUserInput` が false でなく、
+   * さかのぼって見ていたら、一番下へ戻す。
+   */
+  private sendUserInput(data: string): void {
+    if (this.disposed || data.length === 0) return;
+    if (this.options.scrollOnUserInput !== false) this.scrollToBottom();
+    this.input(data);
+  }
+
+  /**
+   * 貼り付ける。改行は `\r` にそろえ（xterm.js と同じ）、bracketed paste（2004）が有効なら
+   * `ESC [200~` と `ESC [201~` で囲んで、出口から出す。`paste` イベントも、これを呼ぶ。
+   */
+  paste(text: string): void {
+    if (this.disposed) return;
+    this.sendUserInput(
+      bracketTextForPaste(prepareTextForTerminal(text), this.bracketedPaste),
+    );
+    if (this.textarea) this.textarea.value = "";
+  }
+
+  /**
+   * キーのイベントを、ターミナルより先に見るハンドラー（xterm.js の `attachCustomKeyEventHandler`）。
+   * `false` を返したキーは、ターミナルが処理しない。外すには `undefined`。
+   */
+  attachCustomKeyEventHandler(
+    handler: ((ev: KeyboardEvent) => boolean) | undefined,
+  ): void {
+    this.customKeyHandler = handler;
   }
 
   /**
@@ -481,7 +530,6 @@ export class Terminal {
     const doc = host.ownerDocument;
     const el = doc.createElement("div");
     el.className = "coneko-term";
-    el.tabIndex = 0;
     Object.assign(el.style, {
       position: "relative",
       width: "100%",
@@ -494,15 +542,7 @@ export class Terminal {
     canvas.className = "coneko-term-screen";
     Object.assign(canvas.style, { position: "absolute", left: "0", top: "0" });
     el.appendChild(canvas);
-    const onFocus = () => this.setFocused(true);
-    const onBlur = () => this.setFocused(false);
-    el.addEventListener("focus", onFocus);
-    el.addEventListener("blur", onBlur);
-    this.cleanups.push(() => {
-      el.removeEventListener("focus", onFocus);
-      el.removeEventListener("blur", onBlur);
-      el.remove();
-    });
+    this.cleanups.push(() => el.remove());
     host.appendChild(el);
     this.element = el;
     this.host = host;
@@ -522,10 +562,144 @@ export class Terminal {
       for (const l of [...this.cellSizeListeners]) l(size);
     });
     this.cleanups.push(() => renderer.dispose());
+    this.setupInput(doc, el);
     this.afterChange();
 
     this.cleanups.push(this.watchFonts(doc, renderer));
     this.cleanups.push(this.watchDevicePixelRatio(doc, renderer));
+  }
+
+  /**
+   * 見えない `textarea` を置いて、キー・変換・貼り付け・フォーカスを受ける。
+   * 変換中の字は、カーソルの位置に重ねて見せる。
+   */
+  private setupInput(doc: Document, el: HTMLElement): void {
+    const textarea = doc.createElement("textarea");
+    textarea.className = "coneko-term-input";
+    textarea.setAttribute("aria-label", "Terminal input");
+    textarea.setAttribute("autocorrect", "off");
+    textarea.setAttribute("autocapitalize", "off");
+    textarea.setAttribute("autocomplete", "off");
+    textarea.setAttribute("spellcheck", "false");
+    textarea.setAttribute("wrap", "off");
+    textarea.tabIndex = 0;
+    Object.assign(textarea.style, {
+      position: "absolute",
+      left: "-9999em",
+      top: "0",
+      width: "0",
+      height: "0",
+      padding: "0",
+      border: "0",
+      margin: "0",
+      opacity: "0",
+      zIndex: "-5",
+      whiteSpace: "nowrap",
+      overflow: "hidden",
+      resize: "none",
+    });
+
+    const viewEl = doc.createElement("div");
+    viewEl.className = "coneko-term-composition";
+    Object.assign(viewEl.style, {
+      display: "none",
+      position: "absolute",
+      whiteSpace: "nowrap",
+      zIndex: "1",
+      background: this.resolvedTheme.background,
+      color: this.resolvedTheme.foreground,
+    });
+    const view: CompositionViewLike = {
+      get textContent() {
+        return viewEl.textContent;
+      },
+      set textContent(v) {
+        viewEl.textContent = v;
+      },
+      style: viewEl.style as unknown as CompositionViewLike["style"],
+      getBoundingClientRect: () => viewEl.getBoundingClientRect(),
+      show: () => void (viewEl.style.display = "inline-block"),
+      hide: () => void (viewEl.style.display = "none"),
+    };
+    el.append(textarea, viewEl);
+
+    const platform = detectPlatform();
+    const composition = new CompositionHelper(
+      textarea,
+      view,
+      (data) => this.sendUserInput(data),
+      () => {
+        const cell = this.renderer?.cellSize;
+        if (!cell || this.viewportOffset !== 0) return undefined;
+        const c = this.cursor;
+        return {
+          left: Math.min(c.x, this.cols - 1) * cell.width,
+          top: c.y * cell.height,
+          cellHeight: cell.height,
+        };
+      },
+      () => ({
+        family: this.options.fontFamily ?? "monospace",
+        size: this.options.fontSize ?? 15,
+      }),
+    );
+    this.composition = composition;
+    const keys = new KeyHandler(
+      {
+        send: (data) => this.sendUserInput(data),
+        applicationCursorKeys: () => this.applicationCursorKeys,
+        scrollPages: (n) => this.scrollLines(n * (this.rows - 1)),
+        isMac: platform.isMac,
+        isWindows: platform.isWindows,
+        macOptionIsMeta: this.options.macOptionIsMeta ?? false,
+        customKeyHandler: () => this.customKeyHandler,
+      },
+      textarea,
+      composition,
+    );
+    this.textarea = textarea;
+
+    const on = <E extends Event>(
+      target: EventTarget,
+      type: string,
+      f: (ev: E) => void,
+      capture = false,
+    ) => {
+      const h = f as EventListener;
+      target.addEventListener(type, h, capture);
+      this.cleanups.push(() => target.removeEventListener(type, h, capture));
+    };
+    on<KeyboardEvent>(textarea, "keydown", (e) => void keys.keyDown(e), true);
+    on<KeyboardEvent>(textarea, "keyup", () => keys.keyUp(), true);
+    on<KeyboardEvent>(textarea, "keypress", (e) => void keys.keyPress(e), true);
+    on<InputEvent>(textarea, "input", (e) => void keys.input(e), true);
+    on<CompositionEvent>(textarea, "compositionstart", () =>
+      composition.compositionstart(),
+    );
+    on<CompositionEvent>(textarea, "compositionupdate", (e) =>
+      composition.compositionupdate(e.data),
+    );
+    on<CompositionEvent>(textarea, "compositionend", () =>
+      composition.compositionend(),
+    );
+    const onPaste = (e: ClipboardEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const text = e.clipboardData?.getData("text/plain");
+      if (text) this.paste(text);
+    };
+    on<ClipboardEvent>(textarea, "paste", onPaste);
+    on<ClipboardEvent>(el, "paste", onPaste);
+    on<FocusEvent>(textarea, "focus", () => this.setFocused(true));
+    on<FocusEvent>(textarea, "blur", () => {
+      textarea.value = "";
+      this.setFocused(false);
+    });
+    // 欄を押したら、フォーカスは `textarea` へ（押した先に動かさない）。マウスの報告や選択は #10
+    on<MouseEvent>(el, "mousedown", (e) => {
+      if (e.target !== textarea) e.preventDefault();
+      textarea.focus();
+    });
   }
 
   /** フォントを読み終えてから測り直す（読む前は代わりのフォントの大きさになる）。戻り値は後始末。 */
@@ -654,6 +828,7 @@ export class Terminal {
     const r = this.renderer;
     if (!r) return;
     r.touch();
+    this.composition?.updateCompositionElements(true);
     const cell = r.cellSize;
     this.scrollbar?.update(
       this.rows * cell.height,
@@ -676,9 +851,14 @@ export class Terminal {
     return this.element;
   }
 
-  /** フォーカスを当てる。`open` の前は何もしない。 */
+  /** 見えない `textarea` にフォーカスを当てる。`open` の前は何もしない。 */
   focus(): void {
-    this.element?.focus();
+    this.textarea?.focus();
+  }
+
+  /** フォーカスを外す。`open` の前は何もしない。 */
+  blur(): void {
+    this.textarea?.blur();
   }
 
   /** 変わった行（見えている画面の行番号）を返し、「変わった」の印を消す。 */
@@ -730,6 +910,8 @@ export class Terminal {
     for (const c of this.cleanups) c();
     this.cleanups.length = 0;
     this.element = undefined;
+    this.textarea = undefined;
+    this.composition = undefined;
     this.host = undefined;
     this.renderer = undefined;
     this.scrollbar = undefined;
