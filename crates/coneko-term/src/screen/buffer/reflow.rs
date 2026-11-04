@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use super::{Buffer, Line};
+use crate::graphics::Placement;
 use crate::screen::cell::Cell;
 
 /// 組み直しのあとも追いかける位置（カーソルなど）。
@@ -155,8 +156,13 @@ fn rewrap_group(
     // 最後の行は、右端の空のセルを捨てる。
     let mut starts = Vec::with_capacity(group.len());
     let mut flat: Vec<Cell> = Vec::new();
+    // 配置は、持っていたセルの字の並びの中の位置（offset）を覚えておき、組み直したあとの位置へ移す。
+    let mut placements: Vec<(usize, Placement)> = Vec::new();
     for k in 0..group.len() {
         starts.push(flat.len());
+        for p in std::mem::take(&mut group[k].placements) {
+            placements.push((flat.len() + p.col, p));
+        }
         // 次の行が全角の字で始まるなら、この行の最後の空のセルは入りきらなかった余り
         let next_wide = group.get(k + 1).is_some_and(|l| l.cells[0].width == 2);
         let mut cells = std::mem::take(&mut group[k].cells);
@@ -193,6 +199,13 @@ fn rewrap_group(
         }
     }
 
+    let mut moved: Vec<Vec<Placement>> = vec![Vec::new(); lay.len()];
+    for (offset, mut p) in placements {
+        let (r, x, _) = locate(&lay, total, cols, offset);
+        p.col = x;
+        moved[r].push(p);
+    }
+
     let nrows = lay.len();
     let mut cells = flat.into_iter();
     for (r, &(_, len)) in lay.iter().enumerate() {
@@ -202,6 +215,7 @@ fn rewrap_group(
             cells: row,
             wrapped: if r + 1 < nrows { true } else { last_wrapped },
             dirty: true,
+            placements: std::mem::take(&mut moved[r]),
         });
     }
 }

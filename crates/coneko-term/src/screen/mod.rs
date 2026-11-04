@@ -14,6 +14,7 @@ mod tests;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::graphics::Placement;
 use buffer::Buffer;
 pub use buffer::{Line, SavedCursor};
 pub use cell::{Attrs, Cell, Color, Content, Underline, UnderlineStyle};
@@ -373,6 +374,7 @@ impl Screen {
     /// 全部のセルを `c` で埋め、スクロール範囲を戻してカーソルを左上へ置く（DECALN）。
     pub fn fill_with(&mut self, c: char) {
         self.reset_scroll_region();
+        self.clear_visible_placements();
         let b = self.buf_mut();
         b.fill(c);
         b.cursor.x = 0;
@@ -432,6 +434,61 @@ impl Screen {
         b.cursor.pending_wrap = false;
     }
 
+    // ---- 画像の配置 ----
+
+    /// 今の画面（主画面か代替画面）にある配置と、その位置。上の行から順に。
+    /// 行は、見えている画面の一番上を 0 とし、スクロールバックの中は負。
+    pub fn placements(&self) -> Vec<(i64, &Placement)> {
+        let b = self.buf();
+        let base = b.scrollback_len() as i64;
+        let mut out = Vec::new();
+        for (i, line) in b.lines.iter().enumerate() {
+            for p in &line.placements {
+                out.push((i as i64 - base, p));
+            }
+        }
+        out
+    }
+
+    /// カーソルの行に配置を足す。位置の列は `p.col`。
+    pub(crate) fn add_placement(&mut self, p: Placement) {
+        let y = self.buf().cursor.y;
+        self.buf_mut().add_placement(y, p);
+    }
+
+    /// 今の画面の配置のうち、`keep` が偽を返したものを捨てる。捨てた配置の画像の ID を返す。
+    pub(crate) fn retain_placements(
+        &mut self,
+        keep: impl FnMut(i64, &Placement) -> bool,
+    ) -> Vec<u32> {
+        self.buf_mut().retain_placements(keep)
+    }
+
+    /// 画像が捨てられたので、その配置を主画面と代替画面の両方から消す。
+    pub(crate) fn drop_image_placements(&mut self, ids: &[u32]) {
+        self.primary
+            .retain_placements(|_, p| !ids.contains(&p.image_id));
+        self.alt
+            .retain_placements(|_, p| !ids.contains(&p.image_id));
+    }
+
+    /// この画像の配置が主画面か代替画面にあるか。
+    pub(crate) fn image_is_placed(&self, id: u32) -> bool {
+        let has = |b: &Buffer| {
+            b.lines
+                .iter()
+                .any(|l| l.placements.iter().any(|p| p.image_id == id))
+        };
+        has(&self.primary) || has(&self.alt)
+    }
+
+    /// 見えている画面の配置をすべて消す。
+    pub(crate) fn clear_visible_placements(&mut self) {
+        let rows = self.rows() as i64;
+        self.buf_mut()
+            .retain_placements(|row, p| !(row + i64::from(p.rows) > 0 && row < rows));
+    }
+
     // ---- 代替画面 ----
 
     /// 代替画面へ切り替える。代替画面は空の状態から始まり、スクロールバックを持たない。
@@ -450,6 +507,9 @@ impl Screen {
             return;
         }
         self.alt_active = false;
+        // 代替画面の配置は捨てる
+        let (rows, cols) = (self.primary.rows, self.primary.cols);
+        self.alt = Buffer::new_alt(rows, cols);
         self.primary.mark_all_dirty();
     }
 

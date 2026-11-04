@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use unicode_width::UnicodeWidthStr;
 
 use super::cell::{Attrs, Cell, Content};
+use crate::graphics::Placement;
 
 mod reflow;
 
@@ -14,6 +15,8 @@ pub struct Line {
     pub(crate) cells: Vec<Cell>,
     pub(crate) wrapped: bool,
     pub(crate) dirty: bool,
+    /// この行に左上のセルがある画像の配置。
+    pub(crate) placements: Vec<Placement>,
 }
 
 impl Line {
@@ -22,6 +25,7 @@ impl Line {
             cells: vec![Cell::blank(attrs); cols],
             wrapped: false,
             dirty: true,
+            placements: Vec::new(),
         }
     }
 
@@ -82,6 +86,7 @@ impl Line {
     }
 
     fn resize(&mut self, cols: usize) {
+        self.placements.retain(|p| p.col < cols);
         self.cells.resize(cols, Cell::default());
         // 切り詰めて全角の字の右半分だけが消えたら、左半分も消す
         if let Some(last) = self.cells.last_mut() {
@@ -182,6 +187,41 @@ impl Buffer {
         let line = &mut self.lines[i];
         line.dirty = true;
         line
+    }
+
+    /// 配置を足す。同じ画像の同じ（0 でない）配置の番号があれば、置き換える。
+    pub fn add_placement(&mut self, y: usize, p: Placement) {
+        if p.placement_id != 0 {
+            self.retain_placements(|_, q| {
+                !(q.image_id == p.image_id && q.placement_id == p.placement_id)
+            });
+        }
+        self.line_mut(y).placements.push(p);
+    }
+
+    /// `keep` が偽を返した配置を捨てる。`keep` には、見えている画面の一番上を 0 とした行と配置を渡す。
+    /// 捨てた配置の画像の ID を返す。
+    pub fn retain_placements(&mut self, mut keep: impl FnMut(i64, &Placement) -> bool) -> Vec<u32> {
+        let base = self.scrollback_len() as i64;
+        let mut removed = Vec::new();
+        for (i, line) in self.lines.iter_mut().enumerate() {
+            if line.placements.is_empty() {
+                continue;
+            }
+            let row = i as i64 - base;
+            let before = line.placements.len();
+            line.placements.retain(|p| {
+                let k = keep(row, p);
+                if !k {
+                    removed.push(p.image_id);
+                }
+                k
+            });
+            if line.placements.len() != before {
+                line.dirty = true;
+            }
+        }
+        removed
     }
 
     pub fn mark_all_dirty(&mut self) {
