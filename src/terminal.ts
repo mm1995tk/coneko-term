@@ -1999,8 +1999,11 @@ export class Terminal {
       this.cleanups.push(() => target.removeEventListener(type, h, capture));
     };
     on<KeyboardEvent>(textarea, "keydown", (e) => {
-      this.core.program_status_key_pressed();
-      this.flush();
+      // 修飾キーだけでは、利用者が操作したとは数えない
+      if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
+        this.core.program_status_key_pressed();
+        this.flush();
+      }
       void keys.keyDown(e);
     }, true);
     on<KeyboardEvent>(textarea, "keyup", (e) => keys.keyUp(e), true);

@@ -188,16 +188,10 @@ fn text(value: &str, max_encoded: usize, max_decoded: usize) -> Option<String> {
     Some(s)
 }
 
-/// OSC 7501 の `data`（`7501;` のあと）を読む。捨てる報告は `None`。
-/// `sequence_len` は、OSC の本体（`7501;` を含む）の長さ。
-pub(super) fn parse(body: &[u8], sequence_len: usize) -> Option<Report> {
-    if sequence_len + FRAMING > MAX_SEQUENCE {
-        return None;
-    }
-    let body = std::str::from_utf8(body).ok()?;
-    if body.trim() == "?" {
-        return Some(Report::Query);
-    }
+/// 本文を `key=value` の対に割る。値に使えない文字を含む対や、`=` の無い対は読み飛ばす。同じ鍵は
+/// 最後が勝つ。報告ごと捨てるときは `None`（鍵が長すぎる。壊れた `id` を読み飛ばすと根の記録を
+/// 書き換えてしまうので、それも捨てる）。
+fn pairs(body: &str) -> Option<Vec<(&str, &str)>> {
     let mut pairs: Vec<(&str, &str)> = Vec::new();
     for pair in body.split(':') {
         let Some((k, v)) = pair.split_once('=') else {
@@ -208,54 +202,33 @@ pub(super) fn parse(body: &[u8], sequence_len: usize) -> Option<Report> {
             continue;
         }
         if !v.bytes().all(value_byte) {
-            // 壊れた id を読み飛ばすと根の記録を書き換えてしまうので、報告ごと捨てる。
             if k == "id" {
                 return None;
             }
             continue;
         }
-        // 上限を超えたら、報告ごと捨てる。
         if k.len() > MAX_KEY {
             return None;
         }
-        // 同じ鍵は最後が勝つ。
         pairs.retain(|(pk, _)| *pk != k);
         pairs.push((k, v));
     }
-    let get = |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+    Some(pairs)
+}
 
-    // 先に全部の対を確かめる（捨てる報告は何も適用しない）。
-    let msg = get("msg")
-        .map(|v| text(v, MAX_MSG_ENCODED, MAX_MSG_DECODED))
-        .map(|r| r.ok_or(()));
-    let title = get("title")
-        .map(|v| text(v, MAX_TITLE_ENCODED, MAX_TITLE_DECODED))
-        .map(|r| r.ok_or(()));
-    let msg = match msg {
-        Some(Ok(s)) => Some(s),
-        Some(Err(())) => return None,
-        None => None,
+/// 対から記録の中身を作る。先に全部の対を確かめ、上限を超えたものや壊れた文字列があれば `None`
+/// （何も適用しない）。
+fn status_of(pairs: &[(&str, &str)], state: ProgramState) -> Option<ProgramStatus> {
+    let get = |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+    let decode = |key: &str, enc: usize, dec: usize| match get(key) {
+        None => Some(None),
+        Some(v) => text(v, enc, dec).map(Some),
     };
-    let title = match title {
-        Some(Ok(s)) => Some(s),
-        Some(Err(())) => return None,
-        None => None,
-    };
+    let msg = decode("msg", MAX_MSG_ENCODED, MAX_MSG_DECODED)?;
+    let title = decode("title", MAX_TITLE_ENCODED, MAX_TITLE_DECODED)?;
     if get("app").is_some_and(|a| a.len() > MAX_APP) {
         return None;
     }
-    let id = match get("id") {
-        Some(id) if valid_id(id) => Some(id.to_string()),
-        // 不正な id は、根の記録へ落とさず、報告ごと無視する。
-        Some(_) => return None,
-        None => None,
-    };
-
-    let state = get("state")?;
-    if state == "clear" {
-        return Some(Report::Clear { id });
-    }
-    let state = ProgramState::parse(state)?;
     let running = matches!(state, ProgramState::Working | ProgramState::Blocked);
     let kind = get("kind")
         .and_then(ProgramKind::parse)
@@ -268,16 +241,44 @@ pub(super) fn parse(body: &[u8], sequence_len: usize) -> Option<Report> {
     let app = get("app")
         .filter(|a| !a.is_empty() && a.bytes().all(segment_byte))
         .map(str::to_string);
+    Some(ProgramStatus {
+        state,
+        kind,
+        progress,
+        app,
+        title,
+        msg,
+    })
+}
+
+/// OSC 7501 の `data`（`7501;` のあと）を読む。捨てる報告は `None`。
+/// `sequence_len` は、OSC の本体（`7501;` を含む）の長さ。
+pub(super) fn parse(body: &[u8], sequence_len: usize) -> Option<Report> {
+    if sequence_len + FRAMING > MAX_SEQUENCE {
+        return None;
+    }
+    let body = std::str::from_utf8(body).ok()?;
+    if body.trim() == "?" {
+        return Some(Report::Query);
+    }
+    let pairs = pairs(body)?;
+    let get = |key: &str| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v);
+    // 不正な id は、根の記録へ落とさず、報告ごと無視する。
+    let id = match get("id") {
+        Some(id) if valid_id(id) => Some(id.to_string()),
+        Some(_) => return None,
+        None => None,
+    };
+    let state = get("state")?;
+    if state == "clear" {
+        // 他の対も、上限と文字列は確かめる。
+        status_of(&pairs, ProgramState::Idle)?;
+        return Some(Report::Clear { id });
+    }
+    let status = status_of(&pairs, ProgramState::parse(state)?)?;
     Some(Report::Set {
         id: id.unwrap_or_default(),
-        status: ProgramStatus {
-            state,
-            kind,
-            progress,
-            app,
-            title,
-            msg,
-        },
+        status,
     })
 }
 
