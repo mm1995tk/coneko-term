@@ -1781,6 +1781,7 @@ export class Terminal {
     host.appendChild(el);
     this.element = el;
     this.host = host;
+    this.syncPointerShape();
 
     this.scrollbar = new Scrollbar(el, {
       total: () => this.scrollbackLength + this.rows,
@@ -2046,6 +2047,7 @@ export class Terminal {
 
   /** 描画とスクロールバーに、画面が変わったことを知らせる。 */
   private afterChange(): void {
+    this.syncPointerShape();
     const r = this.renderer;
     if (!r) return;
     r.touch();
@@ -2055,6 +2057,22 @@ export class Terminal {
       this.rows * cell.height,
       !this.core.is_alt_screen(),
     );
+  }
+
+  /**
+   * プログラムが OSC 22（kitty の mouse pointer shapes）で決めた、ポインターの形。CSS の `cursor` の値で、
+   * 決まっていなければ `undefined`。マウスの報告が有効かどうかには関わらない。
+   * `open` した要素の `cursor` には、これが自動で反映される。
+   */
+  get pointerShape(): string | undefined {
+    return this.core.pointer_shape() ?? undefined;
+  }
+
+  private syncPointerShape(): void {
+    const el = this.element;
+    if (!el || this.disposed) return;
+    const shape = this.pointerShape ?? "";
+    if (el.style.cursor !== shape) el.style.cursor = shape;
   }
 
   /** 画面の `y` 行目（表示位置を考えた、いま見えている行）のセル。 */
