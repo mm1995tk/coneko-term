@@ -1,5 +1,13 @@
 import { WasmTerminal } from "./wasm/coneko_term_wasm.js";
 import { getMemory } from "./memory.js";
+import {
+  CanvasRenderer,
+  Palette,
+  Scrollbar,
+  SCROLLBAR_WIDTH,
+  proposeDimensions,
+  type CellSize,
+} from "./renderer.js";
 
 /** セル 1 つが使う `u32` の数。`RowView.cells` の並びは README を参照。 */
 export const CELL_STRIDE = 6;
@@ -20,7 +28,7 @@ export interface Theme {
   background?: string;
   /** カーソルの色（OSC 12）。 */
   cursor?: string;
-  /** 選択範囲の背景。描画（#8）が使う。 */
+  /** 選択範囲の背景。選択の表示（#10）が使う。 */
   selectionBackground?: string;
   black?: string;
   red?: string;
@@ -46,11 +54,11 @@ export interface TerminalOptions {
   cols?: number;
   /** 行の数。既定は 24。 */
   rows?: number;
-  /** 描画（#8）が使う。 */
+  /** 描画に使うフォント（CSS の `font-family`）。既定は `monospace`。 */
   fontFamily?: string;
-  /** 描画（#8）が使う。 */
+  /** 字の大きさ（CSS ピクセル）。既定は 15（xterm.js と同じ）。 */
   fontSize?: number;
-  /** 描画（#8）が使う。 */
+  /** 行の高さ。字の高さに掛ける倍率（xterm.js と同じ）。既定は 1。 */
   lineHeight?: number;
   /** カーソルを点滅させるか。`CSI Ps SP q` で変わる。既定は false。 */
   cursorBlink?: boolean;
@@ -156,12 +164,22 @@ const sleep0 = () => new Promise<void>((r) => setTimeout(r, 0));
 
 /**
  * ターミナル。VT のバイト列を `write` で受け、画面の中身を持つ。DOM を使わないので
- * Node.js でも動く（`open` を呼ぶまで DOM に触らない）。描画は #8 が足す。
+ * Node.js でも動く（`open` を呼ぶまで DOM に触らない）。`open` すると Canvas 2D で描く。
  *
  * 使う前に `init()` を呼ぶこと。
  */
 export class Terminal {
   readonly options: Readonly<TerminalOptions>;
+  private resolvedTheme: Required<Omit<Theme, "selectionBackground">> =
+    DEFAULT_THEME;
+  private renderer?: CanvasRenderer;
+  private scrollbar?: Scrollbar;
+  private focused = false;
+  /** 画面の一番下から何行さかのぼって見ているか。0 なら一番下。 */
+  private viewOffset = 0;
+  private lastScrollback = 0;
+  private scrollListeners = new Set<(viewportY: number) => void>();
+  private cellSizeListeners = new Set<(size: CellSize) => void>();
   private wasm: WasmTerminal;
 
   /** `dispose` のあとに触ると、分かりやすい例外にする。 */
@@ -193,6 +211,7 @@ export class Terminal {
 
   private applyTheme(theme: Theme): void {
     const t = { ...DEFAULT_THEME, ...stripUndefined(theme) };
+    this.resolvedTheme = t;
     const ansi = new Uint8Array(48);
     ANSI_NAMES.forEach((name, i) => ansi.set(parseColor(t[name]), i * 3));
     this.core.set_theme(
@@ -270,6 +289,8 @@ export class Terminal {
         const end = Math.min(job.offset + SLICE_BYTES, job.bytes.length);
         this.core.write(job.bytes.subarray(job.offset, end));
         job.offset = end;
+        this.syncViewport();
+        this.afterChange();
         // 聞き手や done の例外で残りの処理を止めない。投げ直して報告する
         this.guard(() => this.flush());
         if (this.disposed) break;
@@ -389,36 +410,90 @@ export class Terminal {
   reset(): void {
     this.queue.length = 0;
     this.core.reset();
+    this.viewOffset = 0;
+    this.lastScrollback = this.core.scrollback_len();
+    this.afterChange();
   }
 
   /** 大きさを変える。 */
   resize(cols: number, rows: number): void {
     this.core.resize(Math.max(1, rows), Math.max(1, cols));
+    this.lastScrollback = this.core.scrollback_len();
+    this.viewOffset = Math.min(this.viewOffset, this.lastScrollback);
+    this.renderer?.resize();
+    this.afterChange();
   }
 
   /**
-   * 欄の大きさに合わせて大きさを変える（FitAddon の `fit()` に当たる）。
-   * 描画（#8）ができるまでは何もせず、いまの大きさを返す。
+   * 欄（`open` に渡した要素）の大きさに合わせて列と行の数を決め、大きさを変える
+   * （xterm.js の FitAddon の `fit()` と同じ式。スクロールバーの幅を引く）。
+   * 返すのは変えたあとの大きさ。`open` の前や、欄が見えていない（大きさが 0）ときや、
+   * フォントの大きさがまだ測れていないときは、何もせず、いまの大きさを返す。
    */
   fit(): { cols: number; rows: number } {
+    const dims = this.proposeDimensions();
+    if (dims && (dims.cols !== this.cols || dims.rows !== this.rows)) {
+      this.resize(dims.cols, dims.rows);
+    }
     return { cols: this.cols, rows: this.rows };
+  }
+
+  /** `fit()` が使う列と行の数を、変えずに出す。 */
+  proposeDimensions(): { cols: number; rows: number } | undefined {
+    const host = this.host;
+    const cell = this.renderer?.cellSize;
+    if (!host || !cell) return undefined;
+    const style = host.ownerDocument.defaultView?.getComputedStyle(host);
+    const px = (v: string | undefined) => Number.parseFloat(v ?? "") || 0;
+    const width =
+      host.clientWidth - px(style?.paddingLeft) - px(style?.paddingRight);
+    const height =
+      host.clientHeight - px(style?.paddingTop) - px(style?.paddingBottom);
+    return proposeDimensions({
+      width,
+      height,
+      cellWidth: cell.width,
+      cellHeight: cell.height,
+      scrollbarWidth: this.options.scrollback === 0 ? 0 : SCROLLBAR_WIDTH,
+    });
+  }
+
+  /** フォーカスがあるか（`setFocused` か、要素のフォーカスで決まる）。 */
+  get isFocused(): boolean {
+    return this.focused;
   }
 
   /** ウィンドウの代わりに、フォーカスを得た・失ったことを知らせる。 */
   setFocused(focused: boolean): void {
+    this.focused = focused;
     this.core.set_focus(focused);
     this.flush();
+    this.renderer?.touch();
   }
 
   /**
-   * 欄の要素に付ける。いまは描かず、フォーカスを受ける要素（`tabindex` つき）を作るだけ。
-   * 描画は #8 が足す。
+   * 欄の要素に付ける。canvas とスクロールバーを持つ要素（`tabindex` つき）を作り、
+   * Canvas 2D で描き始める。字の幅と高さは、フォントを読み終えてから測り直す。
+   * 欄の大きさに合わせるには `fit()` を呼ぶ。
    */
   open(host: HTMLElement): void {
     if (this.element) throw new Error("coneko-term: already opened");
-    const el = host.ownerDocument.createElement("div");
+    const doc = host.ownerDocument;
+    const el = doc.createElement("div");
     el.className = "coneko-term";
     el.tabIndex = 0;
+    Object.assign(el.style, {
+      position: "relative",
+      width: "100%",
+      height: "100%",
+      overflow: "hidden",
+      outline: "none",
+      background: this.resolvedTheme.background,
+    });
+    const canvas = doc.createElement("canvas");
+    canvas.className = "coneko-term-screen";
+    Object.assign(canvas.style, { position: "absolute", left: "0", top: "0" });
+    el.appendChild(canvas);
     const onFocus = () => this.setFocused(true);
     const onBlur = () => this.setFocused(false);
     el.addEventListener("focus", onFocus);
@@ -430,7 +505,171 @@ export class Terminal {
     });
     host.appendChild(el);
     this.element = el;
+    this.host = host;
+
+    this.scrollbar = new Scrollbar(el, {
+      total: () => this.scrollbackLength + this.rows,
+      rows: () => this.rows,
+      viewportY: () => this.viewportY,
+      scrollToLine: (n) => this.scrollToLine(n),
+      scrollLines: (n) => this.scrollLines(n),
+    });
+    this.cleanups.push(() => this.scrollbar?.dispose());
+
+    const renderer = new CanvasRenderer(canvas, this, this.renderOptions());
+    this.renderer = renderer;
+    renderer.onCellSizeChange((size) => {
+      for (const l of [...this.cellSizeListeners]) l(size);
+    });
+    this.cleanups.push(() => renderer.dispose());
+    this.afterChange();
+
+    this.cleanups.push(this.watchFonts(doc, renderer));
+    this.cleanups.push(this.watchDevicePixelRatio(doc, renderer));
   }
+
+  /** フォントを読み終えてから測り直す（読む前は代わりのフォントの大きさになる）。戻り値は後始末。 */
+  private watchFonts(doc: Document, renderer: CanvasRenderer): () => void {
+    const fonts = doc.fonts;
+    if (!fonts) return () => {};
+    const remeasure = () => {
+      if (!this.disposed) renderer.measure();
+    };
+    const spec = `${this.options.fontSize ?? 15}px ${this.options.fontFamily ?? "monospace"}`;
+    void fonts.load(spec).then(remeasure, () => {});
+    void fonts.ready.then(remeasure, () => {});
+    fonts.addEventListener("loadingdone", remeasure);
+    return () => fonts.removeEventListener("loadingdone", remeasure);
+  }
+
+  /** `devicePixelRatio` が変わったら（別のディスプレイへ動かした、ズームした）測り直す。戻り値は後始末。 */
+  private watchDevicePixelRatio(
+    doc: Document,
+    renderer: CanvasRenderer,
+  ): () => void {
+    const win = doc.defaultView;
+    if (!win?.matchMedia) return () => {};
+    let mq: MediaQueryList | undefined;
+    const watch = () => {
+      mq?.removeEventListener("change", onChange);
+      mq = win.matchMedia(`(resolution: ${win.devicePixelRatio}dppx)`);
+      mq.addEventListener("change", onChange);
+    };
+    const onChange = () => {
+      watch();
+      if (!this.disposed) renderer.measure();
+    };
+    watch();
+    return () => mq?.removeEventListener("change", onChange);
+  }
+
+  private renderOptions() {
+    const t = this.resolvedTheme;
+    return {
+      fontFamily: this.options.fontFamily ?? "monospace",
+      fontSize: this.options.fontSize ?? 15,
+      lineHeight: this.options.lineHeight ?? 1,
+      palette: new Palette(
+        ANSI_NAMES.map((n) => t[n]),
+        t.foreground,
+        t.background,
+        t.cursor,
+      ),
+    };
+  }
+
+  /** セルの大きさ（CSS ピクセル）。`open` の前は `undefined`。 */
+  get cellSize(): CellSize | undefined {
+    return this.renderer?.cellSize;
+  }
+
+  /** セルの大きさが変わった（フォントを読み終えた、`devicePixelRatio` が変わった）。`fit()` を呼び直す目印に使う。 */
+  onCellSizeChange(listener: (size: CellSize) => void): Disposable {
+    return addListener(this.cellSizeListeners, listener);
+  }
+
+  // ---- 表示位置（viewport）
+
+  /** 実際に使う、さかのぼっている行数。代替画面では常に 0。 */
+  get viewportOffset(): number {
+    return this.core.is_alt_screen() ? 0 : this.viewOffset;
+  }
+
+  /** 一番上に見えている行の番号。0 がスクロールバックの一番古い行で、一番下を見ているときは `scrollbackLength`。 */
+  get viewportY(): number {
+    return this.scrollbackLength - this.viewportOffset;
+  }
+
+  /** 一番下を見ているか（新しい出力に付いていく状態）。 */
+  get isAtBottom(): boolean {
+    return this.viewportOffset === 0;
+  }
+
+  /** `n` 行ぶん動かす。負の数で上（古い方）、正の数で下。 */
+  scrollLines(n: number): void {
+    this.setViewOffset(this.viewOffset - Math.trunc(n));
+  }
+
+  /** 一番上に見える行を `line`（0 がスクロールバックの一番古い行）にする。 */
+  scrollToLine(line: number): void {
+    this.setViewOffset(this.scrollbackLength - Math.trunc(line));
+  }
+
+  /** 一番古い行へ。 */
+  scrollToTop(): void {
+    this.setViewOffset(this.scrollbackLength);
+  }
+
+  /** 一番下へ。 */
+  scrollToBottom(): void {
+    this.setViewOffset(0);
+  }
+
+  /** 表示位置が変わった。引数は新しい `viewportY`。 */
+  onScroll(listener: (viewportY: number) => void): Disposable {
+    return addListener(this.scrollListeners, listener);
+  }
+
+  private setViewOffset(offset: number): void {
+    if (this.disposed) return;
+    const before = this.viewportY;
+    this.viewOffset = Math.max(0, Math.min(offset, this.scrollbackLength));
+    if (this.viewportY === before) return;
+    this.renderer?.invalidate();
+    this.afterChange();
+    for (const l of [...this.scrollListeners]) this.guard(() => l(this.viewportY));
+  }
+
+  /** 書き込みでスクロールバックが増えたとき、さかのぼって見ているなら同じ内容を見続ける。 */
+  private syncViewport(): void {
+    const len = this.core.scrollback_len();
+    const grown = len - this.lastScrollback;
+    this.lastScrollback = len;
+    if (this.viewOffset > 0 && grown > 0) this.viewOffset += grown;
+    this.viewOffset = Math.min(this.viewOffset, len);
+  }
+
+  /** 描画とスクロールバーに、画面が変わったことを知らせる。 */
+  private afterChange(): void {
+    const r = this.renderer;
+    if (!r) return;
+    r.touch();
+    const cell = r.cellSize;
+    this.scrollbar?.update(
+      this.rows * cell.height,
+      !this.core.is_alt_screen(),
+    );
+  }
+
+  /** 画面の `y` 行目（表示位置を考えた、いま見えている行）のセル。 */
+  readViewportRow(y: number): RowView {
+    const i = this.viewportY + y;
+    const sb = this.scrollbackLength;
+    return i < sb ? this.readScrollbackRow(i) : this.readRow(i - sb);
+  }
+
+  /** 欄の要素。 */
+  private host?: HTMLElement;
 
   /** `open` で作った要素。`open` の前は `undefined`。 */
   get hostElement(): HTMLElement | undefined {
@@ -491,6 +730,11 @@ export class Terminal {
     for (const c of this.cleanups) c();
     this.cleanups.length = 0;
     this.element = undefined;
+    this.host = undefined;
+    this.renderer = undefined;
+    this.scrollbar = undefined;
+    this.scrollListeners.clear();
+    this.cellSizeListeners.clear();
     this.dataListeners.clear();
     this.titleListeners.clear();
     this.bellListeners.clear();

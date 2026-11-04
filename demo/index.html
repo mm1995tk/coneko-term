@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>coneko-term demo</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #222;
+        color: #ddd;
+        font: 13px sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      #bar {
+        padding: 6px 8px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      #pane {
+        flex: 1;
+        min-height: 0;
+        margin: 0 8px 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <button data-q="2">block</button>
+      <button data-q="4">underline</button>
+      <button data-q="6">bar</button>
+      <button id="blink">blink</button>
+      <button id="more">add 200 lines</button>
+      <span id="size"></span>
+    </div>
+    <div id="pane"></div>
+    <script type="module">
+      import { init, Terminal } from "../dist/index.js";
+      await init();
+      const term = new Terminal({
+        fontFamily: "'JetBrains Mono', 'DejaVu Sans Mono', monospace",
+        fontSize: 15,
+        scrollback: 5000,
+      });
+      const pane = document.getElementById("pane");
+      term.open(pane);
+      const size = document.getElementById("size");
+      const fit = () => {
+        const { cols, rows } = term.fit();
+        size.textContent = `${cols} x ${rows}`;
+      };
+      new ResizeObserver(fit).observe(pane);
+      term.onCellSizeChange(fit);
+      fit();
+      term.focus();
+
+      const e = "\x1b[";
+      const lines = [
+        `${e}1mcone ko-term${e}0m demo`,
+        "",
+        `${e}1mbold${e}0m ${e}2mdim${e}0m ${e}3mitalic${e}0m ${e}7mreverse${e}0m ${e}8minvisible${e}0m ${e}9mstrike${e}0m`,
+        `${e}4munderline${e}0m ${e}4:2mdouble${e}0m ${e}4:3mcurly${e}0m ${e}4:4mdotted${e}0m ${e}4:5mdashed${e}0m ${e}4:3m${e}58;2;255;80;80mcolored${e}0m`,
+        [30, 31, 32, 33, 34, 35, 36, 37]
+          .map((c) => `${e}${c}mfg${c}${e}0m`)
+          .join(" "),
+        [40, 41, 42, 43, 44, 45, 46, 47]
+          .map((c) => `${e}${c}m ${c} ${e}0m`)
+          .join(" "),
+        [90, 91, 92, 93, 94, 95, 96, 97]
+          .map((c) => `${e}${c}mfg${c}${e}0m`)
+          .join(" "),
+        Array.from(
+          { length: 64 },
+          (_, i) => `${e}48;5;${16 + i * 3}m ${e}0m`,
+        ).join(""),
+        Array.from(
+          { length: 48 },
+          (_, i) => `${e}48;2;${i * 5};${255 - i * 5};160m ${e}0m`,
+        ).join(""),
+        "",
+        "日本語の字は fallback のフォントで描く。全角: ＡＢＣ あいう ひらがな カタカナ 漢字",
+        "combining: é ä / emoji: 😀 👍🏽",
+        `${e}1;31mbold red${e}0m ${e}1;3;4mbold italic underline${e}0m ${e}2;32mdim green${e}0m`,
+        "",
+      ];
+      term.write(lines.join("\r\n") + "\r\n");
+
+      // CSI Ps SP q: 1 点滅ブロック 2 ブロック 3 点滅下線 4 下線 5 点滅縦棒 6 縦棒。
+      // 点滅は奇数。blink ボタンは、いまの形の点滅あり / なしを切り替える
+      let shape = 2;
+      document.querySelectorAll("[data-q]").forEach((b) =>
+        b.addEventListener("click", () => {
+          shape = Number(b.dataset.q);
+          term.write(`\x1b[${shape} q`);
+          term.focus();
+        }),
+      );
+      document.getElementById("blink").addEventListener("click", () => {
+        shape = shape % 2 === 0 ? shape - 1 : shape + 1;
+        term.write(`\x1b[${shape} q`);
+        term.focus();
+      });
+      let n = 0;
+      document.getElementById("more").addEventListener("click", () => {
+        let s = "";
+        for (let i = 0; i < 200; i++) s += `line ${n++}\r\n`;
+        term.write(s);
+      });
+      window.term = term;
+    </script>
+  </body>
+</html>
