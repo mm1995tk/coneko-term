@@ -7,9 +7,19 @@
 /// フラグ 1。disambiguate escape codes。
 pub const DISAMBIGUATE: u32 = 1;
 
-/// 対応しているフラグ。ほかのビットは捨てる（アプリに、効いていないフラグを効いていると
-/// 思わせないため）。2・4・8・16 は #30。
-const SUPPORTED: u32 = DISAMBIGUATE;
+/// フラグ 2。report event types。
+pub const REPORT_EVENT_TYPES: u32 = 2;
+/// フラグ 4。report alternate keys。
+pub const REPORT_ALTERNATE_KEYS: u32 = 4;
+/// フラグ 8。report all keys as escape codes。
+pub const REPORT_ALL_KEYS: u32 = 8;
+/// フラグ 16。report associated text。
+pub const REPORT_TEXT: u32 = 16;
+
+/// 対応しているフラグ（1・2・4・8・16）。ほかのビットは捨てる（アプリに、効いていないフラグを
+/// 効いていると思わせないため）。
+const SUPPORTED: u32 =
+    DISAMBIGUATE | REPORT_EVENT_TYPES | REPORT_ALTERNATE_KEYS | REPORT_ALL_KEYS | REPORT_TEXT;
 
 /// スタックの深さの上限。超えたら古いものを捨てる。仕様は「適切な上限を置け」とだけ言い、
 /// 値は決めていない（kitty 本体は 8）。ここでは 100 にした。

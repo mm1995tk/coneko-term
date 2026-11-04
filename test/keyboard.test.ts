@@ -424,3 +424,305 @@ test("KeyHandler sends the kitty form when the terminal's flag is 1", () => {
   h.handler.keyDown(domEvent(65, { ctrlKey: true }));
   assert.deepEqual(h.sent, [`${ESC}[27u`, `${ESC}[97;5u`]);
 });
+
+// ---- kitty keyboard protocol: フラグ 2・4・8・16 ----
+// 期待値は仕様（https://sw.kovidgoyal.net/kitty/keyboard-protocol/ ）の形。
+// フラグ: 1 disambiguate、2 event types、4 alternate keys、8 all keys、16 text
+
+const F1 = 1;
+const F2 = 2;
+const F4 = 4;
+const F8 = 8;
+const F16 = 16;
+const PRESS = 1;
+const REPEAT = 2;
+const RELEASE = 3;
+
+const ek = (
+  e: KeyEventLike,
+  flags: number,
+  type: 1 | 2 | 3 = PRESS,
+  app = false,
+) => evaluateKeyboardEvent(e, app, false, false, flags, type).key;
+
+// ブラウザーが出す形のイベント（key・code つき）
+const letter = (ch: string, extra: Partial<KeyEventLike> = {}) =>
+  ev(ch.toUpperCase().charCodeAt(0), {
+    key: extra.shiftKey ? ch.toUpperCase() : ch,
+    code: `Key${ch.toUpperCase()}`,
+    ...extra,
+  });
+const ENTER = ev(13, { key: "Enter", code: "Enter" });
+const TAB = ev(9, { key: "Tab", code: "Tab" });
+const BACKSPACE = ev(8, { key: "Backspace", code: "Backspace" });
+const ESCAPE = ev(27, { key: "Escape", code: "Escape" });
+const UP = ev(38, { key: "ArrowUp", code: "ArrowUp" });
+const SHIFT_L = ev(16, { key: "Shift", code: "ShiftLeft", shiftKey: true });
+
+test("kitty flag 2: event types on keys that are already escape codes", () => {
+  // 押す・繰り返し・離す。押すは `1` を省く
+  assert.equal(ek(UP, F2, PRESS), `${ESC}[A`);
+  assert.equal(ek(UP, F2, REPEAT), `${ESC}[1;1:2A`);
+  assert.equal(ek(UP, F2, RELEASE), `${ESC}[1;1:3A`);
+  assert.equal(ek({ ...UP, ctrlKey: true }, F2, RELEASE), `${ESC}[1;5:3A`);
+  assert.equal(ek(ev(46, { key: "Delete", code: "Delete" }), F2, REPEAT), `${ESC}[3;1:2~`);
+  assert.equal(ek(ev(112, { key: "F1", code: "F1" }), F2, RELEASE), `${ESC}[1;1:3P`);
+  assert.equal(ek(ev(116, { key: "F5", code: "F5" }, ), F2, RELEASE), `${ESC}[15;1:3~`);
+  assert.equal(ek(ev(114, { key: "F3", code: "F3" }), F2, REPEAT), `${ESC}[13;1:2~`);
+  // 押すは、フラグ 8 が無ければ今までの送り方のまま（SS3 も使う）
+  assert.equal(ek(ev(112), F2, PRESS), `${ESC}OP`);
+  assert.equal(ek(UP, F2, PRESS, true), `${ESC}OA`);
+  // フラグ 1 のときの Esc・Ctrl+字は、繰り返し・離すも `CSI u`
+  assert.equal(ek(ESCAPE, F1 | F2, REPEAT), `${ESC}[27;1:2u`);
+  assert.equal(ek(ESCAPE, F1 | F2, RELEASE), `${ESC}[27;1:3u`);
+  assert.equal(ek(letter("a", { ctrlKey: true }), F1 | F2, RELEASE), `${ESC}[97;5:3u`);
+  assert.equal(ek(letter("a", { ctrlKey: true }), F1 | F2, REPEAT), `${ESC}[97;5:2u`);
+});
+
+test("kitty flag 2: text keys, Enter, Tab and Backspace are not released without flag 8", () => {
+  assert.equal(ek(letter("a"), F2, PRESS), "a");
+  assert.equal(ek(letter("a"), F2, REPEAT), "a");
+  assert.equal(ek(letter("a"), F2, RELEASE), undefined);
+  assert.equal(ek(letter("a", { shiftKey: true }), F1 | F2, RELEASE), undefined);
+  for (const k of [ENTER, TAB, BACKSPACE]) {
+    assert.equal(ek(k, F1 | F2, RELEASE), undefined);
+    assert.equal(ek({ ...k, ctrlKey: true }, F1 | F2, RELEASE), undefined);
+  }
+  assert.equal(ek(ENTER, F1 | F2, REPEAT), "\r");
+  // 修飾キーだけは、フラグ 8 が無ければ何も送らない
+  assert.equal(ek(SHIFT_L, F1 | F2, PRESS), undefined);
+  assert.equal(ek(SHIFT_L, F1 | F2, RELEASE), undefined);
+  // フラグ 2 が無いと、離すも繰り返しも押すと同じ
+  assert.equal(ek(UP, F1, RELEASE), `${ESC}[A`);
+  assert.equal(ek(UP, 0, REPEAT), `${ESC}[A`);
+});
+
+test("kitty flag 2: keys the terminal keeps for itself are not reported", () => {
+  const shiftPageUp = ev(33, { key: "PageUp", code: "PageUp", shiftKey: true });
+  assert.equal(ek(shiftPageUp, F2, RELEASE), undefined);
+  assert.equal(evaluateKeyboardEvent(shiftPageUp, false, false, false, F2, REPEAT).type, "pageUp");
+  assert.equal(ek(ev(45, { ctrlKey: true, code: "Insert" }), F2, RELEASE), undefined);
+  assert.equal(ek({ ...UP, metaKey: true }, F2, RELEASE), undefined);
+});
+
+test("kitty flag 8: every key is an escape code", () => {
+  assert.equal(ek(letter("a"), F8), `${ESC}[97u`);
+  assert.equal(ek(letter("a", { shiftKey: true }), F8), `${ESC}[97;2u`);
+  assert.equal(ek(letter("a", { ctrlKey: true }), F8), `${ESC}[97;5u`);
+  assert.equal(ek(ev(32, { key: " ", code: "Space" }), F8), `${ESC}[32u`);
+  assert.equal(ek(ev(49, { key: "1", code: "Digit1" }), F8), `${ESC}[49u`);
+  assert.equal(ek(ev(49, { key: "!", code: "Digit1", shiftKey: true }), F8), `${ESC}[49;2u`);
+  assert.equal(ek(ENTER, F8), `${ESC}[13u`);
+  assert.equal(ek(TAB, F8), `${ESC}[9u`);
+  assert.equal(ek({ ...TAB, shiftKey: true }, F8), `${ESC}[9;2u`);
+  assert.equal(ek(BACKSPACE, F8), `${ESC}[127u`);
+  assert.equal(ek(ESCAPE, F8), `${ESC}[27u`);
+  // CapsLock は、押した字ではなくキーそのもの
+  assert.equal(ek(letter("a", { key: "A" }), F8), `${ESC}[97u`);
+  // 機能キーは今までの終端。アプリケーションカーソルキーでも `CSI`、F1〜F4 も `CSI`
+  assert.equal(ek(UP, F8, PRESS, true), `${ESC}[A`);
+  assert.equal(ek({ ...UP, shiftKey: true }, F8), `${ESC}[1;2A`);
+  assert.equal(ek(ev(112, { key: "F1", code: "F1" }), F8), `${ESC}[P`);
+  assert.equal(ek(ev(114, { key: "F3", code: "F3" }), F8), `${ESC}[13~`);
+  assert.equal(ek(ev(116, { key: "F5", code: "F5" }), F8), `${ESC}[15~`);
+  assert.equal(ek(ev(124, { key: "F13", code: "F13" }), F8), `${ESC}[57376u`);
+  assert.equal(ek(ev(20, { key: "CapsLock", code: "CapsLock" }), F8), `${ESC}[57358u`);
+  assert.equal(ek(ev(19, { key: "Pause", code: "Pause" }), F8), `${ESC}[57362u`);
+});
+
+test("kitty flag 8: modifier keys alone and the keypad", () => {
+  assert.equal(ek(SHIFT_L, F8), `${ESC}[57441;2u`);
+  assert.equal(ek(SHIFT_L, F8 | F2, REPEAT), `${ESC}[57441;2:2u`);
+  assert.equal(ek({ ...SHIFT_L, shiftKey: false }, F8 | F2, RELEASE), `${ESC}[57441;1:3u`);
+  assert.equal(
+    ek(ev(17, { key: "Control", code: "ControlLeft", ctrlKey: true }), F8),
+    `${ESC}[57442;5u`,
+  );
+  assert.equal(
+    ek(ev(18, { key: "Alt", code: "AltRight", altKey: true }), F8),
+    `${ESC}[57449;3u`,
+  );
+  assert.equal(
+    ek(ev(91, { key: "Meta", code: "MetaLeft", metaKey: true }), F8),
+    `${ESC}[57444;9u`,
+  );
+  assert.equal(ek(ev(13, { key: "Enter", code: "NumpadEnter" }), F8), `${ESC}[57414u`);
+  assert.equal(ek(ev(101, { key: "5", code: "Numpad5" }), F8), `${ESC}[57404u`);
+  assert.equal(ek(ev(107, { key: "+", code: "NumpadAdd" }), F8), `${ESC}[57413u`);
+  // NumLock が切れたテンキーの矢印
+  assert.equal(ek(ev(37, { key: "ArrowLeft", code: "Numpad4" }), F8), `${ESC}[57417u`);
+  // フラグ 8 が無ければ、修飾キーだけ・テンキーは今まで通り
+  assert.equal(ek(SHIFT_L, F1), undefined);
+  assert.equal(ek(ev(13, { key: "Enter", code: "NumpadEnter" }), F1), "\r");
+});
+
+test("kitty flag 8: flag 1 or 2 without 8 does not escape plain text", () => {
+  assert.equal(ek(letter("a"), F1 | F2 | F4 | F16), "a");
+  assert.equal(ek(letter("a", { shiftKey: true }), F1 | F2 | F4 | F16), "A");
+});
+
+test("kitty flag 16: the text the key makes", () => {
+  const all = F8 | F16;
+  assert.equal(ek(letter("a"), all), `${ESC}[97;;97u`);
+  assert.equal(ek(letter("a", { shiftKey: true }), all), `${ESC}[97;2;65u`);
+  assert.equal(ek(ev(32, { key: " ", code: "Space" }), all), `${ESC}[32;;32u`);
+  assert.equal(ek(ev(49, { key: "!", code: "Digit1", shiftKey: true }), all), `${ESC}[49;2;33u`);
+  // 現在の配列の字。キーの番号はその字、ベースのレイアウトの字は別
+  assert.equal(ek(ev(50, { key: "é", code: "Digit2" }), all), `${ESC}[233;;233u`);
+  // 絵文字などの 1 コードポイント
+  assert.equal(ek(ev(0, { key: "😀", code: "" }), all), `${ESC}[0;;128512u`);
+  // 繰り返しは字つき、離すは字なし
+  assert.equal(ek(letter("a"), all | F2, REPEAT), `${ESC}[97;1:2;97u`);
+  assert.equal(ek(letter("a"), all | F2, RELEASE), `${ESC}[97;1:3u`);
+  // 字を作らないキーには添えない
+  assert.equal(ek(ENTER, all), `${ESC}[13u`);
+  assert.equal(ek(ESCAPE, all), `${ESC}[27u`);
+  assert.equal(ek(UP, all), `${ESC}[A`);
+  assert.equal(ek(SHIFT_L, all), `${ESC}[57441;2u`);
+  assert.equal(ek(letter("a", { ctrlKey: true }), all), `${ESC}[97;5u`);
+  assert.equal(ek(letter("a", { altKey: true }), all), `${ESC}[97;3u`);
+  assert.equal(ek(ev(101, { key: "5", code: "Numpad5" }), all), `${ESC}[57404;;53u`);
+  // フラグ 8 が無ければ、字は今まで通りそのまま
+  assert.equal(ek(letter("a"), F16), "a");
+  assert.equal(ek(letter("a", { ctrlKey: true }), F1 | F16), `${ESC}[97;5u`);
+});
+
+test("kitty flag 4: shifted key and base layout key", () => {
+  assert.equal(ek(letter("a", { shiftKey: true }), F8 | F4), `${ESC}[97:65;2u`);
+  assert.equal(ek(letter("a"), F8 | F4), `${ESC}[97u`);
+  assert.equal(ek(letter("a", { ctrlKey: true, shiftKey: true }), F1 | F4), `${ESC}[97:65;6u`);
+  assert.equal(
+    ek(ev(49, { key: "!", code: "Digit1", shiftKey: true, ctrlKey: true }), F1 | F4),
+    `${ESC}[49:33;6u`,
+  );
+  // ロシア語配列の Ctrl+с（US 配列の C の位置）: 番号は с(1089)、ベースは c(99)
+  assert.equal(
+    ek(ev(67, { key: "с", code: "KeyC", ctrlKey: true }), F1 | F4),
+    `${ESC}[1089::99;5u`,
+  );
+  // Shift つきなら、Shift をかけた字(С = 1057)も入る
+  assert.equal(
+    ek(ev(67, { key: "С", code: "KeyC", ctrlKey: true, shiftKey: true }), F1 | F4),
+    `${ESC}[1089:1057:99;6u`,
+  );
+  // フラグ 4 が無ければ入らない。番号は同じ
+  assert.equal(ek(ev(67, { key: "с", code: "KeyC", ctrlKey: true }), F1), `${ESC}[1089;5u`);
+  // 機能キーとフラグ 4 だけでは変わらない
+  assert.equal(ek(UP, F4), `${ESC}[A`);
+  assert.equal(ek(letter("a", { shiftKey: true }), F4), "A");
+});
+
+test("kitty flags 2|4|8|16 together", () => {
+  const all = F2 | F4 | F8 | F16;
+  const shiftA = letter("a", { shiftKey: true });
+  assert.equal(ek(shiftA, all, PRESS), `${ESC}[97:65;2;65u`);
+  assert.equal(ek(shiftA, all, REPEAT), `${ESC}[97:65;2:2;65u`);
+  assert.equal(ek(shiftA, all, RELEASE), `${ESC}[97:65;2:3u`);
+  assert.equal(ek(letter("a"), all, RELEASE), `${ESC}[97;1:3u`);
+  assert.equal(ek(ENTER, all, RELEASE), `${ESC}[13;1:3u`);
+  assert.equal(ek(BACKSPACE, all, REPEAT), `${ESC}[127;1:2u`);
+  assert.equal(ek(UP, all, RELEASE), `${ESC}[1;1:3A`);
+  assert.equal(ek(ev(0, { key: "Unidentified" }), all, PRESS), undefined);
+  assert.equal(ek(ev(0, { key: "Unidentified" }), all, RELEASE), undefined);
+});
+
+test("kitty flags: eventType is ignored without flag 2", () => {
+  assert.equal(ek(letter("a"), F8, REPEAT), `${ESC}[97u`);
+  assert.equal(ek(letter("a"), F8, RELEASE), `${ESC}[97u`);
+});
+
+// ---- KeyHandler（keyup と IME） ----
+
+test("KeyHandler sends repeat and release with flag 2, only for keys it reported", () => {
+  const h = makeHandler({ flags: F1 | F2 | F8 | F16 });
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA" }));
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA", repeat: true }));
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, [`${ESC}[97;;97u`, `${ESC}[97;1:2;97u`, `${ESC}[97;1:3u`]);
+  // 押したのを送っていないキーの離すは送らない
+  h.handler.keyUp(domEvent(66, { key: "b", code: "KeyB" }));
+  assert.equal(h.sent.length, 3);
+  // 大文字（Shift）も keypress を待たずに送る。キーを離したときに Shift は付かない
+  h.sent.length = 0;
+  h.handler.keyDown(domEvent(65, { key: "A", code: "KeyA", shiftKey: true }));
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, [`${ESC}[97;2;65u`, `${ESC}[97;1:3u`]);
+});
+
+test("KeyHandler releases arrows pressed as SS3 (application cursor keys)", () => {
+  const h = makeHandler({ app: true, flags: F2 });
+  h.handler.keyDown(domEvent(38, { key: "ArrowUp", code: "ArrowUp" }));
+  h.handler.keyDown(domEvent(38, { key: "ArrowUp", code: "ArrowUp", repeat: true }));
+  h.handler.keyUp(domEvent(38, { key: "ArrowUp", code: "ArrowUp" }));
+  assert.deepEqual(h.sent, [`${ESC}OA`, `${ESC}[1;1:2A`, `${ESC}[1;1:3A`]);
+});
+
+test("KeyHandler does not send a stale release after reset (blur)", () => {
+  const h = makeHandler({ flags: F2 | F8 });
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA" }));
+  h.handler.reset();
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, [`${ESC}[97u`]);
+});
+
+test("kitty flag 8: a dead key is left to the legacy path", () => {
+  assert.equal(ek(ev(69, { key: "Dead", code: "KeyE" }), F8), undefined);
+});
+
+test("KeyHandler reports modifier keys alone with flag 8", () => {
+  const h = makeHandler({ flags: F2 | F8 });
+  h.handler.keyDown(domEvent(16, { key: "Shift", code: "ShiftLeft", shiftKey: true }));
+  h.handler.keyUp(domEvent(16, { key: "Shift", code: "ShiftLeft" }));
+  assert.deepEqual(h.sent, [`${ESC}[57441;2u`, `${ESC}[57441;1:3u`]);
+});
+
+test("KeyHandler: without flag 2 a release sends nothing; flag 0 is unchanged", () => {
+  const h = makeHandler({ flags: F8 });
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA" }));
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, [`${ESC}[97u`]);
+  const z = makeHandler();
+  z.handler.keyDown(domEvent(65, { key: "a", code: "KeyA" }));
+  z.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(z.sent, ["a"]);
+});
+
+for (const flags of [F8, F1 | F2 | F4 | F8 | F16]) {
+  test(`IME: converting and confirming is not changed by kitty flags (${flags})`, () => {
+    const h = makeHandler({ flags });
+    h.composition.compositionstart();
+    // 変換中のキー（keyCode 229）は何も送らず、離しも送らない
+    assert.equal(h.handler.keyDown(domEvent(229, { key: "Process", code: "KeyN" })), false);
+    h.handler.keyUp(domEvent(229, { key: "Process", code: "KeyN" }));
+    h.textarea.value = "に";
+    h.composition.compositionupdate("に");
+    h.run();
+    h.handler.keyDown(domEvent(229, { key: "Process", code: "KeyH" }));
+    h.textarea.value = "日本語";
+    h.composition.compositionupdate("日本語");
+    h.run();
+    // 変換中は修飾キーだけも送らない
+    h.handler.keyDown(domEvent(16, { key: "Shift", code: "ShiftLeft", shiftKey: true }));
+    assert.deepEqual(h.sent, []);
+    h.composition.compositionend();
+    assert.deepEqual(h.sent, []);
+    h.run();
+    // 確定した字は、そのままの文字で 1 回だけ（CSI u にしない）
+    assert.deepEqual(h.sent, ["日本語"]);
+    // 確定の Enter の keyup は、押したのを送っていないので何も送らない
+    h.handler.keyUp(domEvent(13, { key: "Enter", code: "Enter" }));
+    assert.deepEqual(h.sent, ["日本語"]);
+  });
+
+  test(`IME: Enter while converting confirms first, then Enter is the escape code (${flags})`, () => {
+    const h = makeHandler({ flags });
+    h.composition.compositionstart();
+    h.textarea.value = "かな";
+    h.composition.compositionupdate("かな");
+    h.run();
+    h.handler.keyDown(domEvent(13, { key: "Enter", code: "Enter" }));
+    assert.deepEqual(h.sent, ["かな", `${ESC}[13u`]);
+    h.run();
+    assert.deepEqual(h.sent, ["かな", `${ESC}[13u`]);
+  });
+}

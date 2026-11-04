@@ -3,7 +3,11 @@
 // DOM の要素そのものではなく、使う部分だけの形（`TextareaLike` など）に頼るので、DOM の無い
 // テストでも動かせる。
 
-import { evaluateKeyboardEvent, type KeyEventLike } from "./keyboard.js";
+import {
+  evaluateKeyboardEvent,
+  KITTY_REPORT_EVENT_TYPES,
+  type KeyEventLike,
+} from "./keyboard.js";
 
 /** 位置と大きさを決めるのに使う `style` の部分。 */
 export interface StyleLike {
@@ -206,6 +210,9 @@ export class KeyHandler {
   private keyDownSeen = false;
   private keyPressHandled = false;
   private unprocessedDeadKey = false;
+  // keydown で `CSI` の形で送ったキー。離すを送るのは、これに入っているキーだけ。
+  // 変換の確定の Enter のように、押したのを送っていないキーの離すだけを送ってしまわないため
+  private readonly reported = new Set<string>();
 
   constructor(
     private readonly host: KeyHandlerHost,
@@ -249,12 +256,14 @@ export class KeyHandler {
       this.unprocessedDeadKey = true;
     }
 
+    const flags = h.keyboardFlags();
     const result = evaluateKeyboardEvent(
       ev,
       h.applicationCursorKeys(),
       h.isMac,
       h.macOptionIsMeta,
-      h.keyboardFlags(),
+      flags,
+      ev.repeat ? 2 : 1, // フラグ 2 が無ければ evaluateKeyboardEvent が無視する
     );
 
     if (result.type === "pageUp" || result.type === "pageDown") {
@@ -266,8 +275,15 @@ export class KeyHandler {
     if (result.cancel) this.cancel(ev);
     if (!result.key) return true;
 
-    // 大文字は keypress で処理する（CapsLock のとき小文字が打てない macOS の IME への対策）
-    if (ev.key && !ev.ctrlKey && !ev.altKey && !ev.metaKey && ev.key.length === 1) {
+    // 大文字は keypress で処理する（CapsLock のとき小文字が打てない macOS の IME への対策）。
+    // kitty の `CSI` の形で送るキーは keypress を通らないので、ここで送る
+    if (
+      result.key === ev.key &&
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      !ev.metaKey &&
+      ev.key.length === 1
+    ) {
       const c = ev.key.charCodeAt(0);
       if (c >= 65 && c <= 90) return true;
     }
@@ -276,11 +292,30 @@ export class KeyHandler {
       return true;
     }
     // xterm.js と同じく、Ctrl+C と Enter のあとは `textarea` に字をためない
-    if (result.key === "\x03" || result.key === "\r" || result.key === "\x1b[99;5u") this.textarea.value = "";
+    if (
+      result.key === "\x03" ||
+      result.key === "\r" ||
+      ev.keyCode === 13 ||
+      (ev.ctrlKey && ev.keyCode === 67)
+    ) {
+      this.textarea.value = "";
+    }
 
+    // アプリケーションカーソルキーの `ESC O A` などもここに入れる
+    if (
+      flags & KITTY_REPORT_EVENT_TYPES &&
+      (result.key.startsWith("\x1b[") || result.key.startsWith("\x1bO"))
+    ) {
+      this.reported.add(keyId(ev));
+    }
     h.send(result.key);
     this.cancel(ev);
     return false;
+  }
+
+  /** 押したままフォーカスを失うと keyup が来ないので、`textarea` の blur で呼ぶ。 */
+  reset(): void {
+    this.reported.clear();
   }
 
   keyUp(ev: KeyDownLike): void {
@@ -288,6 +323,22 @@ export class KeyHandler {
     const custom = this.host.customKeyHandler();
     if (custom && custom(ev as unknown as KeyboardEvent) === false) return;
     this.keyPressHandled = false;
+    // 離す（kitty のフラグ 2）。押したのを `CSI` の形で送ったキーだけ
+    if (!this.reported.delete(keyId(ev))) return;
+    const h = this.host;
+    const flags = h.keyboardFlags();
+    if (!(flags & KITTY_REPORT_EVENT_TYPES)) return;
+    // 変換の途中の keyup は送らない（変換の動きは変えない）
+    if (this.composition.isComposing || ev.keyCode === 229) return;
+    const result = evaluateKeyboardEvent(
+      ev,
+      h.applicationCursorKeys(),
+      h.isMac,
+      h.macOptionIsMeta,
+      flags,
+      3,
+    );
+    if (result.key) h.send(result.key);
   }
 
   keyPress(
@@ -335,6 +386,11 @@ export class KeyHandler {
     }
     return false;
   }
+}
+
+/** 押したキーと離したキーを結びつける印。 */
+function keyId(ev: KeyEventLike): string {
+  return ev.code || String(ev.keyCode);
 }
 
 /** `navigator` から、macOS か・Windows かを決める（xterm.js の `Browser.isMac`・`isWindows`）。 */

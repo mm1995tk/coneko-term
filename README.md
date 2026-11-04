@@ -10,7 +10,7 @@ coneko-term is a library of terminal building blocks. The first user is the GUI 
 
 The first goal is that shijimi-editor's GUI works with coneko-term as it does with xterm.js. kitty's protocol comes after that. "The same as xterm.js" is measured against the [xterm.js 6.0.0 feature table](https://xtermjs.org/docs/api/vtfeatures/) and its source.
 
-**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Mouse reporting, the wheel, and selection with copy are in place. The kitty keyboard protocol is partly in place: the mode flags (`CSI > u`, `CSI < u`, `CSI = u`, `CSI ? u`) and flag 1 (disambiguate escape codes); the other flags are not. The core receives images sent with the kitty graphics protocol (APC `a=t`, `a=T` and `a=q`, chunked, direct transmission only), keeps them, places them on the cells (`a=p`, `a=T`) and deletes them (`a=d`), and lists the placements for the renderer. Drawing them is not done yet.
+**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Mouse reporting, the wheel, and selection with copy are in place. The kitty keyboard protocol is partly in place: the mode flags (`CSI > u`, `CSI < u`, `CSI = u`, `CSI ? u`) and all five encoding flags (1 disambiguate escape codes, 2 report event types, 4 report alternate keys, 8 report all keys as escape codes, 16 report associated text). Not done: the lock modifiers (Caps Lock and Num Lock bits), Hyper and Meta, and media keys. The core receives images sent with the kitty graphics protocol (APC `a=t`, `a=T` and `a=q`, chunked, direct transmission only), keeps them, places them on the cells (`a=p`, `a=T`) and deletes them (`a=d`), and lists the placements for the renderer. Drawing them is not done yet.
 
 ## Packages
 
@@ -54,6 +54,7 @@ Drawing uses Canvas 2D with the browser's fonts (fallback fonts work for CJK), i
 - IME: nothing is sent while converting; the confirmed text is sent. The text being converted is shown at the cursor.
 - `paste` events are handled; `term.paste(text)` does the same. Newlines become `\r`; with bracketed paste (2004) the text is wrapped in `ESC [200~` and `ESC [201~`.
 - With focus reporting (1004), `CSI I` and `CSI O` are sent when the `textarea` gains and loses focus.
+- With the kitty keyboard protocol on (flags set by the app), keys go out as `CSI ... u` as the spec says. `KeyHandler` also listens to `keyup` for flag 2: a release is sent only for a key whose press it sent as an escape code, so the Enter that ends an IME conversion does not produce a stray release. While converting, nothing changes: no escape codes, and the confirmed text is sent as plain text. Where the key is on the layout (flag 4) comes from `KeyboardEvent.code`, assuming a US PC-101 base layout.
 - `attachCustomKeyEventHandler(fn)` sees key events first; return `false` to skip a key. `scrollOnUserInput` (default true) returns to the bottom when you type.
 
 ## Development
