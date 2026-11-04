@@ -727,11 +727,3 @@ fn dirty_rows_after_write() {
     w(&mut t, "\x1b[2;1Hx");
     assert_eq!(t.screen_mut().take_dirty_rows(), vec![1]);
 }
-
-#[test]
-fn alt_screen_state_is_not_touched_by_other_sequences() {
-    // DEC のモード（?1049 など）は #5。ここでは無視されるだけで、画面は壊れない。
-    let mut t = term(2, 5);
-    w(&mut t, "a\x1b[?1049hb");
-    assert_eq!(text(&t, 0), "ab");
-}

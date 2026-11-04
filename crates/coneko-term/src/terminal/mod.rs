@@ -1,22 +1,44 @@
 //! ターミナル本体。バイト列を受け取り、パーサー（[`crate::parser`]）が分けたシーケンスで
 //! 画面（[`crate::screen`]）を動かす。
 //!
-//! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、DEC のモードと
-//! 問い合わせへの返事（#5）、OSC 8（リンク）を除いたもの。知らないシーケンスは捨てる。
+//! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、OSC 8（リンク）を
+//! 除いたもの。知らないシーケンスは捨てる。
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
 //! BEL と題名の変更は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
 //! 呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
+//! # PTY へ送るバイト列（出口は 1 つ）
+//!
+//! 問い合わせへの返事（DA1・DA2・DSR・DECRQM・色の問い合わせ）と、フォーカスの報告は、
+//! ターミナルから PTY へ送るバイト列になって溜まる。[`Terminal::take_output`] で取り出して
+//! PTY に書く。キーボード（#9）とマウス（#10）のバイト列も、[`Terminal::queue_output`] で
+//! 同じ出口に入れる。呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
+//!
+//! # モード
+//!
+//! DECSET・DECRST と SM・RM は [`Modes`]（[`Terminal::modes`]）と [`Screen`] の公開の項目が
+//! 持つ。対応するモードは次のとおり。DECRQM は、これ以外のモードに 0（知らない）を返す。
+//!
+//! - ANSI: 4（IRM）、20（LNM）
+//! - DEC: 1、6、7、9、12、25、45、47、66、1000、1002、1003、1004、1005、1006、1015、1016、
+//!   1047、1048、1049、2004、2026
+//!
 //! # 画面の状態のうち、ここで持つもの
 //!
-//! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合、
-//! DECKPAM/DECKPNM（`ESC =` / `ESC >`）の状態。
+//! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合。
 
+#[cfg(test)]
+mod mode_tests;
+mod modes;
 mod sgr;
 #[cfg(test)]
 mod tests;
+mod theme;
+
+pub use modes::{Modes, MouseEncoding, MouseProtocol};
+pub use theme::{Rgb, Theme};
 
 use crate::parser::{Params, Parser, Perform};
 use crate::screen::{CursorShape, Screen};
@@ -118,7 +140,10 @@ struct State {
     gl: usize,
     saved_charsets: Option<([Charset; 4], usize)>,
     last_char: Option<char>,
-    application_keypad: bool,
+    modes: Modes,
+    theme: Theme,
+    /// PTY へ送るバイト列。
+    output: Vec<u8>,
 }
 
 impl Terminal {
@@ -138,7 +163,9 @@ impl Terminal {
                 gl: 0,
                 saved_charsets: None,
                 last_char: None,
-                application_keypad: false,
+                modes: Modes::default(),
+                theme: Theme::default(),
+                output: Vec::new(),
             },
         }
     }
@@ -168,9 +195,44 @@ impl Terminal {
         std::mem::take(&mut self.state.events)
     }
 
-    /// アプリケーションキーパッドか（`ESC =` で真、`ESC >` で偽）。
+    /// アプリケーションキーパッドか（`ESC =` と `CSI ? 66 h` で真、`ESC >` と `CSI ? 66 l` で偽）。
     pub fn application_keypad(&self) -> bool {
-        self.state.application_keypad
+        self.state.modes.application_keypad
+    }
+
+    /// モードの状態。
+    pub fn modes(&self) -> &Modes {
+        &self.state.modes
+    }
+
+    /// PTY へ送るバイト列を取り出す。問い合わせへの返事など、ターミナルが出したものが
+    /// 出た順に入っている。
+    pub fn take_output(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.state.output)
+    }
+
+    /// PTY へ送るバイト列を出口に入れる。キーボードやマウスのバイト列は、これで返事と
+    /// 同じ出口から出す。
+    pub fn queue_output(&mut self, bytes: &[u8]) {
+        self.state.output.extend_from_slice(bytes);
+    }
+
+    /// 色の問い合わせに返すテーマ。
+    pub fn theme(&self) -> &Theme {
+        &self.state.theme
+    }
+
+    /// 色の問い合わせに返すテーマを変える。
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.state.theme = theme;
+    }
+
+    /// ウィンドウがフォーカスを得た・失ったことを知らせる。フォーカスの報告（`CSI ? 1004 h`）が
+    /// 有効なら、`CSI I`（得た）か `CSI O`（失った）を出口に入れる。
+    pub fn set_focus(&mut self, focused: bool) {
+        if self.state.modes.send_focus {
+            self.state.reply(if focused { "\x1b[I" } else { "\x1b[O" });
+        }
     }
 }
 
@@ -188,6 +250,42 @@ fn arg(params: &Params, index: usize, default: usize) -> usize {
 }
 
 impl State {
+    /// 返事を出口に入れる。
+    fn reply(&mut self, s: &str) {
+        self.output.extend_from_slice(s.as_bytes());
+    }
+
+    /// 1 から数えた行の指定を、画面の行（0 始まり）にする。原点モードでは範囲の中に収める。
+    fn row_from_param(&self, n: usize) -> usize {
+        if self.modes.origin {
+            let (top, bottom) = self.screen.scroll_region();
+            (top + n - 1).min(bottom)
+        } else {
+            n - 1
+        }
+    }
+
+    /// カーソルを左上へ。原点モードではスクロール範囲の左上。
+    fn home_cursor(&mut self) {
+        let y = self.row_from_param(1);
+        self.screen.set_cursor(0, y);
+    }
+
+    /// BS。逆方向の折り返し（45）では、前の行から折り返された行の行頭から、前の行の末尾へ戻る。
+    fn backspace(&mut self) {
+        let c = self.screen.cursor();
+        if self.modes.reverse_wraparound
+            && c.x == 0
+            && c.y > 0
+            && self.screen.row(c.y - 1).is_wrapped()
+        {
+            let cols = self.screen.cols();
+            self.screen.set_cursor(cols - 1, c.y - 1);
+        } else {
+            self.screen.backspace();
+        }
+    }
+
     fn move_cursor_to(&mut self, x: usize, y: usize) {
         self.screen.set_cursor(x, y);
     }
@@ -268,9 +366,9 @@ impl State {
         let bottom = arg(params, 1, rows).min(rows);
         if top == 1 && bottom == rows {
             self.screen.reset_scroll_region();
-            self.screen.set_cursor(0, 0);
-        } else if top >= 1 {
-            self.screen.set_scroll_region(top - 1, bottom - 1);
+            self.home_cursor();
+        } else if top >= 1 && self.screen.set_scroll_region(top - 1, bottom - 1) {
+            self.home_cursor();
         }
     }
 
@@ -306,10 +404,214 @@ impl State {
         self.gl = 0;
         self.saved_charsets = None;
         self.last_char = None;
-        self.application_keypad = false;
+        self.modes = Modes::default();
     }
 
-    fn osc(&mut self, data: &[u8]) {
+    /// 主画面と代替画面を切り替える。カーソルの位置は引き継ぐ（xterm.js と同じ）。
+    fn switch_screen(&mut self, alt: bool) {
+        if self.screen.is_alt_screen() == alt {
+            return;
+        }
+        let c = self.screen.cursor();
+        if alt {
+            self.screen.enter_alt_screen();
+        } else {
+            self.screen.leave_alt_screen();
+        }
+        self.screen.set_cursor(c.x, c.y);
+    }
+
+    /// SM・RM（`private` が偽）と DECSET・DECRST（真）。
+    fn set_mode(&mut self, private: bool, mode: u32, on: bool) {
+        if !private {
+            match mode {
+                4 => self.screen.insert_mode = on,
+                20 => self.modes.linefeed_newline = on,
+                _ => {}
+            }
+            return;
+        }
+        match mode {
+            1 => self.modes.application_cursor_keys = on,
+            6 => {
+                self.modes.origin = on;
+                self.home_cursor();
+            }
+            7 => self.screen.wraparound = on,
+            9 => self.set_mouse_protocol(MouseProtocol::X10, on),
+            12 => self.screen.cursor_blinking = on,
+            25 => self.screen.cursor_visible = on,
+            45 => self.modes.reverse_wraparound = on,
+            47 | 1047 => self.switch_screen(on),
+            1048 => {
+                if on {
+                    self.save_cursor();
+                } else {
+                    self.restore_cursor();
+                }
+            }
+            1049 => {
+                if on {
+                    if !self.screen.is_alt_screen() {
+                        self.save_cursor();
+                    }
+                    self.switch_screen(true);
+                } else if self.screen.is_alt_screen() {
+                    self.switch_screen(false);
+                    self.restore_cursor();
+                }
+            }
+            66 => self.modes.application_keypad = on,
+            1000 => self.set_mouse_protocol(MouseProtocol::Vt200, on),
+            1002 => self.set_mouse_protocol(MouseProtocol::Drag, on),
+            1003 => self.set_mouse_protocol(MouseProtocol::Any, on),
+            1004 => self.modes.send_focus = on,
+            1005 => self.set_mouse_encoding(MouseEncoding::Utf8, on),
+            1006 => self.set_mouse_encoding(MouseEncoding::Sgr, on),
+            1015 => self.set_mouse_encoding(MouseEncoding::Urxvt, on),
+            1016 => self.set_mouse_encoding(MouseEncoding::SgrPixels, on),
+            2004 => self.modes.bracketed_paste = on,
+            2026 => self.modes.synchronized_output = on,
+            _ => {}
+        }
+    }
+
+    fn set_mouse_protocol(&mut self, p: MouseProtocol, on: bool) {
+        self.modes.mouse_protocol = if on { p } else { MouseProtocol::None };
+    }
+
+    fn set_mouse_encoding(&mut self, e: MouseEncoding, on: bool) {
+        self.modes.mouse_encoding = if on { e } else { MouseEncoding::Default };
+    }
+
+    /// DECRQM の Ps。0 は知らないモード、1 は設定中、2 は解除中。
+    fn mode_status(&self, private: bool, mode: u32) -> u8 {
+        let m = &self.modes;
+        let v = if !private {
+            match mode {
+                4 => self.screen.insert_mode,
+                20 => m.linefeed_newline,
+                _ => return 0,
+            }
+        } else {
+            match mode {
+                1 => m.application_cursor_keys,
+                6 => m.origin,
+                7 => self.screen.wraparound,
+                9 => m.mouse_protocol == MouseProtocol::X10,
+                12 => self.screen.cursor_blinking,
+                25 => self.screen.cursor_visible,
+                45 => m.reverse_wraparound,
+                47 | 1047 | 1049 => self.screen.is_alt_screen(),
+                // 1048 は保存の操作で、状態ではない。
+                66 => m.application_keypad,
+                1000 => m.mouse_protocol == MouseProtocol::Vt200,
+                1002 => m.mouse_protocol == MouseProtocol::Drag,
+                1003 => m.mouse_protocol == MouseProtocol::Any,
+                1004 => m.send_focus,
+                1005 => m.mouse_encoding == MouseEncoding::Utf8,
+                1006 => m.mouse_encoding == MouseEncoding::Sgr,
+                1015 => m.mouse_encoding == MouseEncoding::Urxvt,
+                1016 => m.mouse_encoding == MouseEncoding::SgrPixels,
+                2004 => m.bracketed_paste,
+                2026 => m.synchronized_output,
+                _ => return 0,
+            }
+        };
+        if v {
+            1
+        } else {
+            2
+        }
+    }
+
+    /// SM・RM・DECSET・DECRST・DA・DSR・DECRQM。扱ったら真。
+    fn mode_or_query(
+        &mut self,
+        params: &Params,
+        intermediates: &[u8],
+        marker: Option<u8>,
+        action: u8,
+    ) -> bool {
+        let first = raw(params, 0).unwrap_or(0);
+        match (marker, intermediates, action) {
+            (None | Some(b'?'), [], b'h' | b'l') => {
+                for p in params {
+                    self.set_mode(marker.is_some(), p[0], action == b'h');
+                }
+            }
+            (None, [], b'c') if first == 0 => self.reply("\x1b[?1;2c"),
+            (Some(b'>'), [], b'c') if first == 0 => self.reply("\x1b[>0;276;0c"),
+            (None, [], b'n') => match first {
+                5 => self.reply("\x1b[0n"),
+                6 => self.report_cursor(false),
+                _ => {}
+            },
+            (Some(b'?'), [], b'n') if first == 6 => self.report_cursor(true),
+            (None | Some(b'?'), [b'$'], b'p') => {
+                let private = marker.is_some();
+                let status = self.mode_status(private, first);
+                let q = if private { "?" } else { "" };
+                self.reply(&format!("\x1b[{q}{first};{status}$y"));
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// CPR。原点モードでは、スクロール範囲の上端からの行を返す。
+    fn report_cursor(&mut self, private: bool) {
+        let c = self.screen.cursor();
+        let top = if self.modes.origin {
+            self.screen.scroll_region().0
+        } else {
+            0
+        };
+        let q = if private { "?" } else { "" };
+        self.reply(&format!("\x1b[{q}{};{}R", c.y - top + 1, c.x + 1));
+    }
+
+    fn reply_color(&mut self, ps: &str, color: Rgb, bell: bool) {
+        let st = if bell { "\x07" } else { "\x1b\\" };
+        let rgb = theme::to_xparse_color(color);
+        self.reply(&format!("\x1b]{ps};{rgb}{st}"));
+    }
+
+    /// 色の問い合わせ。`?` の指定にだけ返事し、色を変える指定は無視する。
+    fn osc_color_query(&mut self, cmd: &[u8], rest: &str, bell: bool) {
+        if cmd == b"4" {
+            let mut it = rest.split(';');
+            while let (Some(idx), Some(spec)) = (it.next(), it.next()) {
+                if let (Ok(i), "?") = (idx.parse::<u8>(), spec) {
+                    let color = self.theme.palette(i);
+                    self.reply_color(&format!("4;{i}"), color, bell);
+                }
+            }
+            return;
+        }
+        // 10・11・12。続く指定は、次の番号（11・12）に当たる。
+        let first: u8 = match cmd {
+            b"10" => 10,
+            b"11" => 11,
+            _ => 12,
+        };
+        for (k, spec) in rest.split(';').enumerate() {
+            let ps = first + k as u8;
+            if ps > 12 {
+                break;
+            }
+            if spec == "?" {
+                let color = match ps {
+                    10 => self.theme.foreground,
+                    11 => self.theme.background,
+                    _ => self.theme.cursor,
+                };
+                self.reply_color(&ps.to_string(), color, bell);
+            }
+        }
+    }
+
+    fn osc(&mut self, data: &[u8], bell: bool) {
         let Some(sep) = data.iter().position(|&b| b == b';') else {
             return;
         };
@@ -321,6 +623,10 @@ impl State {
             }
             b"1" => self.events.push(Event::IconName(text())),
             b"2" => self.events.push(Event::Title(text())),
+            cmd @ (b"4" | b"10" | b"11" | b"12") => {
+                let rest = text();
+                self.osc_color_query(cmd, &rest, bell);
+            }
             _ => {}
         }
     }
@@ -339,9 +645,14 @@ impl Perform for State {
     fn execute(&mut self, byte: u8) {
         match byte {
             0x07 => self.events.push(Event::Bell),
-            0x08 => self.screen.backspace(),
+            0x08 => self.backspace(),
             0x09 => self.screen.tab(),
-            0x0A..=0x0C => self.screen.index(),
+            0x0A..=0x0C => {
+                self.screen.index();
+                if self.modes.linefeed_newline {
+                    self.screen.carriage_return();
+                }
+            }
             0x0D => self.screen.carriage_return(),
             0x0E => self.gl = 1,
             0x0F => self.gl = 0,
@@ -361,8 +672,8 @@ impl Perform for State {
             ([], b'H') => self.screen.set_tab_stop(),
             ([], b'M') => self.screen.reverse_index(),
             ([], b'c') => self.full_reset(),
-            ([], b'=') => self.application_keypad = true,
-            ([], b'>') => self.application_keypad = false,
+            ([], b'=') => self.modes.application_keypad = true,
+            ([], b'>') => self.modes.application_keypad = false,
             ([], b'n') => self.gl = 2,
             ([], b'o') => self.gl = 3,
             ([b'#'], b'8') => self.screen.fill_with('E'),
@@ -386,6 +697,9 @@ impl Perform for State {
         marker: Option<u8>,
         action: u8,
     ) {
+        if self.mode_or_query(params, intermediates, marker, action) {
+            return;
+        }
         if marker.is_some() {
             return;
         }
@@ -414,8 +728,8 @@ impl Perform for State {
                 self.screen.carriage_return();
             }
             b'G' | b'`' => self.move_cursor_to(n - 1, c.y),
-            b'H' | b'f' => self.move_cursor_to(arg(params, 1, 1) - 1, n - 1),
-            b'd' => self.move_cursor_to(c.x, n - 1),
+            b'H' | b'f' => self.move_cursor_to(arg(params, 1, 1) - 1, self.row_from_param(n)),
+            b'd' => self.move_cursor_to(c.x, self.row_from_param(n)),
             b'J' => self.erase_in_display(raw(params, 0).unwrap_or(0)),
             b'K' => self.erase_in_line(raw(params, 0).unwrap_or(0)),
             b'X' => self.screen.erase_cells(c.y, c.x, c.x.saturating_add(n)),
@@ -459,7 +773,7 @@ impl Perform for State {
         }
     }
 
-    fn osc_dispatch(&mut self, data: &[u8], _bell_terminated: bool) {
-        self.osc(data);
+    fn osc_dispatch(&mut self, data: &[u8], bell_terminated: bool) {
+        self.osc(data, bell_terminated);
     }
 }
