@@ -105,6 +105,30 @@ test("DA1 and color queries use the theme", async () => {
   t.dispose();
 });
 
+test("OSC 21 changes the colors the renderer uses, and OSC 4/10/11 read them", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  const seen: unknown[] = [];
+  (t as unknown as { renderer: unknown }).renderer = {
+    setOptions: (o: unknown) => seen.push(o),
+    touch: () => {},
+  };
+  await write(t, "\x1b]21;background=#102030;1=#ff8000\x07\x1b]10;?\x07\x1b]11;?\x07\x1b]4;1;?\x07");
+  assert.equal(
+    out.join(""),
+    "\x1b]10;rgb:ffff/ffff/ffff\x07\x1b]11;rgb:1010/2020/3030\x07\x1b]4;1;rgb:ffff/8080/0000\x07",
+  );
+  assert.equal(seen.length, 1);
+  const palette = (seen[0] as { palette: { background: string; get(i: number): string } }).palette;
+  assert.equal(palette.background, "#102030");
+  assert.equal(palette.get(1), "#ff8000");
+  out.length = 0;
+  await write(t, "\x1b]21;background\x07\x1b]11;?\x07");
+  assert.deepEqual(out, ["\x1b]11;rgb:0000/0000/0000\x07"]);
+  assert.equal(seen.length, 2);
+});
+
 test("input goes out through the same onData", () => {
   const t = new Terminal();
   const out: Uint8Array[] = [];

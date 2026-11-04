@@ -778,6 +778,7 @@ const sleep0 = () => new Promise<void>((r) => setTimeout(r, 0));
  */
 export class Terminal {
   readonly options: Readonly<TerminalOptions>;
+  // 注: `syncColors` が、プログラムが OSC で変えた文字・背景・カーソルの色もここへ書く（「いまの色」）。
   private resolvedTheme: Required<Omit<Theme, "selectionBackground">> =
     DEFAULT_THEME;
   private renderer?: CanvasRenderer;
@@ -790,6 +791,11 @@ export class Terminal {
   private cellSizeListeners = new Set<(size: CellSize) => void>();
   private wasm: WasmTerminal;
   private selectionColor = DEFAULT_SELECTION;
+  /** `theme.selectionBackground` で決めた選択範囲の色（プログラムが OSC 21 で変える前の色）。 */
+  private configuredSelection = DEFAULT_SELECTION;
+  /** プログラムが OSC で変えた 256 色の表と、カーソルの下の字の色（変えていなければ `undefined`）。`open` の前の変更も、ここに残って最初の描画に入る。 */
+  private colorTable?: string[];
+  private cursorTextColor?: string;
   private selection: SelectionModel;
   private selectionListeners = new Set<() => void>();
   private lastSelectionKey = "";
@@ -869,6 +875,7 @@ export class Terminal {
       theme.selectionBackground === undefined
         ? DEFAULT_SELECTION
         : parseSelectionColor(theme.selectionBackground);
+    this.configuredSelection = this.selectionColor;
     const t = { ...DEFAULT_THEME, ...stripUndefined(theme) };
     this.resolvedTheme = t;
     const ansi = new Uint8Array(48);
@@ -879,6 +886,8 @@ export class Terminal {
       Uint8Array.from(parseColor(t.cursor)),
       ansi,
     );
+    // テーマの設定は描画の色にもう入っているので、「色が変わった」印は消す
+    this.core.colors_changed();
   }
 
   private get fontFamily(): string {
@@ -1020,6 +1029,29 @@ export class Terminal {
     }
   }
 
+  /**
+   * プログラムが OSC 4・10・11・12・21 などで色を変えていたら、描画の色の表を作り直す。
+   * 選択範囲の背景は、字が見えるように設定済みの色と同じ透明度（`4d`）にする。
+   */
+  private syncColors(): void {
+    if (!this.core.colors_changed()) return;
+    const b = this.core.colors();
+    const hex = (o: number) =>
+      `#${[b[o], b[o + 1], b[o + 2]].map((n) => n.toString(16).padStart(2, "0")).join("")}`;
+    const t = this.resolvedTheme;
+    t.foreground = hex(0);
+    t.background = hex(3);
+    t.cursor = hex(6);
+    const ansi: string[] = [];
+    for (let i = 0; i < 256; i++) ansi.push(hex(21 + i * 3));
+    this.selectionColor =
+      b[13] === 1 ? `${hex(14)}4d` : this.configuredSelection;
+    this.colorTable = ansi;
+    this.cursorTextColor = b[9] === 1 ? hex(10) : undefined;
+    if (this.element) this.element.style.background = t.background;
+    this.renderer?.setOptions(this.renderOptions());
+  }
+
   /** PTY へ送るバイト列とイベントを、聞き手に渡す。 */
   private flush(): void {
     for (;;) {
@@ -1156,6 +1188,7 @@ export class Terminal {
     if (out.length > 0) {
       for (const l of [...this.dataListeners]) l(out);
     }
+    this.syncColors();
   }
 
   /**
@@ -1965,11 +1998,12 @@ export class Terminal {
       fontSize: this.fontSize,
       lineHeight: this.options.lineHeight ?? 1,
       palette: new Palette(
-        ANSI_NAMES.map((n) => t[n]),
+        this.colorTable ?? ANSI_NAMES.map((n) => t[n]),
         t.foreground,
         t.background,
         t.cursor,
         this.selectionColor,
+        this.cursorTextColor ?? t.background,
       ),
     };
   }
