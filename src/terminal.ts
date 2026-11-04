@@ -136,7 +136,6 @@ export interface TerminalOptions {
   scrollOnUserInput?: boolean;
 }
 
-/** カーソルの状態。 */
 /**
  * 組み立て終わった通知（kitty の desktop notifications、OSC 99）。
  * 仕様のキーを読んだ形で持つ。OS の通知につなぐのは呼ぶ側。
@@ -192,6 +191,7 @@ export interface NotificationSupport {
   types?: string[];
 }
 
+/** カーソルの状態。 */
 export interface CursorState {
   x: number;
   y: number;
@@ -684,7 +684,7 @@ export class Terminal {
 
   /**
    * 通知が押されたことをアプリケーションへ返す（`onData` から出る）。通知の `actions.report` が
-   * 真のときだけ呼ぶ。`button` はボタンを押したときの番号（1 始まり）。`id` が空なら何も送らない。
+   * 真のときだけ呼ぶ。`button` はボタンを押したときの番号（1 始まり）。`id` が空なら `i=0` で送る（仕様）。
    */
   notificationActivated(id: string, button?: number): void {
     if (this.disposed) return;

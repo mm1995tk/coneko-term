@@ -30,6 +30,23 @@ pub struct Actions {
     pub report: bool,
 }
 
+impl Actions {
+    /// `a` の値（`,` 区切り。既定から順に当てる）。
+    fn parse(v: &str) -> Actions {
+        let mut a = Actions::default();
+        for t in v.split(',') {
+            match t {
+                "focus" => a.focus = true,
+                "-focus" => a.focus = false,
+                "report" => a.report = true,
+                "-report" => a.report = false,
+                _ => {}
+            }
+        }
+        a
+    }
+}
+
 impl Default for Actions {
     fn default() -> Self {
         Actions {
@@ -49,6 +66,17 @@ pub enum When {
     Unfocused,
     /// ウィンドウが見えていないとき（`invisible`）。
     Invisible,
+}
+
+impl When {
+    fn parse(v: &str) -> Option<When> {
+        Some(match v {
+            "always" => When::Always,
+            "unfocused" => When::Unfocused,
+            "invisible" => When::Invisible,
+            _ => return None,
+        })
+    }
 }
 
 /// 組み立て終わった通知。仕様のキーを読んだ形で持つ。
@@ -152,7 +180,7 @@ struct Meta {
     report_close: Option<bool>,
     timeout: Option<i32>,
     app_name: Option<Vec<u8>>,
-    sound: Option<String>,
+    sound: Option<Vec<u8>>,
     icon_cache_id: Option<String>,
     types: Vec<Vec<u8>>,
     icon_names: Vec<Vec<u8>>,
@@ -203,27 +231,8 @@ impl Meta {
                     "1" => m.base64 = Some(true),
                     _ => {}
                 },
-                "a" => {
-                    let mut a = Actions::default();
-                    for t in v.split(',') {
-                        match t {
-                            "focus" => a.focus = true,
-                            "-focus" => a.focus = false,
-                            "report" => a.report = true,
-                            "-report" => a.report = false,
-                            _ => {}
-                        }
-                    }
-                    m.actions = Some(a);
-                }
-                "o" => {
-                    m.when = match v {
-                        "always" => Some(When::Always),
-                        "unfocused" => Some(When::Unfocused),
-                        "invisible" => Some(When::Invisible),
-                        _ => m.when,
-                    }
-                }
+                "a" => m.actions = Some(Actions::parse(v)),
+                "o" => m.when = When::parse(v).or(m.when),
                 "u" => {
                     if let Ok(u @ 0..=2) = v.parse::<u8>() {
                         m.urgency = Some(u);
@@ -242,11 +251,7 @@ impl Meta {
                     }
                 }
                 "f" => m.app_name = decode_base64(v.as_bytes()),
-                "s" => {
-                    if valid_id(v) && !v.is_empty() {
-                        m.sound = Some(v.to_string());
-                    }
-                }
+                "s" => m.sound = decode_base64(v.as_bytes()),
                 "g" => {
                     if valid_id(v) && !v.is_empty() {
                         m.icon_cache_id = Some(v.to_string());
@@ -295,44 +300,63 @@ impl Notifications {
         };
         let meta = Meta::parse(std::str::from_utf8(meta).ok()?)?;
         match meta.payload {
-            Payload::Close => return Some(Output::Close(meta.id)),
+            // `i` の無い `p=close` は何もしない（仕様）。
+            Payload::Close => return (!meta.id.is_empty()).then_some(Output::Close(meta.id)),
             Payload::Query => return Some(Output::Query(meta.id)),
             Payload::Alive => return Some(Output::Alive(meta.id)),
             // アイコンの画像は読まない。
             Payload::Icon => return None,
             _ => {}
         }
-        let idx = match self.pending.iter().position(|p| p.id == meta.id) {
-            Some(i) => i,
-            None => {
-                if self.pending.len() >= MAX_PENDING {
-                    self.pending.remove(0);
-                }
-                self.pending.push(Pending {
-                    id: meta.id.clone(),
-                    ..Default::default()
-                });
-                self.pending.len() - 1
-            }
-        };
+        let idx = self.pending_for(&meta.id);
         let p = &mut self.pending[idx];
-        let b64 = meta.base64;
-        let (buf, flag) = match meta.payload {
-            Payload::Title => (&mut p.title, &mut p.title_b64),
-            Payload::Body => (&mut p.body, &mut p.body_b64),
-            _ => (&mut p.buttons, &mut p.buttons_b64),
+        p.append(meta.payload, meta.base64, payload);
+        p.merge_meta(&meta);
+        if !meta.done {
+            return None;
+        }
+        self.pending.remove(idx).finish()
+    }
+
+    /// `id` の組み立て中の通知の位置。無ければ作る（上限を超えるときは古いものを捨てる）。
+    fn pending_for(&mut self, id: &str) -> usize {
+        if let Some(i) = self.pending.iter().position(|p| p.id == id) {
+            return i;
+        }
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.remove(0);
+        }
+        self.pending.push(Pending {
+            id: id.to_string(),
+            ..Default::default()
+        });
+        self.pending.len() - 1
+    }
+}
+
+impl Pending {
+    /// 題名・本文・ボタンのどれかに中身を足す。大きさの上限を超えたら捨てる印をつける。
+    fn append(&mut self, kind: Payload, base64: Option<bool>, payload: &[u8]) {
+        let (buf, flag) = match kind {
+            Payload::Title => (&mut self.title, &mut self.title_b64),
+            Payload::Body => (&mut self.body, &mut self.body_b64),
+            _ => (&mut self.buttons, &mut self.buttons_b64),
         };
-        if let Some(b) = b64 {
+        if let Some(b) = base64 {
             *flag = b;
         }
         buf.extend_from_slice(payload);
-        if p.title.len() + p.body.len() + p.buttons.len() > MAX_PAYLOAD {
-            p.too_big = true;
-            p.title.clear();
-            p.body.clear();
-            p.buttons.clear();
+        if self.title.len() + self.body.len() + self.buttons.len() > MAX_PAYLOAD {
+            self.too_big = true;
+            self.title.clear();
+            self.body.clear();
+            self.buttons.clear();
         }
-        let n = &mut p.n;
+    }
+
+    /// 塊の鍵を通知に反映する（後の塊の鍵が上書き）。
+    fn merge_meta(&mut self, meta: &Meta) {
+        let n = &mut self.n;
         if let Some(a) = meta.actions {
             n.actions = a;
         }
@@ -351,11 +375,11 @@ impl Notifications {
         if let Some(f) = &meta.app_name {
             n.app_name = Some(String::from_utf8_lossy(f).into_owned());
         }
-        if meta.sound.is_some() {
-            n.sound = meta.sound;
+        if let Some(s) = &meta.sound {
+            n.sound = Some(String::from_utf8_lossy(s).into_owned());
         }
         if meta.icon_cache_id.is_some() {
-            n.icon_cache_id = meta.icon_cache_id;
+            n.icon_cache_id = meta.icon_cache_id.clone();
         }
         for t in &meta.types {
             n.types.push(String::from_utf8_lossy(t).into_owned());
@@ -363,15 +387,8 @@ impl Notifications {
         for t in &meta.icon_names {
             n.icon_names.push(String::from_utf8_lossy(t).into_owned());
         }
-        if !meta.done {
-            return None;
-        }
-        let p = self.pending.remove(idx);
-        p.finish()
     }
-}
 
-impl Pending {
     fn finish(self) -> Option<Output> {
         if self.too_big {
             return None;
@@ -397,15 +414,20 @@ impl Pending {
     }
 }
 
-/// base64（標準の文字、`=` は有っても無くてもよい）を戻す。読めなければ `None`。
+/// base64（標準の文字、`=` は有っても無くてもよい）を戻す。途中の `=`（塊ごとの詰め物）は、そこで並びが
+/// 終わったものとして読む。読めなければ `None`。
 fn decode_base64(src: &[u8]) -> Option<Vec<u8>> {
-    let mut src = src;
-    while let [rest @ .., b'='] = src {
-        src = rest;
-    }
     let mut out = Vec::with_capacity(src.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0u32);
     for &c in src {
+        if c == b'=' {
+            // 塊ごとの詰め物。ここで並びが終わるので、溜まりを捨てて続きを新しい並びとして読む。
+            if bits >= 6 {
+                return None;
+            }
+            (acc, bits) = (0, 0);
+            continue;
+        }
         let v = match c {
             b'A'..=b'Z' => c - b'A',
             b'a'..=b'z' => c - b'a' + 26,
@@ -422,7 +444,7 @@ fn decode_base64(src: &[u8]) -> Option<Vec<u8>> {
             acc &= (1 << bits) - 1;
         }
     }
-    if src.len() % 4 == 1 {
+    if bits >= 6 {
         return None;
     }
     Some(out)
@@ -430,14 +452,11 @@ fn decode_base64(src: &[u8]) -> Option<Vec<u8>> {
 
 // ---- PTY へ送る返事 ----
 
-fn safe_id(id: &str) -> bool {
-    valid_id(id)
-}
-
 /// 通知が押された。`button` はボタンを押したときの番号（1 始まり）。
-/// `i=` の無い通知には返事を作らない（空を返す）。
+/// `i=` の無い通知には、仕様どおり `i=0` で返す。
 pub fn activated(id: &str, button: Option<u32>) -> Vec<u8> {
-    if id.is_empty() || !safe_id(id) {
+    let id = if id.is_empty() { "0" } else { id };
+    if !valid_id(id) {
         return Vec::new();
     }
     match button {
@@ -449,7 +468,8 @@ pub fn activated(id: &str, button: Option<u32>) -> Vec<u8> {
 
 /// 通知が閉じられた（`c=1` の通知にだけ送る）。
 pub fn closed(id: &str) -> Vec<u8> {
-    if id.is_empty() || !safe_id(id) {
+    let id = if id.is_empty() { "0" } else { id };
+    if !valid_id(id) {
         return Vec::new();
     }
     format!("\x1b]99;i={id}:p=close;\x1b\\").into_bytes()
@@ -473,14 +493,14 @@ fn list<T: AsRef<str>>(key: &str, items: &[T]) -> Option<String> {
 
 /// `p=?` への返事。
 pub fn query_reply(id: &str, s: &NotificationSupport) -> Vec<u8> {
-    if !id.is_empty() && !safe_id(id) {
+    if !id.is_empty() && !valid_id(id) {
         return Vec::new();
     }
     let urgencies: Vec<String> = s.urgencies.iter().map(u8::to_string).collect();
     let parts: Vec<Option<String>> = vec![
         list("a", &s.actions),
         s.close_report.then(|| "c=1".to_string()),
-        list("o", &s.when),
+        list("o", &s.when).or_else(|| Some("o=always".to_string())),
         list("p", &s.payloads),
         list("s", &s.sounds),
         list("t", &s.types),
@@ -498,13 +518,13 @@ pub fn query_reply(id: &str, s: &NotificationSupport) -> Vec<u8> {
 
 /// `p=alive` への返事。`ids` はまだ生きている通知の `i`。
 pub fn alive_reply(id: &str, ids: &[String]) -> Vec<u8> {
-    if !id.is_empty() && !safe_id(id) {
+    if !id.is_empty() && !valid_id(id) {
         return Vec::new();
     }
     let ids: Vec<&str> = ids
         .iter()
         .map(String::as_str)
-        .filter(|i| safe_id(i))
+        .filter(|i| valid_id(i))
         .collect();
     let head = if id.is_empty() {
         "p=alive".to_string()
@@ -594,7 +614,7 @@ mod tests {
     #[test]
     fn keys_are_read() {
         let n = one(
-            "\x1b]99;i=x:u=2:a=-focus,report:o=unfocused:c=1:w=500:s=info:g=ic1:f=a2l0dHk=:t=aW0=:n=Zm9v;hi\x1b\\",
+            "\x1b]99;i=x:u=2:a=-focus,report:o=unfocused:c=1:w=500:s=aW5mbw==:g=ic1:f=a2l0dHk=:t=aW0=:n=Zm9v;hi\x1b\\",
         );
         assert_eq!(n.id, "x");
         assert_eq!(n.urgency, Some(2));
@@ -623,6 +643,30 @@ mod tests {
         // 分けて送り、後の塊に e=1 が無くても、そろってから戻す。
         let n = one("\x1b]99;i=q:e=1:d=0;SGVsbG8s\x1b\\\x1b]99;i=q;IOS4lueVjA==\x1b\\");
         assert_eq!(n.title, "Hello, 世界");
+    }
+
+    #[test]
+    fn padded_chunks_are_decoded() {
+        // エンコードしてから分割: 塊ごとに詰め物が付く。
+        let n = one("\x1b]99;i=p:e=1:d=0;SGVsbG8=\x1b\\\x1b]99;i=p:e=1;IHdvcmxk\x1b\\");
+        assert_eq!(n.title, "Hello world");
+        let n = one("\x1b]99;i=p:e=1:d=0;SGVsbG8=\x1b\\\x1b]99;i=p:e=1:d=0;IHdvcmxk\x1b\\\x1b]99;i=p;\x1b\\");
+        assert_eq!(n.title, "Hello world");
+    }
+
+    #[test]
+    fn close_without_id_is_noop() {
+        assert!(events("\x1b]99;p=close;\x1b\\").1.is_empty());
+    }
+
+    #[test]
+    fn query_reply_defaults_when() {
+        let mut t = Terminal::new(5, 20);
+        t.notification_query_reply("", &NotificationSupport::default());
+        assert_eq!(
+            String::from_utf8(t.take_output()).unwrap(),
+            "\x1b]99;p=?;o=always\x1b\\"
+        );
     }
 
     #[test]
@@ -692,11 +736,12 @@ mod tests {
         t.notification_activated("1", Some(2));
         t.notification_closed("1");
         t.notification_alive_reply("9", &["a".into(), "b c".into(), "d".into()]);
-        t.notification_activated("", None);
         t.notification_activated("bad\x1b", None);
+        t.notification_activated("", None);
+        t.notification_closed("");
         assert_eq!(
             String::from_utf8(t.take_output()).unwrap(),
-            "\x1b]99;i=1;\x1b\\\x1b]99;i=1;2\x1b\\\x1b]99;i=1:p=close;\x1b\\\x1b]99;i=9:p=alive;a,d\x1b\\"
+            "\x1b]99;i=1;\x1b\\\x1b]99;i=1;2\x1b\\\x1b]99;i=1:p=close;\x1b\\\x1b]99;i=9:p=alive;a,d\x1b\\\x1b]99;i=0;\x1b\\\x1b]99;i=0:p=close;\x1b\\"
         );
     }
 

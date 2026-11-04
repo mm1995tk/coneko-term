@@ -303,7 +303,7 @@ impl Terminal {
     }
 
     /// 通知（OSC 99）が押されたことを、アプリケーションへ返す。`button` はボタンの番号（1 始まり）。
-    /// 通知の `a` に `report` があるときだけ送ること。`i=` の無い通知には何も送らない。
+    /// 通知の `a` に `report` があるときだけ送ること。`i=` の無い通知には `i=0` で返す（仕様）。
     pub fn notification_activated(&mut self, id: &str, button: Option<u32>) {
         self.queue_output(&notification::activated(id, button));
     }

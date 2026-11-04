@@ -81,7 +81,7 @@ impl WasmEvent {
         }
     }
 
-    fn nf<T: Default>(&self, f: impl FnOnce(&Notification) -> T) -> T {
+    fn with_notification<T: Default>(&self, f: impl FnOnce(&Notification) -> T) -> T {
         self.notification.as_ref().map(f).unwrap_or_default()
     }
 }
@@ -106,32 +106,32 @@ impl WasmEvent {
     /// 通知の `i=`（無ければ空）。種類が 4 のとき。以降の `notification_*` も同じ。
     #[wasm_bindgen(getter)]
     pub fn notification_id(&self) -> String {
-        self.nf(|n| n.id.clone())
+        self.with_notification(|n| n.id.clone())
     }
     /// 通知の題名。
     #[wasm_bindgen(getter)]
     pub fn notification_title(&self) -> String {
-        self.nf(|n| n.title.clone())
+        self.with_notification(|n| n.title.clone())
     }
     /// 通知の本文。
     #[wasm_bindgen(getter)]
     pub fn notification_body(&self) -> String {
-        self.nf(|n| n.body.clone())
+        self.with_notification(|n| n.body.clone())
     }
     /// 緊急度（`u`）。指定が無ければ -1。
     #[wasm_bindgen(getter)]
     pub fn notification_urgency(&self) -> i32 {
-        self.nf(|n| n.urgency.map_or(-1, i32::from))
+        self.with_notification(|n| n.urgency.map_or(-1, i32::from))
     }
     /// 押されたときの動き（`a`）。ビット 0 が focus、ビット 1 が report。
     #[wasm_bindgen(getter)]
     pub fn notification_actions(&self) -> u8 {
-        self.nf(|n| n.actions.focus as u8 | (n.actions.report as u8) << 1)
+        self.with_notification(|n| n.actions.focus as u8 | (n.actions.report as u8) << 1)
     }
     /// いつ出すか（`o`）。0 always、1 unfocused、2 invisible。
     #[wasm_bindgen(getter)]
     pub fn notification_when(&self) -> u8 {
-        self.nf(|n| match n.when {
+        self.with_notification(|n| match n.when {
             When::Unfocused => 1,
             When::Invisible => 2,
             _ => 0,
@@ -140,12 +140,12 @@ impl WasmEvent {
     /// 閉じられたときに知らせるか（`c=1`）。
     #[wasm_bindgen(getter)]
     pub fn notification_report_close(&self) -> bool {
-        self.nf(|n| n.report_close)
+        self.with_notification(|n| n.report_close)
     }
     /// 消えるまでの時間（`w`、ミリ秒）。指定が無ければ -2。
     #[wasm_bindgen(getter)]
     pub fn notification_timeout(&self) -> i32 {
-        self.nf(|n| n.timeout.unwrap_or(-2))
+        self.with_notification(|n| n.timeout.unwrap_or(-2))
     }
     /// アプリケーションの名前（`f`）。無ければ `undefined`。
     #[wasm_bindgen(getter)]
@@ -167,17 +167,17 @@ impl WasmEvent {
     /// 通知の種類（`t`）。
     #[wasm_bindgen(getter)]
     pub fn notification_types(&self) -> Vec<String> {
-        self.nf(|n| n.types.clone())
+        self.with_notification(|n| n.types.clone())
     }
     /// アイコンの名前（`n`）。
     #[wasm_bindgen(getter)]
     pub fn notification_icon_names(&self) -> Vec<String> {
-        self.nf(|n| n.icon_names.clone())
+        self.with_notification(|n| n.icon_names.clone())
     }
     /// ボタンの文字（`p=buttons`）。
     #[wasm_bindgen(getter)]
     pub fn notification_buttons(&self) -> Vec<String> {
-        self.nf(|n| n.buttons.clone())
+        self.with_notification(|n| n.buttons.clone())
     }
 }
 
