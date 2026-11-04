@@ -48,6 +48,7 @@ impl Params {
         self.sub.iter().filter(|s| !**s).count()
     }
 
+    /// パラメーターが 1 つも無いか。
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
@@ -88,6 +89,7 @@ impl<'a> IntoIterator for &'a Params {
     }
 }
 
+/// [`Params::iter`] が返すイテレーター。各要素は、先頭が値で、残りがサブパラメーター。
 pub struct ParamsIter<'a> {
     values: &'a [u32],
     sub: &'a [bool],
@@ -210,6 +212,7 @@ impl Default for Parser {
 }
 
 impl Parser {
+    /// 既定の上限 ([`DEFAULT_MAX_STRING_LEN`]) で作る。
     pub fn new() -> Self {
         Self::with_max_string_len(DEFAULT_MAX_STRING_LEN)
     }
@@ -351,7 +354,7 @@ impl Parser {
 
     /// ESC・CSI・DCS の、最終バイトより前の状態。
     fn sequence_byte<P: Perform>(&mut self, p: &mut P, b: u8) {
-        let st_pending = std::mem::take(&mut self.st_pending);
+        let st_pending = self.st_pending;
         let in_dcs = matches!(
             self.state,
             State::DcsEntry | State::DcsParam | State::DcsIntermediate
@@ -378,7 +381,7 @@ impl Parser {
                 self.ground(p, b);
                 return;
             }
-            _ => {}
+            _ => self.st_pending = false,
         }
         match self.state {
             State::Escape => match b {
@@ -388,12 +391,10 @@ impl Parser {
                     self.state = State::EscapeIntermediate;
                 }
                 b'[' => {
-                    self.clear();
                     self.state = State::CsiEntry;
                 }
                 b']' => self.enter_string(State::OscString),
                 b'P' => {
-                    self.clear();
                     self.state = State::DcsEntry;
                 }
                 b'X' | b'^' => self.enter_string(State::SosPmString),
@@ -790,12 +791,12 @@ mod tests {
 
     #[test]
     fn csi_intermediates() {
-        assert_eq!(parse(b"\x1b[2 q"), vec![csi(&[&[2]], &[b' '], None, b'q')]);
+        assert_eq!(parse(b"\x1b[2 q"), vec![csi(&[&[2]], b" ", None, b'q')]);
         assert_eq!(
             parse(b"\x1b[?1$p"),
-            vec![csi(&[&[1]], &[b'$'], Some(b'?'), b'p')]
+            vec![csi(&[&[1]], b"$", Some(b'?'), b'p')]
         );
-        assert_eq!(parse(b"\x1b[ q"), vec![csi(&[], &[b' '], None, b'q')]);
+        assert_eq!(parse(b"\x1b[ q"), vec![csi(&[], b" ", None, b'q')]);
         // 中間バイトのあとの数字は不正。捨てる。
         assert_eq!(parse(b"\x1b[ 1qa"), vec![Ev::Print('a')]);
         // 中間バイトが多すぎる。
@@ -877,7 +878,7 @@ mod tests {
             ev,
             vec![
                 Ev::Print('a'),
-                csi(&[&[25], &[1, 2]], &[b'$'], Some(b'?'), b'p'),
+                csi(&[&[25], &[1, 2]], b"$", Some(b'?'), b'p'),
                 Ev::Print('b'),
             ]
         );
@@ -1088,6 +1089,14 @@ mod tests {
     }
 
     #[test]
+    fn c0_after_string_esc_keeps_st_pending() {
+        assert_eq!(
+            parse(b"\x1b_Gx\x1b\n\\a"),
+            vec![Ev::Apc(b"Gx".to_vec()), Ev::Exec(b'\n'), Ev::Print('a')]
+        );
+    }
+
+    #[test]
     fn apc_terminated_by_esc_only_swallows_backslash() {
         // ST の `\` は読み捨てる。それ以外は新しいシーケンス。
         assert_eq!(
@@ -1145,7 +1154,7 @@ mod tests {
     #[test]
     fn default_limit_is_2mib() {
         let mut input = b"\x1b]0;".to_vec();
-        input.extend(std::iter::repeat(b'a').take(DEFAULT_MAX_STRING_LEN + 100));
+        input.extend(std::iter::repeat_n(b'a', DEFAULT_MAX_STRING_LEN + 100));
         input.push(0x07);
         match &parse(&input)[0] {
             Ev::Osc(d, true) => assert_eq!(d.len(), DEFAULT_MAX_STRING_LEN),
@@ -1208,7 +1217,7 @@ mod tests {
         let mut rec = Rec::default();
         for _ in 0..4000 {
             let len = (rng.next() % 300) as usize;
-            let biased = rng.next() % 2 == 0;
+            let biased = rng.next().is_multiple_of(2);
             let buf: Vec<u8> = (0..len)
                 .map(|_| {
                     let r = rng.next();
