@@ -233,6 +233,21 @@ impl Screen {
         self.buf_mut().erase_cells(y, x0, x1, &pen);
     }
 
+    /// 行 `y` の `x0..x1`（列の数で切る）のセルの属性を `f` で書き換える。字は変えない。
+    pub fn update_attrs(&mut self, y: usize, x0: usize, x1: usize, mut f: impl FnMut(&mut Attrs)) {
+        if y >= self.rows() {
+            return;
+        }
+        let x1 = x1.min(self.cols());
+        if x0 >= x1 {
+            return;
+        }
+        let line = self.buf_mut().line_mut(y);
+        for cell in &mut line.cells[x0..x1] {
+            f(&mut cell.attrs);
+        }
+    }
+
     // ---- カーソル ----
 
     /// カーソルを動かす。画面の中に収める。
