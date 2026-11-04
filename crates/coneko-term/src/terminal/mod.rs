@@ -56,6 +56,8 @@ mod text_sizing;
 #[cfg(test)]
 mod text_sizing_tests;
 mod theme;
+#[cfg(test)]
+mod unscroll_tests;
 
 pub use clipboard::{
     ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest, ClipboardWrite,
@@ -1463,6 +1465,13 @@ impl Perform for State {
         if intermediates == b" " {
             if action == b'q' {
                 self.set_cursor_style(raw(params, 0).unwrap_or(0));
+            }
+            return;
+        }
+        if intermediates == b"+" {
+            // kitty unscrolling。SD に似ているが、空きにスクロールバックの行を戻す。
+            if action == b'T' && params.len() <= 1 {
+                self.screen.unscroll(arg(params, 0, 1));
             }
             return;
         }
