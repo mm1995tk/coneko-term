@@ -1,4 +1,4 @@
-import { WasmTerminal } from "./wasm/coneko_term_wasm.js";
+import { WasmTerminal, type WasmEvent } from "./wasm/coneko_term_wasm.js";
 import { getMemory } from "./memory.js";
 import {
   SelectionModel,
@@ -242,6 +242,261 @@ export type ClipboardWriteStatus =
 /** 読み取りを断る・失敗を知らせる答え。 */
 export type ClipboardReadError = "ENOSYS" | "EPERM" | "EBUSY";
 
+/** ドロップやドラッグの操作。 */
+export type DndOperation = "copy" | "move";
+
+/** 許す操作の組。 */
+export interface DndOperations {
+  copy?: boolean;
+  move?: boolean;
+}
+
+function operationBits(ops: DndOperations): number {
+  return (ops.copy ? 1 : 0) | (ops.move ? 2 : 0);
+}
+
+function operationOf(code: number): DndOperation | null {
+  return code === 1 ? "copy" : code === 2 ? "move" : null;
+}
+
+/** ドラッグの位置（kitty の drag and drop protocol）。セルは左上が (0, 0)、画素は左上からのずれ。 */
+export interface DndLocation {
+  x: number;
+  y: number;
+  pixelX: number;
+  pixelY: number;
+}
+
+/** ターミナルが答えるエラーの、POSIX の記号名。知らない値は `EIO`。 */
+export type DndErrorName =
+  | "ENOENT"
+  | "EINVAL"
+  | "EUNKNOWN"
+  | "EPERM"
+  | "EIO"
+  | "EMFILE"
+  | "ENOMEM"
+  | "EFBIG";
+
+/** ドロップされたデータの頼み（`DropRequestEvent`）。鍵は仕様の `x`・`y`・`Y`。 */
+export type DropRequest =
+  /** `t=r:x=idx`: 落とされた一覧の `index` 番目（1 始まり）の MIME の種類のデータ。 */
+  | { type: "data"; index: number }
+  /** `t=r:x=idx:y=subidx`: `text/uri-list`（`index` 番目の種類）の `subIndex` 番目の項目。遠くの機械からのドロップ。 */
+  | { type: "entry"; index: number; subIndex: number }
+  /** `t=r:Y=handle:x=num`: ディレクトリ（`handle`）の `index` 番目（1 始まり）の項目。 */
+  | { type: "dirEntry"; handle: number; index: number }
+  /** `t=r:Y=handle`: ディレクトリを読み終えた。`handle` を捨ててよい。答えは要らない。 */
+  | { type: "dirClose"; handle: number };
+
+/** ドロップのデータの答えの形（`X` 鍵）。 */
+export type DropDataForm =
+  /** MIME の種類のデータ。`remote` は、送り元がプログラムとは別の機械か（`text/uri-list` の答えにだけ付ける）。 */
+  | { kind: "mime"; remote?: boolean }
+  /** 普通のファイルの中身。 */
+  | { kind: "file" }
+  /** シンボリックリンク。データはリンク先。 */
+  | { kind: "symlink" }
+  /** ディレクトリ。データは、中の項目を NUL で区切った一覧。`handle` は 0 と 1 以外。 */
+  | { kind: "directory"; handle: number };
+
+/** ドラッグの画像（サムネイル）。 */
+export interface DragImage {
+  /** 形式。`text` は UTF-8 のテキストで、ターミナルが描く。 */
+  format: "rgb" | "rgba" | "png" | "text";
+  /** 幅（画素）。`text` では、文字の大きさの割合の分子（`基本の大きさ * width / height`）。 */
+  width: number;
+  /** 高さ（画素）。`text` では、同じ割合の分母。 */
+  height: number;
+  /** 背景の不透明度（0 から 1024）。`text` のときだけ意味がある。 */
+  opacity: number;
+  /** 画像のデータ（base64 を戻したあと）。 */
+  data: Uint8Array;
+}
+
+/**
+ * kitty の drag and drop protocol（OSC 72）のイベント。`onDnd` で受ける。
+ *
+ * ドロップを受ける側:
+ * - `dropEnabled` / `dropDisabled`: プログラムがドロップを受け付ける・やめた。
+ * - `dropResponse`: ドラッグが窓の上にある間のプログラムの答え。OS に、受けるか・どの操作かを伝える。
+ * - `dropRequest`: ドロップされたデータの頼み。`replyDropData` か `replyDropError` で答える。
+ * - `dropFinished`: プログラムがドロップを読み終えた。OS にドロップの完了を伝える。`operation` が null なら取り消し。
+ *
+ * ドラッグを始める側:
+ * - `dragEnabled` / `dragDisabled`: プログラムがドラッグを始められると言った・やめた。
+ * - `dragStart`: ドラッグを始める求め。OS のドラッグを始め、`dragStarted` か `dragError` で答える。
+ * - `dragImage`: ドラッグの画像を変える（`index` が null なら外す）。
+ * - `dragData` / `dragDataError`: `requestDragData` で頼んだ MIME の種類（0 始まり）のデータ・エラー。
+ * - `dragEntry`: 遠くの機械へのドラッグで、`requestDragEntry` で頼んだ項目のデータ。
+ * - `dragCanceled` / `dragAborted`: プログラムがドラッグを取り消した・エラーで止めた。
+ */
+export type DndEvent =
+  | { type: "dropEnabled"; mimes: string[] }
+  | { type: "dropDisabled" }
+  | {
+      type: "dropResponse";
+      operation: DndOperation | null;
+      /** 受けたい MIME の種類（好む順）。null は、一覧を変えない。 */
+      mimes: string[] | null;
+    }
+  | { type: "dropRequest"; request: DropRequest }
+  | { type: "dropFinished"; operation: DndOperation | null }
+  | { type: "dragEnabled"; machineId: string | null }
+  | { type: "dragDisabled" }
+  | {
+      type: "dragStart";
+      /** プログラムが許す操作。 */
+      operations: { copy: boolean; move: boolean };
+      /** 申し出た MIME の種類（順番が番号になる）。 */
+      mimes: string[];
+      /** 先に送られたデータ。`mimes` と同じ並びで、送られていないものは null。 */
+      data: (Uint8Array | null)[];
+      images: DragImage[];
+      /** 始めるときに使う画像の番号（0 始まり）。無ければ null。 */
+      image: number | null;
+      /** プログラムの機械の ID。 */
+      machineId: string | null;
+    }
+  | { type: "dragImage"; index: number | null }
+  | { type: "dragData"; index: number; data: Uint8Array }
+  | {
+      type: "dragDataError";
+      index: number;
+      error: string;
+      description: string;
+    }
+  | {
+      type: "dragEntry";
+      /** `text/uri-list` の中の番号（1 始まり）。 */
+      index: number;
+      /** ディレクトリの中の番号（1 始まり）。トップの項目なら 0。 */
+      subIndex: number;
+      /** 親のディレクトリの handle。トップの項目なら 0。 */
+      parent: number;
+      form: "file" | "symlink" | "directory";
+      /** `form` が `directory` のときの handle。 */
+      handle: number;
+      data: Uint8Array;
+    }
+  | { type: "dragCanceled" }
+  | { type: "dragAborted"; error: string; description: string };
+
+const DROP_REQUEST_KINDS = { data: 0, entry: 1, dirEntry: 2, dirClose: 3 };
+
+function dropRequestParts(r: DropRequest): [number, number, number] {
+  switch (r.type) {
+    case "data":
+      return [DROP_REQUEST_KINDS.data, r.index, 0];
+    case "entry":
+      return [DROP_REQUEST_KINDS.entry, r.index, r.subIndex];
+    case "dirEntry":
+      return [DROP_REQUEST_KINDS.dirEntry, r.handle, r.index];
+    case "dirClose":
+      return [DROP_REQUEST_KINDS.dirClose, r.handle, 0];
+  }
+}
+
+// wasm の `dnd_ints` / `dnd_strings` / `dnd_blob` を、イベントにする。並びは wasm 側の説明のとおり。
+function dndEventOf(ev: WasmEvent): DndEvent | undefined {
+  const ints = ev.dnd_ints;
+  const strings = ev.dnd_strings;
+  switch (ev.dnd_kind) {
+    case 0:
+      return { type: "dropEnabled", mimes: strings };
+    case 1:
+      return { type: "dropDisabled" };
+    case 2:
+      return {
+        type: "dropResponse",
+        operation: operationOf(ints[0]),
+        mimes: ints[1] ? strings : null,
+      };
+    case 3: {
+      const [kind, a, b] = ints;
+      const request: DropRequest | undefined =
+        kind === 0
+          ? { type: "data", index: a }
+          : kind === 1
+            ? { type: "entry", index: a, subIndex: b }
+            : kind === 2
+              ? { type: "dirEntry", handle: a, index: b }
+              : kind === 3
+                ? { type: "dirClose", handle: a }
+                : undefined;
+      return request && { type: "dropRequest", request };
+    }
+    case 4:
+      return { type: "dropFinished", operation: operationOf(ints[0]) };
+    case 5:
+      return {
+        type: "dragEnabled",
+        machineId: ints[0] ? (strings[0] ?? null) : null,
+      };
+    case 6:
+      return { type: "dragDisabled" };
+    case 7: {
+      const [ops, image, nMimes, nImages] = ints;
+      const hasMachine = ints[4 + nMimes + nImages * 4] !== 0;
+      const data: (Uint8Array | null)[] = [];
+      for (let i = 0; i < nMimes; i++) {
+        data.push(ints[4 + i] ? ev.dnd_blob(i) : null);
+      }
+      const images: DragImage[] = [];
+      for (let i = 0; i < nImages; i++) {
+        const at = 4 + nMimes + i * 4;
+        images.push({
+          format: (["rgb", "rgba", "png", "text"] as const)[ints[at]] ?? "png",
+          width: ints[at + 1],
+          height: ints[at + 2],
+          opacity: ints[at + 3],
+          data: ev.dnd_blob(nMimes + i),
+        });
+      }
+      return {
+        type: "dragStart",
+        operations: { copy: (ops & 1) !== 0, move: (ops & 2) !== 0 },
+        mimes: strings.slice(0, nMimes),
+        data,
+        images,
+        image: image < 0 ? null : image,
+        machineId: hasMachine ? (strings[nMimes] ?? null) : null,
+      };
+    }
+    case 8:
+      return { type: "dragImage", index: ints[0] < 0 ? null : ints[0] };
+    case 9:
+      return { type: "dragData", index: ints[0], data: ev.dnd_blob(0) };
+    case 10:
+      return {
+        type: "dragDataError",
+        index: ints[0],
+        error: strings[0] ?? "EUNKNOWN",
+        description: strings[1] ?? "",
+      };
+    case 11:
+      return {
+        type: "dragEntry",
+        index: ints[0],
+        subIndex: ints[1],
+        parent: ints[2],
+        form: (["file", "symlink", "directory"] as const)[ints[3]] ?? "file",
+        handle: ints[4],
+        data: ev.dnd_blob(0),
+      };
+    case 12:
+      return { type: "dragCanceled" };
+    case 13:
+      return {
+        type: "dragAborted",
+        error: strings[0] ?? "EUNKNOWN",
+        description: strings[1] ?? "",
+      };
+    default:
+      return undefined;
+  }
+}
+
 /** カーソルの状態。 */
 export interface CursorState {
   x: number;
@@ -406,6 +661,7 @@ export class Terminal {
   private clipboardReadListeners = new Set<
     (r: ClipboardReadRequest) => void
   >();
+  private dndListeners = new Set<(e: DndEvent) => void>();
   private oscHandlers = new Map<number, Set<(data: string) => void>>();
   private element?: HTMLElement;
   private cleanups: (() => void)[] = [];
@@ -667,6 +923,24 @@ export class Terminal {
           for (const l of [...this.clipboardReadListeners]) l(request);
           break;
         }
+        case 10: {
+          const e = dndEventOf(ev);
+          if (!e) break;
+          if (this.dndListeners.size === 0) {
+            // 聞き手がいなければ許さない。
+            if (e.type === "dropRequest") {
+              if (e.request.type !== "dirClose") {
+                const [kind, a, b] = dropRequestParts(e.request);
+                this.core.drop_error_reply(kind, a, b, "EPERM", "");
+              }
+            } else if (e.type === "dragStart") {
+              this.core.drag_error("EPERM", "");
+            }
+            break;
+          }
+          for (const l of [...this.dndListeners]) l(e);
+          break;
+        }
         case 3: {
           const text = this.decoder.decode(data);
           for (const l of [...(this.oscHandlers.get(ev.ident) ?? [])]) l(text);
@@ -862,6 +1136,225 @@ export class Terminal {
     if (this.disposed) return;
     this.core.clipboard_read_reply_error(id, error);
     this.flush();
+  }
+
+  /**
+   * kitty の drag and drop protocol（OSC 72）のイベントを受ける。種類は `DndEvent` を見ること。
+   * OS のドラッグとドロップにつなぐのは呼ぶ側の仕事。聞き手がいないとき、ドロップされたデータの
+   * 頼みには `EPERM` で、ドラッグを始める求めにも `EPERM` で答える。
+   */
+  onDnd(listener: (e: DndEvent) => void): Disposable {
+    return addListener(this.dndListeners, listener);
+  }
+
+  /** プログラムがドロップを受け付けると言っているか。偽の間、`dropMove` などは何もしない。 */
+  get dropAccepting(): boolean {
+    return this.core.drop_accepting();
+  }
+
+  /** プログラムが受け付けると言った MIME の種類（空でもよい）。 */
+  get dropAcceptedMimes(): string[] {
+    return this.core.drop_accepted_mimes();
+  }
+
+  /**
+   * プログラムが渡した機械の ID（ドロップ側）。自分の機械の ID と比べて別の機械なら、
+   * `text/uri-list` の答えに `remote: true` を付ける。知らない版の ID は別の機械として扱う。
+   */
+  get dropMachineId(): string | null {
+    return this.core.drop_machine_id() ?? null;
+  }
+
+  /**
+   * ドラッグが窓の上を動いた。`mimes` はドラッグされているものの MIME の種類。MIME の一覧は、
+   * 最初の移動と変わったときだけ PTY へ付ける。受け付けていないとき・位置が負のときは何もせず、false を返す。
+   */
+  dropMove(
+    location: DndLocation,
+    mimes: string[],
+    allowed: DndOperations = { copy: true, move: true },
+  ): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drop_move(
+      location.x,
+      location.y,
+      location.pixelX,
+      location.pixelY,
+      mimes,
+      operationBits(allowed),
+    );
+    this.flush();
+    return ok;
+  }
+
+  /** ドラッグが窓から出た（位置が -1 の移動を送る）。窓の上に無かったときは何もせず、false を返す。 */
+  dropLeave(): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drop_leave();
+    this.flush();
+    return ok;
+  }
+
+  /**
+   * ドロップされた。`mimes` は落とされたものの MIME の種類で、空ではいけない。`fromThisWindow` は、
+   * ドラッグがこの窓から始まったか（真なら、遠くの機械向けのファイルの読み取りを `EPERM` で断る）。
+   */
+  dropDrop(
+    location: DndLocation,
+    mimes: string[],
+    allowed: DndOperations = { copy: true, move: true },
+    fromThisWindow = false,
+  ): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drop_drop(
+      location.x,
+      location.y,
+      location.pixelX,
+      location.pixelY,
+      mimes,
+      operationBits(allowed),
+      fromThisWindow,
+    );
+    this.flush();
+    return ok;
+  }
+
+  /**
+   * `dropRequest` に、データで答える。データは全部を一度に渡す。4096 バイトのパケットに分け、
+   * 終わりの空のパケットまで送る。
+   */
+  replyDropData(
+    request: DropRequest,
+    form: DropDataForm,
+    data: Uint8Array,
+  ): void {
+    if (this.disposed) return;
+    const [kind, a, b] = dropRequestParts(request);
+    const code =
+      form.kind === "mime"
+        ? 0
+        : form.kind === "file"
+          ? 1
+          : form.kind === "symlink"
+            ? 2
+            : 3;
+    this.core.drop_data_reply(
+      kind,
+      a,
+      b,
+      code,
+      form.kind === "directory" ? form.handle : 0,
+      form.kind === "mime" && form.remote === true,
+      data,
+    );
+    this.flush();
+  }
+
+  /** `dropRequest` に、エラーで答える。`error` は POSIX の記号名。 */
+  replyDropError(
+    request: DropRequest,
+    error: DndErrorName,
+    description = "",
+  ): void {
+    if (this.disposed) return;
+    const [kind, a, b] = dropRequestParts(request);
+    this.core.drop_error_reply(kind, a, b, error, description);
+    this.flush();
+  }
+
+  /** プログラムがドラッグを始められると言っているか。 */
+  get dragOffersEnabled(): boolean {
+    return this.core.drag_offers_enabled();
+  }
+
+  /** プログラムが渡した機械の ID（ドラッグ側）。 */
+  get dragMachineId(): string | null {
+    return this.core.drag_machine_id() ?? null;
+  }
+
+  /**
+   * ドラッグの身振りを見つけた。プログラムへ位置を送り、続く申し出を 1 回だけ受ける。申し出ていない
+   * とき・ドラッグの途中のときは何もせず、false を返す。
+   */
+  dragGesture(location: DndLocation): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_gesture(
+      location.x,
+      location.y,
+      location.pixelX,
+      location.pixelY,
+    );
+    this.flush();
+    return ok;
+  }
+
+  /** `dragStart` に答える: OS のドラッグが始まった。 */
+  dragStarted(): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_started();
+    this.flush();
+    return ok;
+  }
+
+  /**
+   * `dragStart` に失敗で答える、またはドラッグを止める。すでにユーザーが取り消していたら
+   * `EPERM`、画像が大きすぎれば `EFBIG`。ドラッグの状態は捨てる。
+   */
+  dragError(error: DndErrorName, description = ""): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_error(error, description);
+    this.flush();
+    return ok;
+  }
+
+  /** ドラッグが受け入れられた。`index` は、相手が欲しがりそうな MIME の種類（0 始まり）。 */
+  dragAccepted(index: number): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_accepted(index);
+    this.flush();
+    return ok;
+  }
+
+  /** 相手が行いそうな操作が変わった。null は受け付けない。 */
+  dragAction(operation: DndOperation | null): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_action(
+      operation === "copy" ? 1 : operation === "move" ? 2 : 0,
+    );
+    this.flush();
+    return ok;
+  }
+
+  /** ドラッグが相手に落とされた。このあと `requestDragData` で、データを頼む。 */
+  dragDropped(): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_dropped();
+    this.flush();
+    return ok;
+  }
+
+  /** ドラッグが終わった。`canceled` が真ならユーザーが取り消した。ドラッグの状態は捨てる。 */
+  dragFinished(canceled = false): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_finished(canceled);
+    this.flush();
+    return ok;
+  }
+
+  /** MIME の種類 `index`（0 始まり）のデータをプログラムに頼む。答えは `dragData` か `dragDataError`。 */
+  requestDragData(index: number): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_data_request(index);
+    this.flush();
+    return ok;
+  }
+
+  /** 遠くの機械へのドラッグで、`text/uri-list` の `index` 番目（1 始まり）の項目を頼む。答えは `dragEntry`。 */
+  requestDragEntry(index: number): boolean {
+    if (this.disposed) return false;
+    const ok = this.core.drag_entry_request(index);
+    this.flush();
+    return ok;
   }
 
   /**
@@ -1738,6 +2231,7 @@ export class Terminal {
     this.notificationCloseListeners.clear();
     this.notificationQueryListeners.clear();
     this.notificationAliveListeners.clear();
+    this.dndListeners.clear();
     this.oscHandlers.clear();
     this.wasm.free();
   }
