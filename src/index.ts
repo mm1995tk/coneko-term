@@ -48,6 +48,7 @@ export {
   type FileTransferListing,
   type FileTransferStart,
   type CursorState,
+  type ExtraCursorState,
   type MouseInput,
   type NotificationSupport,
   type TerminalNotification,

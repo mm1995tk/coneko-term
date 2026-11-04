@@ -526,6 +526,36 @@ test("drag and drop (OSC 72): a drag start with no listener is refused", async (
   t.dispose();
 });
 
+test("multiple cursors: set, query and clear through the Terminal", async () => {
+  const t = new Terminal({ cols: 20, rows: 10 });
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  // 仕様の例: 主のカーソルの形に従う
+  await write(t, "\x1b[6 q\x1b[>29;2:4:5 q");
+  assert.deepEqual(t.extraCursors, [{ x: 4, y: 3, shape: "bar" }]);
+  // 仕様の例: 7 行目に、いろいろな形
+  await write(t, "\x1b[>0;4 q\x1b[>1;2:7:1 q\x1b[>2;2:7:3 q\x1b[>3;2:7:5;2:7:7 q");
+  assert.deepEqual(
+    t.extraCursors.map((c) => [c.x, c.y, c.shape]),
+    [
+      [0, 6, "block"],
+      [2, 6, "bar"],
+      [4, 6, "underline"],
+      [6, 6, "underline"],
+    ],
+  );
+  await write(t, "\x1b[>100 q\x1b[> q");
+  assert.equal(
+    out.join(""),
+    "\x1b[>100;1:2:7:1;2:2:7:3;3:2:7:5;3:2:7:7 q" +
+      "\x1b[>1;2;3;29;30;40;100;101 q",
+  );
+  // 画面を消すと、全部消える
+  await write(t, "\x1b[2J");
+  assert.deepEqual(t.extraCursors, []);
+  t.dispose();
+});
+
 const osc5113 = (body: string) => `\x1b]5113;${body}\x1b\\`;
 
 test("file transfer (OSC 5113): a send session runs from start to finish", async () => {

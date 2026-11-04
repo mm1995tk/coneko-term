@@ -132,6 +132,10 @@ export interface RenderSource extends Partial<ImageSource> {
   readViewportRow(y: number): RowView;
   /** 画像の配置の並び（`WasmTerminal.placements` と同じ）。 */
   readPlacements?(): ArrayLike<number>;
+  /** 追加のカーソルの `[x, y, 形]` の並び（`WasmTerminal.extra_cursors` と同じ）。 */
+  readExtraCursors?(): ArrayLike<number>;
+  /** 追加のカーソルの色の語 `[字の色, カーソルの色]`（`WasmTerminal.extra_cursor_colors` と同じ）。 */
+  readExtraCursorColors?(): ArrayLike<number>;
 }
 
 /** 描画の設定。 */
@@ -207,6 +211,12 @@ export class CanvasRenderer {
   private needsFull = true;
   private extraRows = new Set<number>();
   private lastCursor: { x: number; y: number } | undefined;
+  /** いま描く追加のカーソル。行ごと。 */
+  private extra = new Map<number, { x: number; shape: number }[]>();
+  /** 追加のカーソルの色の語 `[字の色, カーソルの色]`。 */
+  private extraColors: ArrayLike<number> = [0, 0];
+  /** 直前の描画で追加のカーソルがあった行。消えたときに描き直す。 */
+  private lastExtraRows = new Set<number>();
   private blinkOn = true;
   private blinkTimer: ReturnType<typeof setInterval> | undefined;
   private disposed = false;
@@ -355,7 +365,9 @@ export class CanvasRenderer {
 
   private updateBlink(): void {
     const { cursor, isFocused: focused } = this.source;
-    const want = cursor.blinking && cursor.visible && focused;
+    // 追加のカーソルは、主のカーソルが見えなくても、同じ点滅に従う
+    const want =
+      cursor.blinking && (cursor.visible || this.extra.size > 0) && focused;
     if (want && this.blinkTimer === undefined) this.restartBlink();
     if (!want && this.blinkTimer !== undefined) {
       this.stopBlink();
@@ -368,8 +380,9 @@ export class CanvasRenderer {
     if (this.disposed) return;
     const src = this.source;
     const dirty = src.takeDirtyRows();
-    this.updateBlink();
     const offset = src.viewportOffset;
+    this.collectExtraCursors(offset);
+    this.updateBlink();
     const cursor = src.cursor;
     const showCursor = this.cursorShown(offset);
     const rows = new Set<number>();
@@ -384,11 +397,15 @@ export class CanvasRenderer {
       for (const y of this.extraRows) rows.add(y);
       if (this.lastCursor) rows.add(this.lastCursor.y);
       if (showCursor || this.lastCursor) rows.add(cursor.y);
+      // 追加のカーソルは、点滅と主の形に従うので、いる行を毎回描く
+      for (const y of this.extra.keys()) rows.add(y);
+      for (const y of this.lastExtraRows) rows.add(y);
     }
     this.extraRows.clear();
     this.needsFull = false;
     this.lastOffset = offset;
     this.lastCursor = showCursor ? { x: cursor.x, y: cursor.y } : undefined;
+    this.lastExtraRows = new Set(this.extra.keys());
     if (full) {
       for (let y = 0; y < src.rows; y++) this.drawRow(y, offset);
     } else {
@@ -485,6 +502,23 @@ export class CanvasRenderer {
     }
   }
 
+  /** 追加のカーソルを、いま見える行ごとに集める。さかのぼって見ているときは出さない。 */
+  private collectExtraCursors(offset: number): void {
+    const src = this.source;
+    this.extra.clear();
+    this.extraColors = src.readExtraCursorColors?.() ?? [0, 0];
+    const flat = offset === 0 ? src.readExtraCursors?.() : undefined;
+    if (!flat) return;
+    for (let i = 0; i + 2 < flat.length; i += 3) {
+      const x = flat[i];
+      const y = flat[i + 1];
+      if (x >= src.cols || y >= src.rows) continue;
+      const list = this.extra.get(y);
+      if (list) list.push({ x, shape: flat[i + 2] });
+      else this.extra.set(y, [{ x, shape: flat[i + 2] }]);
+    }
+  }
+
   private cursorShown(offset: number): boolean {
     const c = this.source.cursor;
     return c.visible && offset === 0;
@@ -507,6 +541,14 @@ export class CanvasRenderer {
     // フォーカスが無いときは、点滅せず中抜きのブロックにする
     const solidBlock =
       cursorOn && cursor.shape === "block" && src.isFocused && blinkVisible;
+    // 追加のカーソル。主のカーソルの点滅に従う（主が見えなくても出る）
+    const extras = blinkVisible ? this.extra.get(y) : undefined;
+    const solidExtra = new Set<number>();
+    if (extras && src.isFocused) {
+      for (const e of extras) {
+        if (this.extraShape(e.shape) === "block") solidExtra.add(e.x);
+      }
+    }
 
     ctx.globalAlpha = 1;
     ctx.fillStyle = palette.background;
@@ -515,7 +557,12 @@ export class CanvasRenderer {
     // 下から順に: 背景色の下の画像、背景色、字の下の画像、選択範囲、字、字の上の画像
     this.drawImages(this.layers.under, y, offset);
     const n = Math.min(row.length, cols);
-    const colors = this.resolveRowColors(row.cells, n, solidBlock ? cursor.x : -1);
+    const colors = this.resolveRowColors(
+      row.cells,
+      n,
+      solidBlock ? cursor.x : -1,
+      solidExtra,
+    );
     this.fillBackgroundRuns(row.cells, colors, n, top);
     this.drawImages(this.layers.below, y, offset);
     this.fillSelection(y, top);
@@ -524,16 +571,84 @@ export class CanvasRenderer {
     this.drawImages(this.layers.above, y, offset);
 
     if (cursorOn && blinkVisible) this.drawCursorShape(cursor, row.cells, top);
+    if (extras) {
+      for (const e of extras) {
+        if (e.x >= cols || solidExtra.has(e.x)) continue;
+        this.drawExtraCursorShape(e, row.cells, colors, top);
+      }
+    }
+  }
+
+  /** 追加のカーソルの形（主のカーソルに従うものは、いまの主の形にする）。 */
+  private extraShape(shape: number): "block" | "underline" | "bar" {
+    return (
+      (["block", "underline", "bar"] as const)[shape] ??
+      this.source.cursor.shape
+    );
+  }
+
+  /** 追加のカーソルのブロックの、字の色と背景色。`fg`・`bg` はそのセルの色。 */
+  private extraBlockColors(fg: string, bg: string): [string, string] {
+    const { palette } = this.options;
+    const textWord = this.extraColors[0];
+    const cursorWord = this.extraColors[1];
+    const cursorKind = cursorWord >>> 24;
+    const textKind = textWord >>> 24;
+    // カーソルの色が反転のときは、字の色の指定を使わない
+    if (cursorKind === 3) return [bg, fg];
+    const cursorBg =
+      cursorKind === 0 ? palette.cursor : palette.resolve(cursorWord, true);
+    let text = palette.background;
+    if (textKind === 3) text = bg;
+    else if (textKind !== 0) text = palette.resolve(textWord, false);
+    return [text, cursorBg];
+  }
+
+  /** 追加のカーソルのうち、ブロックで塗らないもの（中抜き・下線・縦棒）を描く。 */
+  private drawExtraCursorShape(
+    e: { x: number; shape: number },
+    cells: Uint32Array,
+    colors: { fg: string }[],
+    top: number,
+  ): void {
+    const ctx = this.ctx;
+    const { palette } = this.options;
+    const word = this.extraColors[1];
+    const kind = word >>> 24;
+    const color =
+      kind === 0
+        ? palette.cursor
+        : kind === 3
+          ? (colors[e.x]?.fg ?? palette.cursor)
+          : palette.resolve(word, true);
+    const width = Math.max(1, cells[e.x * CELL_STRIDE + 1] || 1);
+    const left = e.x * this.cellW;
+    const w = width * this.cellW;
+    const t = this.lineThickness();
+    const shape = this.extraShape(e.shape);
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    if (!this.source.isFocused) {
+      // 中抜きのブロック
+      ctx.lineWidth = t;
+      ctx.strokeRect(left + t / 2, top + t / 2, w - t, this.cellH - t);
+    } else if (shape === "underline") {
+      ctx.fillRect(left, top + this.cellH - t, w, t);
+    } else if (shape === "bar") {
+      ctx.fillRect(left, top, t, this.cellH);
+    }
   }
 
   /**
    * 行のセルごとの前景色・背景色・属性を決める（反転を適用し、太字なら明るい色にする）。
-   * `blockX` 列は、ブロックカーソルの色にする（なければ -1）。
+   * `blockX` 列は、ブロックカーソルの色にする（なければ -1）。`extraBlocks` の列は、
+   * 追加のカーソルのブロックの色にする。
    */
   private resolveRowColors(
     cells: Uint32Array,
     n: number,
     blockX: number,
+    extraBlocks: ReadonlySet<number> = new Set(),
   ): { fg: string; bg: string; flags: number }[] {
     const { palette } = this.options;
     const colors: { fg: string; bg: string; flags: number }[] = new Array(n);
@@ -546,6 +661,8 @@ export class CanvasRenderer {
       if (x === blockX) {
         bg = palette.cursor;
         fg = palette.background;
+      } else if (extraBlocks.has(x)) {
+        [fg, bg] = this.extraBlockColors(fg, bg);
       }
       colors[x] = { fg, bg, flags };
     }
