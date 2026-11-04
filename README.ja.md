@@ -69,7 +69,7 @@ nix flake check      # 整形、cargo test、npm パッケージのビルドと�
 nix build .#npm      # .wasm と .d.ts を入れた npm の tarball
 ```
 
-決まりは [AGENTS.md](AGENTS.md) にあります。
+決まりは [AGENTS.md](AGENTS.md) にあります。crates.io と npm への公開は [RELEASING.md](RELEASING.md) を見てください。
 
 ## ライセンス
 

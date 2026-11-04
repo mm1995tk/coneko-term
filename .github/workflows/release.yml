@@ -1,0 +1,106 @@
+name: リリース
+
+# v0.1.0 の形のタグを push すると、crate を crates.io に、npm パッケージを npm に公開する。
+# 長く使えるトークンは置かない。どちらも trusted publishing（GitHub Actions の OIDC）で認証する。
+# 手順と、最初の 1 回だけ手で要ること（初回公開と trusted publisher の登録）は RELEASING.md を見よ。
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: 検査
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.3
+      - name: タグと版がそろっている
+        run: nix develop -c sh scripts/check-release-version.sh "$GITHUB_REF_NAME"
+      - name: nix flake check
+        run: nix flake check --print-build-logs
+
+  crates-io:
+    name: crates.io に公開
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # trusted publishing の OIDC トークン
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.3
+      - name: 公開済みか調べる
+        id: published
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          if curl -fsS -o /dev/null -A "coneko-term-release" "https://crates.io/api/v1/crates/coneko-term/${version}"; then
+            echo "coneko-term ${version} は crates.io に公開済み。飛ばす"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: rust-lang/crates-io-auth-action@v1.0.6
+        if: steps.published.outputs.skip != 'true'
+        id: auth
+      - name: cargo publish
+        if: steps.published.outputs.skip != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: nix develop -c cargo publish -p coneko-term --locked
+
+  npm:
+    name: npm に公開
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write # trusted publishing の OIDC トークン（provenance にも使う）
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.3
+      - name: tarball を作る（nix flake check で試したものと同じ）
+        run: nix build .#npm --out-link npm-package
+      - name: 公開済みか調べる
+        id: published
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          if nix develop -c npm view "coneko-term@${version}" version > /dev/null 2>&1; then
+            echo "coneko-term ${version} は npm に公開済み。飛ばす"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: npm publish
+        if: steps.published.outputs.skip != 'true'
+        run: |
+          # プレリリース（v0.2.0-rc.1 など）は latest にしない
+          case "$GITHUB_REF_NAME" in
+            *-*) tag=next ;;
+            *) tag=latest ;;
+          esac
+          nix develop -c npm publish ./npm-package/*.tgz --access public --provenance --tag "$tag"
+
+  github-release:
+    name: GitHub のリリースを作る
+    needs: [crates-io, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: リリースノートを作って公開
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$GITHUB_REF_NAME" in
+            *-*) flag=--prerelease ;;
+            *) flag= ;;
+          esac
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag $flag

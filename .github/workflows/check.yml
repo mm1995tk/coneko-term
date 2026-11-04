@@ -33,3 +33,19 @@ jobs:
         run: |
           nix fmt
           git diff --exit-code
+
+  # 公開の予行。tag を打つ前に、crates.io と npm が受け取れる形かを確かめる。
+  # release.yml と同じ手順で、公開だけしない。ネットワークが要るので nix flake check には入れない
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: cachix/install-nix-action@v31.11.3
+      - name: 版がそろっている
+        run: nix develop -c sh scripts/check-release-version.sh
+      - name: cargo publish --dry-run
+        run: nix develop -c cargo publish -p coneko-term --locked --dry-run
+      - name: npm publish --dry-run
+        run: |
+          nix build .#npm --out-link npm-package
+          nix develop -c npm publish ./npm-package/*.tgz --access public --dry-run
