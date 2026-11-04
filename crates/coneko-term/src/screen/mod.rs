@@ -334,6 +334,13 @@ impl Screen {
         self.buf_mut().scroll_down(t, b, n, &pen);
     }
 
+    /// スクロール範囲を `n` 行ぶん下へ送り、空きにスクロールバックの行を戻す（`CSI n + T`）。
+    /// 代替画面にはスクロールバックが無いので、`scroll_down` と同じ。
+    pub fn unscroll(&mut self, n: usize) {
+        let (pen, (t, b)) = (self.pen, self.scroll_region());
+        self.buf_mut().unscroll(t, b, n, &pen);
+    }
+
     /// スクロール範囲を `n` 行ぶん上へ送る。`scroll_up` と違い、押し出した行はスクロールバックに
     /// 残さない（SU。xterm.js と同じ）。
     pub fn scroll_up_discard(&mut self, n: usize) {

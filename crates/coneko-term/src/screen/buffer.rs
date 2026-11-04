@@ -291,6 +291,30 @@ impl Buffer {
         self.repair_sized(top, bottom);
     }
 
+    /// 範囲 `top..=bottom` を `n` 行ぶん下へ送り、上にできた空きにスクロールバックの最後の行から戻す
+    /// （kitty の unscrolling）。スクロールバックが足りない分は空の行。
+    pub fn unscroll(&mut self, top: usize, bottom: usize, n: usize, pen: &Attrs) {
+        let n = n.min(bottom - top + 1);
+        let erase = Self::erase_attrs(pen);
+        for _ in 0..n {
+            let sb = self.scrollback_len();
+            let (t, b) = (self.idx(top), self.idx(bottom));
+            self.lines.remove(b);
+            if sb > 0 {
+                let mut line = self.lines.remove(sb - 1).expect("scrollback line");
+                line.dirty = true;
+                self.lines.insert(sb - 1 + top, line);
+            } else {
+                self.lines.insert(t, Line::blank(self.cols, erase));
+            }
+        }
+        for y in top..=bottom {
+            self.line_mut(y);
+        }
+        self.repair_sized_top();
+        self.repair_sized(top, bottom);
+    }
+
     /// 1 行下へ（LF）。範囲の下端ならスクロールする。
     pub fn index(&mut self, pen: &Attrs) {
         self.cursor.pending_wrap = false;
