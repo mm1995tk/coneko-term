@@ -414,3 +414,28 @@ test("selection: selectionBackground is validated", () => {
   new Terminal({ theme: { selectionBackground: "#11223344" } }).dispose();
   new Terminal({ theme: { selectionBackground: "#abc" } }).dispose();
 });
+
+// ---- ポインターの形（OSC 22）
+
+test("pointer shape: set, push, pop and query follow OSC 22", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  assert.equal(t.pointerShape, undefined);
+  await write(t, "\x1b]22;pointer\x1b\\");
+  assert.equal(t.pointerShape, "pointer");
+  await write(t, "\x1b]22;>wait\x1b\\");
+  assert.equal(t.pointerShape, "wait");
+  await write(t, "\x1b]22;<\x1b\\");
+  assert.equal(t.pointerShape, "pointer");
+  await write(t, "\x1b]22;?__current__\x1b\\\x1b]22;?pointer,nope\x1b\\");
+  assert.equal(box.out.join(""), "\x1b]22;pointer\x1b\\\x1b]22;1,0\x1b\\");
+  await write(t, "\x1b]22;bogus\x1b\\");
+  assert.equal(t.pointerShape, "pointer");
+  // マウスの報告が有効でも無効でも効く
+  await write(t, "\x1b[?1000h\x1b]22;crosshair\x1b\\");
+  assert.equal(t.mouseReporting, true);
+  assert.equal(t.pointerShape, "crosshair");
+  t.reset();
+  assert.equal(t.pointerShape, undefined);
+  t.dispose();
+});

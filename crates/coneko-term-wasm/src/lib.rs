@@ -1105,6 +1105,11 @@ impl WasmTerminal {
         ]
     }
 
+    /// OSC 22 で決まった、いまのポインターの形（CSS の `cursor` の値）。決まっていなければ空。
+    pub fn pointer_shape(&self) -> Option<String> {
+        self.term.pointer_shape().map(str::to_owned)
+    }
+
     /// マウスの報告が有効か。
     pub fn mouse_reporting(&self) -> bool {
         self.term.mouse_reporting()
