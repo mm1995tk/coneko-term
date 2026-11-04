@@ -210,8 +210,9 @@ impl FileTransferError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FileTransferListing {
     /// クライアントの頼み（`ac=file`）の `fid`。ディレクトリを広げた項目は、頼みと同じ値。
+    /// `[0-9A-Za-z_:./@-]` の字だけであること（使えない字を含むと、答えの `fid` を出さない）。
     pub request_id: String,
-    /// この項目自身の `fid`（`st` に入る）。
+    /// この項目自身の `fid`（`st` に入る）。`[0-9A-Za-z_:./@-]` の字だけであること。
     pub entry_id: String,
     /// 絶対パス。
     pub name: String,
@@ -440,100 +441,114 @@ fn safe_id(s: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-fn parse(rest: &[u8]) -> Option<FileTransferEvent> {
-    let text = std::str::from_utf8(rest).ok()?;
-    let mut f = Fields::default();
-    for kv in text.split(';') {
-        let Some((k, v)) = kv.split_once('=') else {
-            continue;
-        };
-        match k {
-            "ac" => f.ac = v,
-            "zip" => f.zip = Some(v),
-            "ft" => f.ft = Some(v),
-            "tt" => f.tt = Some(v),
-            "id" => f.id = Some(v),
-            "fid" => f.fid = Some(v),
-            "pw" => f.pw = Some(v),
-            "q" => f.q = Some(v),
-            "mod" => f.mtime = Some(v),
-            "prm" => f.prm = Some(v),
-            "sz" => f.sz = Some(v),
-            "n" => f.n = Some(v),
-            "pr" => f.pr = Some(v),
-            "d" => f.d = Some(v),
-            _ => {}
+impl<'a> Fields<'a> {
+    /// `鍵=値 ; …` を読む。知らない鍵は無視する。
+    fn parse(text: &'a str) -> Fields<'a> {
+        let mut f = Fields::default();
+        for kv in text.split(';') {
+            let Some((k, v)) = kv.split_once('=') else {
+                continue;
+            };
+            match k {
+                "ac" => f.ac = v,
+                "zip" => f.zip = Some(v),
+                "ft" => f.ft = Some(v),
+                "tt" => f.tt = Some(v),
+                "id" => f.id = Some(v),
+                "fid" => f.fid = Some(v),
+                "pw" => f.pw = Some(v),
+                "q" => f.q = Some(v),
+                "mod" => f.mtime = Some(v),
+                "prm" => f.prm = Some(v),
+                "sz" => f.sz = Some(v),
+                "n" => f.n = Some(v),
+                "pr" => f.pr = Some(v),
+                "d" => f.d = Some(v),
+                _ => {}
+            }
         }
+        f
     }
-    let id = safe_id(f.id)?;
-    match f.ac {
-        "send" | "receive" => {
-            let bypass = match f.pw {
-                None => None,
-                Some(pw) => Some(String::from_utf8(decode_base64(pw.as_bytes())?).ok()?),
-            };
-            let quiet = match f.q {
-                None => 0,
-                Some("0") => 0,
-                Some("1") => 1,
-                Some("2") => 2,
-                Some(_) => return None,
-            };
-            let start = FileTransferStart {
-                id,
-                bypass,
-                quiet,
-                paths: opt_unsigned(f.sz)?,
-            };
-            Some(if f.ac == "send" {
-                FileTransferEvent::Send(start)
-            } else {
-                FileTransferEvent::Receive(start)
-            })
-        }
-        "file" => {
-            let name = String::from_utf8(decode_base64(f.n?.as_bytes())?).ok()?;
-            let parent = match f.pr {
-                None => None,
-                Some(p) => Some(safe_id(Some(p))?),
-            };
-            Some(FileTransferEvent::File(FileTransferFile {
-                id,
-                file_id: safe_id(f.fid)?,
-                name,
-                file_type: match f.ft {
-                    None => FileType::Regular,
-                    Some(s) => FileType::parse(s)?,
-                },
-                compression: match f.zip {
-                    None | Some("none") => FileCompression::None,
-                    Some("zlib") => FileCompression::Zlib,
-                    Some(_) => return None,
-                },
-                transmission: match f.tt {
-                    None | Some("simple") => FileTransmission::Simple,
-                    Some("rsync") => FileTransmission::Rsync,
-                    Some(_) => return None,
-                },
-                mtime: opt_int(f.mtime)?,
-                permissions: opt_int(f.prm)?.and_then(|n| u32::try_from(n).ok()),
-                size: opt_unsigned(f.sz)?,
-                parent,
-            }))
-        }
-        "data" | "end_data" => Some(FileTransferEvent::Data(FileTransferData {
+
+    /// `ac=send`・`ac=receive`。
+    fn start(&self, id: String) -> Option<FileTransferStart> {
+        let bypass = match self.pw {
+            None => None,
+            Some(pw) => Some(String::from_utf8(decode_base64(pw.as_bytes())?).ok()?),
+        };
+        let quiet = match self.q {
+            None | Some("0") => 0,
+            Some("1") => 1,
+            Some("2") => 2,
+            Some(_) => return None,
+        };
+        Some(FileTransferStart {
             id,
-            file_id: safe_id(f.fid)?,
-            data: match f.d {
+            bypass,
+            quiet,
+            paths: opt_unsigned(self.sz)?,
+        })
+    }
+
+    /// `ac=file`。
+    fn file(&self, id: String) -> Option<FileTransferFile> {
+        let name = String::from_utf8(decode_base64(self.n?.as_bytes())?).ok()?;
+        let parent = match self.pr {
+            None => None,
+            Some(p) => Some(safe_id(Some(p))?),
+        };
+        Some(FileTransferFile {
+            id,
+            file_id: safe_id(self.fid)?,
+            name,
+            file_type: match self.ft {
+                None => FileType::Regular,
+                Some(s) => FileType::parse(s)?,
+            },
+            compression: match self.zip {
+                None | Some("none") => FileCompression::None,
+                Some("zlib") => FileCompression::Zlib,
+                Some(_) => return None,
+            },
+            transmission: match self.tt {
+                None | Some("simple") => FileTransmission::Simple,
+                Some("rsync") => FileTransmission::Rsync,
+                Some(_) => return None,
+            },
+            mtime: opt_int(self.mtime)?,
+            permissions: opt_int(self.prm)?.and_then(|n| u32::try_from(n).ok()),
+            size: opt_unsigned(self.sz)?,
+            parent,
+        })
+    }
+
+    /// `ac=data`・`ac=end_data`。
+    fn data(&self, id: String, end: bool) -> Option<FileTransferData> {
+        Some(FileTransferData {
+            id,
+            file_id: safe_id(self.fid)?,
+            data: match self.d {
                 None => Vec::new(),
                 Some(d) => decode_base64(d.as_bytes())?,
             },
-            end: f.ac == "end_data",
-        })),
-        "finish" => Some(FileTransferEvent::Finish { id }),
-        "cancel" => Some(FileTransferEvent::Cancel { id }),
-        _ => None,
+            end,
+        })
     }
+}
+
+fn parse(rest: &[u8]) -> Option<FileTransferEvent> {
+    let f = Fields::parse(std::str::from_utf8(rest).ok()?);
+    let id = safe_id(f.id)?;
+    Some(match f.ac {
+        "send" => FileTransferEvent::Send(f.start(id)?),
+        "receive" => FileTransferEvent::Receive(f.start(id)?),
+        "file" => FileTransferEvent::File(f.file(id)?),
+        "data" => FileTransferEvent::Data(f.data(id, false)?),
+        "end_data" => FileTransferEvent::Data(f.data(id, true)?),
+        "finish" => FileTransferEvent::Finish { id },
+        "cancel" => FileTransferEvent::Cancel { id },
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -878,6 +893,20 @@ mod tests {
         assert!(t.take_events().is_empty());
         t.write(b"ish;id=z\x07");
         assert_eq!(t.take_events().len(), 1);
+    }
+
+    #[test]
+    fn old_sessions_are_forgotten_past_the_cap() {
+        let mut t = Terminal::new(2, 10);
+        let mut input = String::new();
+        for i in 0..=MAX_SESSIONS {
+            input.push_str(&osc(&format!("ac=send;id=s{i};q=2")));
+        }
+        t.write(input.as_bytes());
+        t.file_transfer_ok("s0", None, None, None);
+        assert!(!out(&mut t).is_empty());
+        t.file_transfer_ok("s1", None, None, None);
+        assert!(out(&mut t).is_empty());
     }
 
     #[test]

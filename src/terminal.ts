@@ -560,6 +560,7 @@ export type FileTransferEvent =
 /** 受け取りの一覧の 1 項目。 */
 export interface FileTransferListing {
   /** クライアントの頼み（`file`）の `fileId`。ディレクトリを広げた項目も、頼みと同じ値。 */
+  // `requestId` と `entryId`、`parent` は safe_string（`[0-9A-Za-z_:./@-]`）の字だけにすること。
   requestId: string;
   /** この項目自身の `fid`。 */
   entryId: string;
@@ -1357,11 +1358,15 @@ export class Terminal {
   replyFileTransferError(
     id: string,
     error: FileTransferErrorName,
-    message = "",
-    fileId = "",
+    opts: { fileId?: string; message?: string } = {},
   ): void {
     if (this.disposed) return;
-    this.core.file_transfer_error(id, fileId, error, message);
+    this.core.file_transfer_error(
+      id,
+      opts.fileId ?? "",
+      error,
+      opts.message ?? "",
+    );
     this.flush();
   }
 

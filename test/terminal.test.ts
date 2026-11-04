@@ -562,7 +562,7 @@ test("file transfer (OSC 5113): a send session runs from start to finish", async
   t.replyFileTransferOk("s1");
   t.replyFileTransferStarted("s1", "f1");
   t.replyFileTransferOk("s1", { fileId: "f1", size: 3 });
-  t.replyFileTransferError("s1", "EIO", "bad", "f1");
+  t.replyFileTransferError("s1", "EIO", { fileId: "f1", message: "bad" });
   assert.equal(
     out.join(""),
     osc5113(`ac=status;id=s1;st=${b64("OK")}`) +
