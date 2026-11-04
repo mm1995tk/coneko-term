@@ -401,7 +401,8 @@ impl Terminal {
     /// 画面に置いてある画像の配置を、上の行から順に。今の画面（主画面か代替画面）のもので、
     /// スクロールバックの中のものも含む。
     pub fn placements(&self) -> Vec<PlacedImage> {
-        self.state
+        let mut out: Vec<PlacedImage> = self
+            .state
             .screen
             .placements()
             .into_iter()
@@ -409,7 +410,12 @@ impl Terminal {
                 row,
                 placement: p.clone(),
             })
-            .collect()
+            .collect();
+        out.extend(crate::graphics::derive_placeholders(
+            &self.state.graphics,
+            self.state.screen.rows_with_index(),
+        ));
+        out
     }
 
     /// セルの大きさ（画素。幅, 高さ）。

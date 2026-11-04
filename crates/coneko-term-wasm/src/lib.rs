@@ -37,7 +37,9 @@ pub const CELL_STRIDE: usize = 6;
 /// 4 から 7. 元の画像の使う部分の左端・上端・幅・高さ（画素。幅と高さが 0 なら端まで）。
 /// 8, 9. 左上のセルの中でのずれ（横・縦、画素）。10, 11. 使うセルの列数・行数。
 /// 12. 重ねる順（`z`）。13. 画素のまま置くなら 1、セルいっぱいに引き伸ばすなら 0。
-pub const PLACEMENT_STRIDE: usize = 14;
+/// 14, 15. 画素で決めた描く大きさ（幅・高さ）。0 なら 13 と `cols` x `rows` で決める
+/// （Unicode placeholder の配置が使う）。
+pub const PLACEMENT_STRIDE: usize = 16;
 
 /// クラスター（結合文字を含む書記素）のセルの字に立てるビット。残りのビットが `cluster(番号)` の番号。
 pub const CLUSTER_FLAG: u32 = 0x8000_0000;
@@ -632,6 +634,8 @@ impl WasmTerminal {
                 q.rows as f64,
                 q.z as f64,
                 q.native_size as u8 as f64,
+                q.dest_size.map_or(0, |d| d.0) as f64,
+                q.dest_size.map_or(0, |d| d.1) as f64,
             ]);
         }
         out
@@ -761,7 +765,7 @@ mod image_tests {
         // 行 0、ID 7、配置の番号 0、列 0、元の部分 (0, 0, 1, 2)、ずれ (0, 0)、2 列 1 行、z -1、引き伸ばし
         assert_eq!(
             p,
-            vec![0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, -1.0, 0.0]
+            vec![0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0, 1.0, -1.0, 0.0, 0.0, 0.0]
         );
         let serials = t.image_serials();
         assert_eq!(serials.len(), 2);

@@ -344,6 +344,7 @@ impl Graphics {
                         place_keys.placement_id(),
                         self.cell_size,
                     ) {
+                        Ok(placement) if place_keys.is_virtual() => self.add_virtual(placement),
                         Ok(placement) => self.effects.push(Effect::Place {
                             placement,
                             move_cursor: !place_keys.no_move(),

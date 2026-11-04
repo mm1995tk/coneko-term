@@ -9,7 +9,8 @@
 //! - 送り方（`t=`）は直接（`t=d`、既定）だけ。`t=f`・`t=t`・`t=s` には `EBADF` を返す。
 //!   coneko-term は OS のファイルにも共有メモリにも触らない。
 //! - 置く（`a=T`・`a=p`）と消す（`a=d`）は、次の「置く」「消す」の節。
-//! - 描く、Unicode placeholder、アニメーション、親子の配置（`P=`・`Q=`）は扱わない。
+//! - `U=1` の配置は画面に置かず、仮の配置として持つ。字（U+10EEEE）が引く。次の「Unicode placeholder」の節。
+//! - アニメーション、親子の配置（`P=`・`Q=`）は扱わない。
 //!   扱わない動作は捨てる。
 //!
 //! # 置く（配置）
@@ -43,6 +44,16 @@
 //! スクロールバックを含む画面全体の配置が対象で、そのほかは見えている画面（の一部でも
 //! 見えている配置）が対象。`d` が無いときは `a`。知らない値は何もしない。
 //!
+//! # Unicode placeholder
+//!
+//! `U=1` の `a=p`（`a=T` でもよい）は、画面に置かず、仮の配置（`c` x `r` セルの枠）として持つ。
+//! カーソルは動かない。U+10EEEE の字（前景色が画像の ID、下線の色が配置の番号、結合文字が行・列・
+//! ID の上位 8 ビット）は、ふつうの字としてセルに持ち、[`crate::Terminal::placements`] が読むたびに、
+//! 画像の該当する部分を描く配置（[`Placement::dest_size`] つき）にして返す。結合文字を省いたとき
+//! の推し量りは、仕様の 3 つの規則を左から順に当てる。画像は枠に縦横比を保って収め、中央に置く。
+//! 仮の配置は、同じ画像の同じ番号で置き直すと置き換わる。`d=i`・`d=n`（と大文字）で消え、画像が
+//! 消えても消える。ほかの `d=` は触らない。
+//!
 //! # 画素を読み解かない
 //!
 //! PNG（`f=100`）と zlib の圧縮（`o=z`）のデータは、ここでは読み解かず、base64 を戻した
@@ -59,10 +70,14 @@
 //!
 //! 返事は [`crate::Terminal::take_output`] の出口に入る。`i=` も `I=` も無い命令には返事をしない。
 
+mod diacritics;
 mod place;
+mod placeholder;
 mod protocol;
 
 pub(crate) use place::{DeleteSpec, DeleteTarget, Effect};
+pub(crate) use placeholder::derive as derive_placeholders;
+pub use placeholder::PLACEHOLDER;
 
 use std::collections::VecDeque;
 
@@ -121,6 +136,8 @@ pub(crate) struct Graphics {
     removed: Vec<u32>,
     /// 画面に頼む仕事。
     effects: Vec<Effect>,
+    /// 仮の配置（`U=1`）。画面には置かず、Unicode placeholder が引く。
+    virtuals: Vec<Placement>,
 }
 
 /// セルの大きさの既定（画素。幅, 高さ）。
@@ -156,6 +173,9 @@ pub struct Placement {
     /// `c` も `r` も無く、元の部分を拡大も縮小もせず（画素のまま）置くか。そうでなければ、
     /// `cols` x `rows` のセルいっぱいに引き伸ばして描く。
     pub native_size: bool,
+    /// 画素で決めた描く大きさ（幅, 高さ）。Unicode placeholder の配置が使う。`None` は
+    /// `native_size` と `cols` x `rows` で決める。
+    pub dest_size: Option<(u32, u32)>,
 }
 
 /// 画面に置いてある配置と、その位置。
@@ -182,6 +202,7 @@ impl Default for Graphics {
             cell_size: DEFAULT_CELL_SIZE,
             removed: Vec::new(),
             effects: Vec::new(),
+            virtuals: Vec::new(),
         }
     }
 }
@@ -218,6 +239,25 @@ impl Graphics {
         }
     }
 
+    /// 仮の配置を足す。同じ画像の同じ番号のものは置き換える。
+    pub(crate) fn add_virtual(&mut self, p: Placement) {
+        self.virtuals
+            .retain(|v| !(v.image_id == p.image_id && v.placement_id == p.placement_id));
+        self.virtuals.push(p);
+    }
+
+    /// 仮の配置があるか。
+    pub(crate) fn has_virtuals(&self) -> bool {
+        !self.virtuals.is_empty()
+    }
+
+    /// 画像 `image_id` の仮の配置。`placement_id` が 0 なら、その画像のどれでもよい（新しいもの）。
+    pub(crate) fn virtual_placement(&self, image_id: u32, placement_id: u32) -> Option<&Placement> {
+        self.virtuals.iter().rev().find(|v| {
+            v.image_id == image_id && (placement_id == 0 || v.placement_id == placement_id)
+        })
+    }
+
     pub(crate) fn take_removed(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.removed)
     }
@@ -236,6 +276,7 @@ impl Graphics {
         self.images.clear();
         self.bytes = 0;
         self.pending = None;
+        self.virtuals.clear();
     }
 
     fn evict_to(&mut self, limit: usize) {
@@ -244,6 +285,7 @@ impl Graphics {
                 Some(img) => {
                     self.bytes -= img.data.len();
                     self.removed.push(img.id);
+                    self.virtuals.retain(|v| v.image_id != img.id);
                 }
                 None => break,
             }
@@ -256,6 +298,7 @@ impl Graphics {
             if let Some(img) = self.images.remove(pos) {
                 self.bytes -= img.data.len();
                 self.removed.push(id);
+                self.virtuals.retain(|v| v.image_id != id);
             }
         }
     }
