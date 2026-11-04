@@ -11,7 +11,8 @@ pub const DISAMBIGUATE: u32 = 1;
 /// 思わせないため）。2・4・8・16 は #30。
 const SUPPORTED: u32 = DISAMBIGUATE;
 
-/// スタックの深さの上限。超えたら古いものを捨てる（kitty も 100）。
+/// スタックの深さの上限。超えたら古いものを捨てる。仕様は「適切な上限を置け」とだけ言い、
+/// 値は決めていない（kitty 本体は 8）。ここでは 100 にした。
 pub const MAX_DEPTH: usize = 100;
 
 /// フラグのスタック 1 つ分。

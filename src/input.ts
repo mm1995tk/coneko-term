@@ -276,7 +276,7 @@ export class KeyHandler {
       return true;
     }
     // xterm.js と同じく、Ctrl+C と Enter のあとは `textarea` に字をためない
-    if (result.key === "\x03" || result.key === "\r") this.textarea.value = "";
+    if (result.key === "\x03" || result.key === "\r" || result.key === "\x1b[99;5u") this.textarea.value = "";
 
     h.send(result.key);
     this.cancel(ev);
