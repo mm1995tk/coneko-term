@@ -215,3 +215,66 @@ test("write copies the buffer, and a disposed terminal throws clearly", async ()
   t.dispose();
   assert.throws(() => t.readRow(0), /disposed/);
 });
+
+test("notifications (OSC 99): chunks make one event, replies go to onData", async () => {
+  const t = new Terminal();
+  const got: unknown[] = [];
+  t.onNotification((n) => got.push(n));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  const closes: string[] = [];
+  t.onNotificationClose((id) => closes.push(id));
+  const queries: string[] = [];
+  t.onNotificationQuery((id) => queries.push(id));
+  const alive: string[] = [];
+  t.onNotificationAlive((id) => alive.push(id));
+
+  await write(
+    t,
+    "\x1b]99;i=1:d=0:u=2:a=report:c=1;Hello\x1b\\\x1b]99;i=1:p=body;This is a body\x1b\\",
+  );
+  assert.deepEqual(got, [
+    {
+      id: "1",
+      title: "Hello",
+      body: "This is a body",
+      urgency: 2,
+      actions: { focus: true, report: true },
+      when: "always",
+      reportClose: true,
+      appName: undefined,
+      types: [],
+      timeout: undefined,
+      sound: undefined,
+      iconNames: [],
+      iconCacheId: undefined,
+      buttons: [],
+    },
+  ]);
+
+  await write(t, "\x1b]99;i=1:p=close;\x1b\\\x1b]99;i=q:p=?;\x1b\\\x1b]99;p=alive;\x1b\\");
+  assert.deepEqual([closes, queries, alive], [["1"], ["q"], [""]]);
+
+  t.notificationActivated("1");
+  t.notificationActivated("1", 2);
+  t.notificationClosed("1");
+  t.replyNotificationQuery("q");
+  t.replyNotificationAlive("", ["1", "2"]);
+  assert.deepEqual(out, [
+    "\x1b]99;i=1;\x1b\\",
+    "\x1b]99;i=1;2\x1b\\",
+    "\x1b]99;i=1:p=close;\x1b\\",
+    "\x1b]99;i=q:p=?;a=focus,report:c=1:o=always,unfocused,invisible:p=title,body,?,close,alive:u=0,1,2\x1b\\",
+    "\x1b]99;p=alive;1,2\x1b\\",
+  ]);
+  t.dispose();
+});
+
+test("notifications without a listener do nothing", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, "\x1b]99;;hi\x1b\\\x1b]99;i=q:p=?;\x1b\\");
+  assert.deepEqual(out, []);
+  t.dispose();
+});
