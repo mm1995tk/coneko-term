@@ -23,7 +23,7 @@ import {
 } from "./renderer.js";
 
 /** セル 1 つが使う `u32` の数。`RowView.cells` の並びは README を参照。 */
-export const CELL_STRIDE = 6;
+export const CELL_STRIDE = 7;
 
 /** セルの字（並びの 0 番目）にこのビットが立っていたら、残りのビットが `RowView.cluster` の番号。 */
 export const CLUSTER_FLAG = 0x8000_0000;
@@ -636,7 +636,10 @@ export interface CursorState {
 /**
  * 1 行ぶんのセル。`cells` は WASM のメモリの上の見え方で、次に `readRow` などを呼ぶか
  * 書き込みで画面が変わるまでしか使えない。セルの並びは `CELL_STRIDE` 個ずつ:
- * 字、幅、前景色、背景色、属性と下線の形、下線の色。
+ * 字、幅、前景色、背景色、属性と下線の形、下線の色、複数のセルにまたがる字の印。
+ * 複数のセルにまたがる字のセルは、字が 0、幅が 1。印は、下位 16 ビットが `sized` の番号 + 1
+ * （0 ならそうではない）、ビット 16 から 23 が四角の左上から右へ何セル目か、ビット 24 から 31 が
+ * 下へ何セル目か。
  */
 export interface RowView {
   /** セルの数。 */
@@ -647,6 +650,28 @@ export interface RowView {
   readonly wrapped: boolean;
   /** `CLUSTER_FLAG` つきの字の番号から、書記素を引く。 */
   cluster(index: number): string;
+  /**
+   * 複数のセルにまたがる字（OSC 66）の四角。番号は、セルの並びの 6 番目の下位 16 ビットから 1 を引いたもの。
+   */
+  sized(index: number): SizedInfo;
+}
+
+/** 複数のセルにまたがる字（kitty の text sizing、OSC 66）の四角。 */
+export interface SizedInfo {
+  /** 字。 */
+  readonly text: string;
+  /** 四角の幅（セルの数）。 */
+  readonly cols: number;
+  /** 大きさ `s`。四角の高さ（セルの数）でもある。 */
+  readonly scale: number;
+  /** 分数の大きさの分子。 */
+  readonly numerator: number;
+  /** 分数の大きさの分母（0 なら分数の大きさは無い）。 */
+  readonly denominator: number;
+  /** 縦の寄せ方（0 上、1 下、2 中央）。分数の大きさのときだけ効く。 */
+  readonly vertical: number;
+  /** 横の寄せ方（0 左、1 右、2 中央）。分数の大きさのときだけ効く。 */
+  readonly horizontal: number;
 }
 
 const ANSI_NAMES = [
@@ -2089,6 +2114,12 @@ export class Terminal {
       const cp = row.cells[x * CELL_STRIDE];
       const width = row.cells[x * CELL_STRIDE + 1];
       if (width === 0) continue;
+      const mark = row.cells[x * CELL_STRIDE + 6];
+      if (mark & 0xffff) {
+        // 四角の左上だけが字を持つ
+        if (mark >>> 16 === 0) s += row.sized((mark & 0xffff) - 1).text;
+        continue;
+      }
       if (cp === 0) s += " ";
       else if (cp & CLUSTER_FLAG) s += row.cluster(cp & ~CLUSTER_FLAG);
       else s += String.fromCodePoint(cp);
@@ -2104,7 +2135,25 @@ export class Terminal {
       core.cells_ptr() as unknown as number,
       length * CELL_STRIDE,
     );
-    return { length, cells, wrapped, cluster: (i) => core.cluster(i) };
+    return {
+      length,
+      cells,
+      wrapped,
+      cluster: (i) => core.cluster(i),
+      sized: (i) => {
+        const [cols, scale, numerator, denominator, vertical, horizontal] =
+          core.sized_info(i);
+        return {
+          text: core.sized_text(i),
+          cols,
+          scale,
+          numerator,
+          denominator,
+          vertical,
+          horizontal,
+        };
+      },
+    };
   }
 
   // ---- 選択

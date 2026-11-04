@@ -1,10 +1,11 @@
 //! 1 枚分の画面（行の並びとカーソルなど）。主画面と代替画面で 1 つずつ持つ。
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::cell::{Attrs, Cell, Content};
+use super::cell::{Attrs, Cell, Content, SizedBlock, MAX_SCALE};
 use crate::graphics::Placement;
 
 mod reflow;
@@ -17,6 +18,8 @@ pub struct Line {
     pub(crate) dirty: bool,
     /// この行に左上のセルがある画像の配置。
     pub(crate) placements: Vec<Placement>,
+    /// 複数のセルにまたがる字のセルがあるかもしれない（無いときは偽が確か）。
+    pub(crate) sized: bool,
 }
 
 impl Line {
@@ -26,6 +29,7 @@ impl Line {
             wrapped: false,
             dirty: true,
             placements: Vec::new(),
+            sized: false,
         }
     }
 
@@ -54,7 +58,7 @@ impl Line {
         if self.cells[x].is_wide_tail() && x > 0 {
             self.cells[x - 1] = Cell::default();
         }
-        if self.cells[x].width == 2 && x + 1 < self.cells.len() {
+        if self.cells[x].is_wide() && x + 1 < self.cells.len() {
             self.cells[x + 1] = Cell::default();
         }
     }
@@ -72,10 +76,10 @@ impl Line {
         let n = self.cells.len();
         for i in 0..n {
             let c = &self.cells[i];
-            let orphan = if c.width == 2 {
+            let orphan = if c.is_wide() {
                 !(i + 1 < n && self.cells[i + 1].is_wide_tail())
             } else if c.is_wide_tail() {
-                !(i > 0 && self.cells[i - 1].width == 2)
+                !(i > 0 && self.cells[i - 1].is_wide())
             } else {
                 false
             };
@@ -90,7 +94,7 @@ impl Line {
         self.cells.resize(cols, Cell::default());
         // 切り詰めて全角の字の右半分だけが消えたら、左半分も消す
         if let Some(last) = self.cells.last_mut() {
-            if last.width == 2 {
+            if last.is_wide() {
                 *last = Cell::default();
             }
         }
@@ -259,6 +263,7 @@ impl Buffer {
                     self.lines.pop_front();
                     self.trimmed += 1;
                 }
+                self.repair_sized_top();
             } else {
                 let (t, b) = (self.idx(top), self.idx(bottom));
                 self.lines.remove(t);
@@ -268,6 +273,7 @@ impl Buffer {
         for y in top..=bottom {
             self.line_mut(y);
         }
+        self.repair_sized(top, bottom);
     }
 
     /// 範囲 `top..=bottom` を `n` 行ぶん下へ送る。
@@ -282,6 +288,7 @@ impl Buffer {
         for y in top..=bottom {
             self.line_mut(y);
         }
+        self.repair_sized(top, bottom);
     }
 
     /// 1 行下へ（LF）。範囲の下端ならスクロールする。
@@ -332,6 +339,9 @@ impl Buffer {
             return;
         };
         let (y, cols) = (self.cursor.y, self.cols);
+        if self.line(y).cells[tx].is_sized() {
+            return;
+        }
         let line = self.line_mut(y);
         line.cells[tx].push_char(c);
         // 絵文字の異体字選択子などで、字が 2 セルぶんになるときは右へ広げる
@@ -373,6 +383,7 @@ impl Buffer {
                 self.cursor.pending_wrap = false;
             }
         }
+        self.skip_block_tails(pen);
         if width == 2 && self.cursor.x + 1 >= self.cols {
             // 行末に全角の字が入りきらない（xterm.js と同じ）
             if self.cols < 2 {
@@ -380,20 +391,19 @@ impl Buffer {
             }
             if wraparound {
                 let (x, y) = (self.cursor.x, self.cursor.y);
-                let line = self.line_mut(y);
-                line.clear_overlap(x);
-                line.cells[x] = Cell::default();
+                self.prepare_overwrite(y, x);
+                self.line_mut(y).cells[x] = Cell::default();
                 self.wrap_to_next_line(pen);
             } else {
                 self.cursor.x = self.cols - 2;
             }
         }
         let (x, y) = (self.cursor.x, self.cursor.y);
-        let line = self.line_mut(y);
-        line.clear_overlap(x);
+        self.prepare_overwrite(y, x);
         if width == 2 {
-            line.clear_overlap(x + 1);
+            self.prepare_overwrite(y, x + 1);
         }
+        let line = self.line_mut(y);
         line.cells[x] = Cell {
             content: Content::Char(c),
             width: width as u8,
@@ -410,6 +420,260 @@ impl Buffer {
         }
     }
 
+    // ---- 複数のセルにまたがる字（OSC 66） ----
+
+    /// 行 `y` の `x` のセルを上書きする前の後始末。複数のセルにまたがる字なら全体を消し、
+    /// 全角の字なら相方を消す。
+    fn prepare_overwrite(&mut self, y: usize, x: usize) {
+        if self.line(y).sized {
+            self.clear_sized_at(y, x);
+        }
+        self.line_mut(y).clear_overlap(x);
+    }
+
+    /// 行 `y` の `x` 列から右に、複数のセルにまたがる字があれば全体を消す。
+    fn clear_sized_from(&mut self, y: usize, x: usize) {
+        if self.line(y).sized {
+            for x in x..self.cols {
+                let tall = matches!(&self.line(y).cells[x].content,
+                    Content::Sized { block, .. } if block.scale > 1);
+                if tall {
+                    self.clear_sized_at(y, x);
+                }
+            }
+        }
+    }
+
+    /// 行 `y` の `x` のセルが複数のセルにまたがる字の一部なら、その字を全部のセルから消す。
+    fn clear_sized_at(&mut self, y: usize, x: usize) {
+        let i = self.idx(y);
+        self.clear_sized_abs(i, x);
+    }
+
+    /// `lines` の `i` 番目の行の `x` のセルについて `clear_sized_at` と同じことをする。
+    fn clear_sized_abs(&mut self, i: usize, x: usize) {
+        let Content::Sized { block, dx, dy } = &self.lines[i].cells[x].content else {
+            return;
+        };
+        let block = Arc::clone(block);
+        let oi = i as isize - isize::from(*dy);
+        let ox = x as isize - isize::from(*dx);
+        for r in 0..isize::from(block.scale) {
+            for c in 0..isize::from(block.cols) {
+                let (li, cx) = (oi + r, ox + c);
+                if li < 0 || cx < 0 || li as usize >= self.lines.len() {
+                    continue;
+                }
+                let line = &mut self.lines[li as usize];
+                let Some(cell) = line.cells.get_mut(cx as usize) else {
+                    continue;
+                };
+                if matches!(&cell.content, Content::Sized { block: b, .. } if Arc::ptr_eq(b, &block))
+                {
+                    *cell = Cell::default();
+                    line.dirty = true;
+                }
+            }
+        }
+    }
+
+    /// カーソルが、複数のセルにまたがる字の 2 行目より下の行の上にあるとき、その行のぶんを
+    /// 飛び越える（OSC 66 の仕様。DECAWM に関わらず、行末まで飛び越えたら折り返す）。
+    fn skip_block_tails(&mut self, pen: &Attrs) {
+        // 1 回ごとに右へ進むか次の行へ移るので終わる。念のための上限。
+        for _ in 0..self.cols * usize::from(MAX_SCALE) {
+            let (x, y) = (self.cursor.x, self.cursor.y);
+            if self.cursor.pending_wrap || !self.line(y).sized {
+                return;
+            }
+            let Content::Sized { block, dx, dy } = &self.line(y).cells[x].content else {
+                return;
+            };
+            if *dy == 0 {
+                return;
+            }
+            let nx = x + usize::from(block.cols - dx);
+            if nx < self.cols {
+                self.cursor.x = nx;
+            } else {
+                self.cursor.x = self.cols - 1;
+                self.cursor.pending_wrap = true;
+                self.wrap_to_next_line(pen);
+            }
+        }
+    }
+
+    /// 複数のセルにまたがる字を、カーソルの位置に書く。入りきらない字は捨てる。
+    /// 書いたあと、カーソルは同じ行の右へ動く。
+    pub fn print_sized(&mut self, block: SizedBlock, pen: &Attrs, wraparound: bool) {
+        let (cols, rows) = (usize::from(block.cols), usize::from(block.scale));
+        if cols == 0 || cols > self.cols || rows > self.rows {
+            return;
+        }
+        if self.cursor.pending_wrap {
+            if wraparound {
+                self.wrap_to_next_line(pen);
+            } else {
+                self.cursor.pending_wrap = false;
+            }
+        }
+        self.skip_block_tails(pen);
+        if self.cursor.x + cols > self.cols {
+            if wraparound {
+                self.wrap_to_next_line(pen);
+                self.skip_block_tails(pen);
+            }
+            self.cursor.x = self.cursor.x.min(self.cols - cols);
+        }
+        // 下に収まらなければ、範囲をスクロールして場所を作る
+        let y = self.cursor.y;
+        let (top, bottom) = if (self.scroll_top..=self.scroll_bottom).contains(&y) {
+            (self.scroll_top, self.scroll_bottom)
+        } else {
+            (0, self.rows - 1)
+        };
+        if y + rows - 1 > bottom {
+            if rows > bottom - top + 1 {
+                return;
+            }
+            let n = y + rows - 1 - bottom;
+            self.scroll_up(top, bottom, n, pen);
+            self.cursor.y -= n;
+        }
+        let (x0, y0) = (self.cursor.x, self.cursor.y);
+        let block = Arc::new(block);
+        for r in 0..rows {
+            for c in 0..cols {
+                self.prepare_overwrite(y0 + r, x0 + c);
+            }
+            let line = self.line_mut(y0 + r);
+            line.sized = true;
+            for c in 0..cols {
+                line.cells[x0 + c] = Cell {
+                    content: Content::Sized {
+                        block: Arc::clone(&block),
+                        dx: c as u8,
+                        dy: r as u8,
+                    },
+                    width: if r == 0 && c == 0 { cols as u8 } else { 0 },
+                    attrs: *pen,
+                };
+            }
+        }
+        if x0 + cols >= self.cols {
+            self.cursor.x = self.cols - 1;
+            self.cursor.pending_wrap = true;
+        } else {
+            self.cursor.x = x0 + cols;
+        }
+    }
+
+    /// `top..=bottom` の行（見えている画面の行番号）とその近くで、欠けた複数のセルにまたがる字を
+    /// 消す。スクロールや行の挿入・削除などで四角が切れたときに呼ぶ。
+    fn repair_sized(&mut self, top: usize, bottom: usize) {
+        let lo = self.idx(top).saturating_sub(usize::from(MAX_SCALE));
+        let hi = (self.idx(bottom) + usize::from(MAX_SCALE)).min(self.lines.len() - 1);
+        self.repair_sized_abs(lo, hi);
+    }
+
+    /// 行 `y` の、切れた 1 行の四角を消す（ICH・DCH のあと）。
+    fn repair_line_sized(&mut self, y: usize) {
+        let i = self.idx(y);
+        self.repair_sized_abs(i, i);
+    }
+
+    /// 先頭の行を捨てて、四角の上の行だけがなくなったかもしれないとき、残りの欠片を消す。
+    fn repair_sized_top(&mut self) {
+        let hi = usize::from(MAX_SCALE).min(self.lines.len() - 1);
+        self.repair_sized_abs(0, hi);
+    }
+
+    fn repair_sized_abs(&mut self, lo: usize, hi: usize) {
+        for i in lo..=hi {
+            if !self.lines[i].sized {
+                continue;
+            }
+            let mut any = false;
+            for x in 0..self.cols.min(self.lines[i].cells.len()) {
+                if self.lines[i].cells[x].is_sized() {
+                    if self.sized_intact(i, x) {
+                        any = true;
+                    } else {
+                        self.clear_sized_abs(i, x);
+                        // 同じ行の隣のセルも消えているかもしれない
+                    }
+                }
+            }
+            self.lines[i].sized = any;
+        }
+    }
+
+    /// `lines` の `i` 番目の行の `x` のセルが、欠けていない四角の一部か。
+    fn sized_intact(&self, i: usize, x: usize) -> bool {
+        let Content::Sized { block, dx, dy } = &self.lines[i].cells[x].content else {
+            return true;
+        };
+        let (oi, ox) = (i as isize - isize::from(*dy), x as isize - isize::from(*dx));
+        let at = |r: isize, c: isize| -> Option<&Content> {
+            let (li, cx) = (oi + r, ox + c);
+            if li < 0 || cx < 0 {
+                return None;
+            }
+            self.lines
+                .get(li as usize)?
+                .cells
+                .get(cx as usize)
+                .map(|cell| &cell.content)
+        };
+        let ok = |r: isize, c: isize| {
+            matches!(at(r, c), Some(Content::Sized { block: b, dx, dy })
+                if Arc::ptr_eq(b, block) && isize::from(*dx) == c && isize::from(*dy) == r)
+        };
+        if *dx == 0 && *dy == 0 {
+            (0..isize::from(block.scale)).all(|r| (0..isize::from(block.cols)).all(|c| ok(r, c)))
+        } else {
+            ok(0, 0)
+        }
+    }
+
+    /// 複数のセルにまたがる字を、ふつうの大きさの字に戻す。列の数を変えるときに、四角が組み直しで
+    /// 崩れないよう先に呼ぶ。字は左上のセルに残し、ほかのセルは空にする。
+    fn degrade_sized(&mut self) {
+        for line in &mut self.lines {
+            if !line.sized {
+                continue;
+            }
+            line.sized = false;
+            for x in 0..line.cells.len() {
+                let Content::Sized { block, dx, dy } = line.cells[x].content.clone() else {
+                    continue;
+                };
+                let attrs = line.cells[x].attrs;
+                if dx != 0 || dy != 0 {
+                    line.cells[x] = Cell::blank(attrs);
+                    continue;
+                }
+                let width = UnicodeWidthStr::width(&*block.text)
+                    .clamp(1, 2)
+                    .min(usize::from(block.cols));
+                let mut chars = block.text.chars();
+                let content = match (chars.next(), chars.next()) {
+                    (Some(c), None) => Content::Char(c),
+                    _ => Content::Cluster(block.text.clone()),
+                };
+                line.cells[x] = Cell {
+                    content,
+                    width: width as u8,
+                    attrs,
+                };
+                if width == 2 && x + 1 < line.cells.len() {
+                    line.cells[x + 1] = Cell::wide_tail(attrs);
+                }
+            }
+            line.dirty = true;
+        }
+    }
+
     /// 行 `y` の `x0..x1` のセルを消す。背景色は `pen` のものを使う。
     pub fn erase_cells(&mut self, y: usize, x0: usize, x1: usize, pen: &Attrs) {
         let x1 = x1.min(self.cols);
@@ -417,6 +681,11 @@ impl Buffer {
             return;
         }
         let erase = Self::erase_attrs(pen);
+        if self.line(y).sized {
+            for x in x0..x1 {
+                self.clear_sized_at(y, x);
+            }
+        }
         let line = self.line_mut(y);
         line.clear_overlap(x0);
         line.clear_overlap(x1 - 1);
@@ -434,6 +703,7 @@ impl Buffer {
         let n = n.min(cols - x);
         let erase = Self::erase_attrs(pen);
         self.cursor.pending_wrap = false;
+        self.clear_sized_from(y, x);
         let line = self.line_mut(y);
         line.split_wide_at(x);
         line.cells.truncate(cols - n);
@@ -441,6 +711,7 @@ impl Buffer {
             line.cells.insert(x, Cell::blank(erase));
         }
         line.fix_wide();
+        self.repair_line_sized(y);
     }
 
     /// カーソルの位置から `n` 個のセルを消し、右のセルを詰める（DCH）。
@@ -449,11 +720,13 @@ impl Buffer {
         let n = n.min(cols - x);
         let erase = Self::erase_attrs(pen);
         self.cursor.pending_wrap = false;
+        self.clear_sized_from(y, x);
         let line = self.line_mut(y);
         line.split_wide_at(x);
         line.cells.drain(x..x + n);
         line.cells.resize(cols, Cell::blank(erase));
         line.fix_wide();
+        self.repair_line_sized(y);
     }
 
     /// 全部のセルを `c` で埋める（DECALN）。
@@ -469,6 +742,7 @@ impl Buffer {
             }
             line.wrapped = false;
         }
+        self.repair_sized(0, self.rows - 1);
     }
 
     /// スクロールバックを捨てる。
@@ -476,6 +750,7 @@ impl Buffer {
         let n = self.scrollback_len();
         self.lines.drain(..n);
         self.trimmed += n as u64;
+        self.repair_sized_top();
     }
 
     /// 大きさを変える。主画面は折り返した行を組み直す（`reflow`）。代替画面は組み直さず、はみ出した
@@ -484,6 +759,7 @@ impl Buffer {
         self.resize_rows(rows);
         let mut reflowed = false;
         if cols != self.cols {
+            self.degrade_sized();
             if self.reflow_enabled {
                 self.reflow(cols);
                 reflowed = true;
@@ -501,6 +777,7 @@ impl Buffer {
                 self.tabs[old..].copy_from_slice(&defaults[old..]);
             }
         }
+        self.repair_sized_abs(0, self.lines.len() - 1);
         self.scroll_top = 0;
         self.scroll_bottom = rows - 1;
         self.cursor.y = self.cursor.y.min(rows - 1);

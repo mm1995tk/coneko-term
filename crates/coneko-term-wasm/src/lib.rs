@@ -31,7 +31,10 @@ pub fn version() -> String {
 /// 4. ビット 0 から 6 が属性（太字、薄字、斜体、点滅、反転、不可視、取り消し線）、
 ///    ビット 8 から 10 が下線の形（0 なし、1 1 本、2 2 本、3 波、4 点、5 破）。
 /// 5. 下線の色。
-pub const CELL_STRIDE: usize = 6;
+/// 6. 複数のセルにまたがる字（OSC 66）の一部なら、下位 16 ビットが `sized_info`・`sized_text` の番号 + 1、
+///    ビット 16 から 23 が四角の左上から右へ何セル目か、ビット 24 から 31 が下へ何セル目か。それ以外は 0。
+///    この字のセルは、字（0）を空にし、幅を 1 にして書き出す（四角は `sized_info` が持つ）。
+pub const CELL_STRIDE: usize = 7;
 
 /// 画像の配置 1 つが使う数（`WasmTerminal::placements` の並び）の数。並びは次のとおり:
 ///
@@ -583,6 +586,7 @@ pub struct WasmTerminal {
     term: Terminal,
     cells: Vec<u32>,
     clusters: Vec<String>,
+    sized: Vec<std::sync::Arc<coneko_term::screen::SizedBlock>>,
     events: std::collections::VecDeque<Event>,
     last_wrapped: bool,
     clipboard_reply_items: Vec<ClipboardItem>,
@@ -598,6 +602,7 @@ impl WasmTerminal {
             term: Terminal::with_screen(screen),
             cells: Vec::new(),
             clusters: Vec::new(),
+            sized: Vec::new(),
             events: Default::default(),
             last_wrapped: false,
             clipboard_reply_items: Vec::new(),
@@ -1236,6 +1241,35 @@ impl WasmTerminal {
     pub fn cluster(&self, index: usize) -> String {
         self.clusters.get(index).cloned().unwrap_or_default()
     }
+    /// 複数のセルにまたがる字（OSC 66）の字。番号は、セルの並びの 6 番目の下位 16 ビットから 1 を引いたもの。
+    pub fn sized_text(&self, index: usize) -> String {
+        self.sized
+            .get(index)
+            .map(|b| b.text.to_string())
+            .unwrap_or_default()
+    }
+
+    /// 複数のセルにまたがる字の四角。幅（セル）・高さ（セル、大きさ `s`）・分数の分子・分母・縦の寄せ方・
+    /// 横の寄せ方（0 上または左、1 下または右、2 中央）の 6 つ。
+    pub fn sized_info(&self, index: usize) -> Vec<u32> {
+        use coneko_term::screen::Align;
+        let code = |a: Align| match a {
+            Align::End => 1,
+            Align::Center => 2,
+            _ => 0,
+        };
+        self.sized.get(index).map_or_else(Vec::new, |b| {
+            vec![
+                u32::from(b.cols),
+                u32::from(b.scale),
+                u32::from(b.numerator),
+                u32::from(b.denominator),
+                code(b.vertical),
+                code(b.horizontal),
+            ]
+        })
+    }
+
     /// セルの大きさ（画素）を教える。`c`・`r` が無い画像の配置の大きさを決めるのに使う。
     pub fn set_cell_size(&mut self, width: u32, height: u32) {
         self.term.set_cell_size(width, height);
@@ -1419,6 +1453,7 @@ impl WasmTerminal {
     fn fill(&mut self, line: Option<&Line>) -> usize {
         self.cells.clear();
         self.clusters.clear();
+        self.sized.clear();
         self.last_wrapped = line.is_some_and(|l| l.is_wrapped());
         let Some(line) = line else { return 0 };
         for cell in line.cells() {
@@ -1431,11 +1466,26 @@ impl WasmTerminal {
         let cp = match &cell.content {
             Content::Empty | Content::WideTail => 0,
             Content::Char(c) => *c as u32,
+            Content::Sized { .. } => 0,
             Content::Cluster(s) => {
                 self.clusters.push(s.to_string());
                 CLUSTER_FLAG | (self.clusters.len() as u32 - 1)
             }
             _ => 0,
+        };
+        let (width, sized) = match &cell.content {
+            Content::Sized { block, dx, dy } => {
+                if !self
+                    .sized
+                    .last()
+                    .is_some_and(|b| std::sync::Arc::ptr_eq(b, block))
+                {
+                    self.sized.push(block.clone());
+                }
+                let n = (self.sized.len() as u32) & 0xFFFF;
+                (1, n | (u32::from(*dx) << 16) | (u32::from(*dy) << 24))
+            }
+            _ => (cell.width as u32, 0),
         };
         let f = cell.attrs.flags;
         use coneko_term::screen::cell::AttrFlags as F;
@@ -1453,11 +1503,12 @@ impl WasmTerminal {
         .fold(0u32, |acc, (i, b)| acc | ((f.contains(*b) as u32) << i));
         self.cells.extend_from_slice(&[
             cp,
-            cell.width as u32,
+            width,
             color_word(cell.attrs.fg),
             color_word(cell.attrs.bg),
             bits | (underline_code(cell.attrs.underline.style) << 8),
             color_word(cell.attrs.underline.color),
+            sized,
         ]);
     }
 }
@@ -1484,6 +1535,27 @@ mod tests {
         assert_eq!(t.cells[CELL_STRIDE + 4] & 1, 1);
         assert_eq!(t.cells[2 * CELL_STRIDE + 1], 0);
         assert!(t.take_dirty_rows().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sized_tests {
+    use super::*;
+
+    #[test]
+    fn sized_cells_are_exported() {
+        let mut t = WasmTerminal::new(3, 6, 10);
+        t.write(b"\x1b]66;s=2;Hi\x07");
+        assert_eq!(t.read_row(1), 6);
+        // 2 行目の 2 文字目の左から 2 番目（dx = 1, dy = 1）
+        let o = 3 * CELL_STRIDE;
+        assert_eq!(t.cells[o], 0);
+        assert_eq!(t.cells[o + 1], 1);
+        assert_eq!(t.cells[o + 6], 2 | (1 << 16) | (1 << 24));
+        assert_eq!(t.sized_text(1), "i");
+        assert_eq!(t.sized_info(1), vec![2, 2, 0, 0, 0, 0]);
+        assert_eq!(t.cells[4 * CELL_STRIDE + 6], 0);
+        assert!(t.sized_info(5).is_empty());
     }
 }
 

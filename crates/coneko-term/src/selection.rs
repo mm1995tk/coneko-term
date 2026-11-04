@@ -92,7 +92,7 @@ pub fn word_at(screen: &Screen, row: usize, col: usize, separators: &str) -> (Po
     let cell_at = |i: usize| &line(screen, first + i / cols).cells()[i % cols];
     // 全角の右半分は左半分として扱う
     let head = |mut i: usize| {
-        while i > 0 && cell_at(i).is_wide_tail() {
+        while i > 0 && (cell_at(i).is_wide_tail() || cell_at(i).is_sized_tail_right()) {
             i -= 1;
         }
         i
@@ -162,7 +162,7 @@ pub fn text(screen: &Screen, start: Pos, end: Pos) -> String {
         }
         for cell in &cells[c0.min(stop)..stop] {
             match cell.text() {
-                s if s.is_empty() && !cell.is_wide_tail() => out.push(' '),
+                s if s.is_empty() && !cell.is_continuation() => out.push(' '),
                 s => out.push_str(&s),
             }
         }

@@ -216,6 +216,7 @@ fn rewrap_group(
             wrapped: if r + 1 < nrows { true } else { last_wrapped },
             dirty: true,
             placements: std::mem::take(&mut moved[r]),
+            sized: false,
         });
     }
 }

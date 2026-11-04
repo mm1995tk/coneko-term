@@ -2,7 +2,7 @@
 //!
 //! シーケンスの解釈（#4）はここに含まない。ここにあるのは、解釈した結果から呼ぶ操作。
 //!
-//! あとで足すもの（セルに付く画像、複数のセルにまたがる字、複数のカーソル）のために、
+//! あとで足すもの（セルに付く画像、複数のカーソル）のために、
 //! `Content` などの enum は `#[non_exhaustive]`、カーソルは `Buffer` の 1 つの値にまとめてある。
 //!
 //! 左右のマージン（DECSLRM）は持たない。xterm.js 6.0.0 が対応していないため。
@@ -17,7 +17,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::graphics::Placement;
 use buffer::Buffer;
 pub use buffer::{Line, SavedCursor};
-pub use cell::{Attrs, Cell, Color, Content, Underline, UnderlineStyle};
+pub use cell::{Align, Attrs, Cell, Color, Content, SizedBlock, Underline, UnderlineStyle};
 
 /// スクロールバックの既定の行数。
 pub const DEFAULT_SCROLLBACK: usize = 5000;
@@ -206,6 +206,12 @@ impl Screen {
         }
         let (pen, wrap) = (self.pen, self.wraparound);
         self.buf_mut().print(c, width, &pen, wrap);
+    }
+
+    /// 複数のセルにまたがる字をカーソルの位置に書く（kitty の text sizing）。
+    pub fn print_sized(&mut self, block: SizedBlock) {
+        let (pen, wrap) = (self.pen, self.wraparound);
+        self.buf_mut().print_sized(block, &pen, wrap);
     }
 
     /// 文字列を 1 字ずつ `print` する。

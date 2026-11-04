@@ -2,7 +2,7 @@
 //! 画面（[`crate::screen`]）を動かす。
 //!
 //! 対応するシーケンスは xterm.js 6.0.0 の対応表で Supported のもののうち、OSC 8（リンク）を
-//! 除いたもの。知らないシーケンスは捨てる。
+//! 除いたもの、と kitty の OSC 66（text sizing）。知らないシーケンスは捨てる。
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
@@ -46,6 +46,9 @@ mod notification;
 mod sgr;
 #[cfg(test)]
 mod tests;
+mod text_sizing;
+#[cfg(test)]
+mod text_sizing_tests;
 mod theme;
 
 pub use clipboard::{
@@ -1323,6 +1326,20 @@ impl State {
                     self.events.push(ev);
                 }
             }
+            b"66" => match text_sizing::parse(&data[sep + 1..]) {
+                Some(text_sizing::Parsed::Plain(s)) => {
+                    for c in s.chars() {
+                        self.put(c);
+                    }
+                }
+                Some(text_sizing::Parsed::Blocks(blocks)) => {
+                    for block in blocks {
+                        self.screen.print_sized(block);
+                    }
+                    self.last_char = None;
+                }
+                None => {}
+            },
             b"72" => {
                 self.dnd.osc(&data[sep + 1..]);
                 self.flush_dnd();

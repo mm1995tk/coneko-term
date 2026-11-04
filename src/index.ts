@@ -54,6 +54,7 @@ export {
   type WheelInput,
   type Disposable,
   type RowView,
+  type SizedInfo,
   type TerminalOptions,
   type Theme,
 } from "./terminal.js";
