@@ -191,6 +191,52 @@ export interface NotificationSupport {
   types?: string[];
 }
 
+/** どちらのクリップボードか。 */
+export type ClipboardLocation = "clipboard" | "primary";
+
+/** クリップボードの、ある MIME の種類のデータ。 */
+export interface ClipboardItem {
+  /** MIME の種類（`text/plain` など）。 */
+  mime: string;
+  /** データ（base64 を戻したあとのバイト列）。 */
+  data: Uint8Array;
+}
+
+/** クリップボードへの書き込み（kitty の clipboard protocol、OSC 5522）。 */
+export interface ClipboardWriteRequest {
+  /** `id`。無ければ空文字列。`replyClipboardWrite` に渡す。 */
+  id: string;
+  /** 書き込み先。 */
+  location: ClipboardLocation;
+  /** MIME の種類ごとのデータ。別名（`walias`）は、別名ごとの項目に広げてある。 */
+  items: ClipboardItem[];
+}
+
+/** クリップボードの読み取りの頼み（OSC 5522 の `type=read`）。 */
+export interface ClipboardReadRequest {
+  /** `id`。無ければ空文字列。答えに渡す。 */
+  id: string;
+  /** 読む先。 */
+  location: ClipboardLocation;
+  /** 真なら、あるデータの種類の一覧がほしい（`mimes` は空）。許可を求めなくてよい（仕様）。 */
+  list: boolean;
+  /** 頼まれた MIME の種類（先に書いたものほど優先）。 */
+  mimes: string[];
+}
+
+/** 書き込みの答え。`DONE` は成功。 */
+export type ClipboardWriteStatus =
+  | "DONE"
+  | "EIO"
+  | "EINVAL"
+  | "ENOSYS"
+  | "EPERM"
+  | "EBUSY"
+  | "EFBIG";
+
+/** 読み取りを断る・失敗を知らせる答え。 */
+export type ClipboardReadError = "ENOSYS" | "EPERM" | "EBUSY";
+
 /** カーソルの状態。 */
 export interface CursorState {
   x: number;
@@ -349,6 +395,12 @@ export class Terminal {
   private notificationCloseListeners = new Set<(id: string) => void>();
   private notificationQueryListeners = new Set<(id: string) => void>();
   private notificationAliveListeners = new Set<(id: string) => void>();
+  private clipboardWriteListeners = new Set<
+    (r: ClipboardWriteRequest) => void
+  >();
+  private clipboardReadListeners = new Set<
+    (r: ClipboardReadRequest) => void
+  >();
   private oscHandlers = new Map<number, Set<(data: string) => void>>();
   private element?: HTMLElement;
   private cleanups: (() => void)[] = [];
@@ -576,6 +628,40 @@ export class Terminal {
           for (const l of [...set]) l(id);
           break;
         }
+        case 8: {
+          const id = this.decoder.decode(data);
+          if (this.clipboardWriteListeners.size === 0) {
+            // 聞き手がいなければ許さない。
+            this.core.clipboard_write_reply(id, "EPERM");
+            break;
+          }
+          const location: ClipboardLocation =
+            ev.clipboard_location === 1 ? "primary" : "clipboard";
+          const items = ev.clipboard_mimes.map((mime, i) => ({
+            mime,
+            data: ev.clipboard_item_data(i),
+          }));
+          for (const l of [...this.clipboardWriteListeners]) {
+            l({ id, location, items });
+          }
+          break;
+        }
+        case 9: {
+          const id = this.decoder.decode(data);
+          if (this.clipboardReadListeners.size === 0) {
+            // 聞き手がいなければ許さない。
+            this.core.clipboard_read_reply_error(id, "EPERM");
+            break;
+          }
+          const request: ClipboardReadRequest = {
+            id,
+            location: ev.clipboard_location === 1 ? "primary" : "clipboard",
+            list: ev.clipboard_list,
+            mimes: ev.clipboard_mimes,
+          };
+          for (const l of [...this.clipboardReadListeners]) l(request);
+          break;
+        }
         case 3: {
           const text = this.decoder.decode(data);
           for (const l of [...(this.oscHandlers.get(ev.ident) ?? [])]) l(text);
@@ -720,6 +806,56 @@ export class Terminal {
   replyNotificationAlive(id: string, ids: string[]): void {
     if (this.disposed) return;
     this.core.notification_alive_reply(id, ids);
+    this.flush();
+  }
+
+  /**
+   * クリップボードへの書き込み（kitty の clipboard protocol、OSC 5522）がそろった。分けて
+   * 送られたデータは、そろった時点で 1 回だけ呼ぶ。OS のクリップボードに書くかどうかは呼ぶ側が決め、
+   * どちらにしても `replyClipboardWrite` で答える。聞き手がいなければ、`EPERM` で答える。
+   */
+  onClipboardWrite(listener: (r: ClipboardWriteRequest) => void): Disposable {
+    return addListener(this.clipboardWriteListeners, listener);
+  }
+
+  /**
+   * クリップボードの読み取りの頼み（OSC 5522 の `type=read`）が来た。読ませるかどうかは呼ぶ側が決め、
+   * `replyClipboardReadTypes`・`replyClipboardReadData`・`replyClipboardReadError` のどれかで答える。
+   * 聞き手がいなければ、`EPERM`（許されない）で答える。
+   */
+  onClipboardRead(listener: (r: ClipboardReadRequest) => void): Disposable {
+    return addListener(this.clipboardReadListeners, listener);
+  }
+
+  /** 書き込み（`onClipboardWrite`）に答える。`status` の既定は成功（`DONE`）。 */
+  replyClipboardWrite(id: string, status: ClipboardWriteStatus = "DONE"): void {
+    if (this.disposed) return;
+    this.core.clipboard_write_reply(id, status);
+    this.flush();
+  }
+
+  /** 種類の一覧の頼み（`list` が真）に答える。`mimes` が空なら `ENOSYS`。 */
+  replyClipboardReadTypes(id: string, mimes: string[]): void {
+    if (this.disposed) return;
+    this.core.clipboard_read_reply_types(id, mimes);
+    this.flush();
+  }
+
+  /**
+   * データの頼みに答える。`items` は、頼まれた種類のうち渡せるもの。空なら `ENOSYS`。
+   * 4096 バイトごとのパケットに分けて送る。
+   */
+  replyClipboardReadData(id: string, items: ClipboardItem[]): void {
+    if (this.disposed) return;
+    for (const item of items) this.core.clipboard_reply_item(item.mime, item.data);
+    this.core.clipboard_read_reply_data(id);
+    this.flush();
+  }
+
+  /** 読み取りの頼みを断る・失敗を知らせる。読ませないなら `EPERM`。 */
+  replyClipboardReadError(id: string, error: ClipboardReadError): void {
+    if (this.disposed) return;
+    this.core.clipboard_read_reply_error(id, error);
     this.flush();
   }
 
