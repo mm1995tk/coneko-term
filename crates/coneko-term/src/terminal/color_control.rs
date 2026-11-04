@@ -194,10 +194,11 @@ pub(super) fn parse_color(s: &str) -> Option<Rgb> {
             return None;
         }
         let d = n / 3;
+        // 書いた桁は値の上位ビット（拡大しない。`#3a7` は `#3000a0007000`）
         return Some([
-            scale_hex(&rest[..d])?,
-            scale_hex(&rest[d..2 * d])?,
-            scale_hex(&rest[2 * d..])?,
+            top_byte(&rest[..d])?,
+            top_byte(&rest[d..2 * d])?,
+            top_byte(&rest[2 * d..])?,
         ]);
     }
     if let Some(rest) = s.strip_prefix("rgbi:") {
@@ -205,14 +206,23 @@ pub(super) fn parse_color(s: &str) -> Option<Rgb> {
         let mut out = [0u8; 3];
         for o in &mut out {
             let v: f64 = it.next()?.parse().ok()?;
-            if !(0.0..=1.0).contains(&v) {
+            if v.is_nan() {
                 return None;
             }
-            *o = (v * 255.0).round() as u8;
+            *o = (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
         return it.next().is_none().then_some(out);
     }
     NAMES.iter().find(|(n, _)| *n == s).map(|(_, c)| *c)
+}
+
+/// 1 から 4 桁の 16 進数を、16 ビットの値の上位 8 ビットにする（足りない桁は下に 0）。
+fn top_byte(s: &str) -> Option<u8> {
+    if s.is_empty() || s.len() > 4 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let v = u32::from_str_radix(s, 16).ok()? << (16 - 4 * s.len());
+    Some((v >> 8) as u8)
 }
 
 /// 1 から 4 桁の 16 進数を 8 ビットにする。

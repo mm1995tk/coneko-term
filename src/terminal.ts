@@ -778,6 +778,7 @@ const sleep0 = () => new Promise<void>((r) => setTimeout(r, 0));
  */
 export class Terminal {
   readonly options: Readonly<TerminalOptions>;
+  // 注: `syncColors` が、プログラムが OSC で変えた文字・背景・カーソルの色もここへ書く（「いまの色」）。
   private resolvedTheme: Required<Omit<Theme, "selectionBackground">> =
     DEFAULT_THEME;
   private renderer?: CanvasRenderer;
@@ -792,6 +793,9 @@ export class Terminal {
   private selectionColor = DEFAULT_SELECTION;
   /** `theme.selectionBackground` で決めた選択範囲の色（プログラムが OSC 21 で変える前の色）。 */
   private configuredSelection = DEFAULT_SELECTION;
+  /** プログラムが OSC で変えた 256 色の表と、カーソルの下の字の色（変えていなければ `undefined`）。`open` の前の変更も、ここに残って最初の描画に入る。 */
+  private colorTable?: string[];
+  private cursorTextColor?: string;
   private selection: SelectionModel;
   private selectionListeners = new Set<() => void>();
   private lastSelectionKey = "";
@@ -1042,16 +1046,10 @@ export class Terminal {
     for (let i = 0; i < 256; i++) ansi.push(hex(21 + i * 3));
     this.selectionColor =
       b[13] === 1 ? `${hex(14)}4d` : this.configuredSelection;
-    const palette = new Palette(
-      ansi,
-      t.foreground,
-      t.background,
-      t.cursor,
-      this.selectionColor,
-      b[9] === 1 ? hex(10) : t.background,
-    );
+    this.colorTable = ansi;
+    this.cursorTextColor = b[9] === 1 ? hex(10) : undefined;
     if (this.element) this.element.style.background = t.background;
-    this.renderer?.setOptions({ ...this.renderOptions(), palette });
+    this.renderer?.setOptions(this.renderOptions());
   }
 
   /** PTY へ送るバイト列とイベントを、聞き手に渡す。 */
@@ -2000,11 +1998,12 @@ export class Terminal {
       fontSize: this.fontSize,
       lineHeight: this.options.lineHeight ?? 1,
       palette: new Palette(
-        ANSI_NAMES.map((n) => t[n]),
+        this.colorTable ?? ANSI_NAMES.map((n) => t[n]),
         t.foreground,
         t.background,
         t.cursor,
         this.selectionColor,
+        this.cursorTextColor ?? t.background,
       ),
     };
   }

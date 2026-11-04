@@ -1479,7 +1479,7 @@ impl State {
                 let rest = text();
                 self.osc_color(cmd, &rest, bell);
             }
-            cmd @ b"104" => {
+            cmd @ (b"104" | b"110" | b"111" | b"112") => {
                 let rest = text();
                 self.osc_color_reset(cmd, &rest);
             }

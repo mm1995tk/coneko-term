@@ -102,14 +102,16 @@ fn color_formats() {
     use super::color_control::parse_color;
     assert_eq!(parse_color("rgb:ff/80/00"), Some([255, 128, 0]));
     assert_eq!(parse_color("rgb:ffff/0000/8080"), Some([255, 0, 128]));
-    assert_eq!(parse_color("#abc"), Some([0xaa, 0xbb, 0xcc]));
+    assert_eq!(parse_color("#abc"), Some([0xa0, 0xb0, 0xc0]));
     assert_eq!(parse_color("#aabbcc"), Some([0xaa, 0xbb, 0xcc]));
     assert_eq!(parse_color("#aaabbbccc"), Some([0xaa, 0xbb, 0xcc]));
+    assert_eq!(parse_color("#3a7"), parse_color("#3000a0007000"));
+    assert_eq!(parse_color("#3a7"), parse_color("#3000a0007000"));
     assert_eq!(parse_color("rgbi:1.0/0.5/0"), Some([255, 128, 0]));
     assert_eq!(parse_color("RED@0.5"), Some([255, 0, 0]));
     assert_eq!(parse_color("#abcd"), None);
     assert_eq!(parse_color("rgb:1/2/3/4"), None);
-    assert_eq!(parse_color("rgbi:2/0/0"), None);
+    assert_eq!(parse_color("rgbi:2/-1/0"), Some([255, 0, 0]));
     assert_eq!(parse_color(""), None);
 }
 
@@ -134,6 +136,7 @@ fn osc_4_10_11_12_share_the_table() {
     // 104・110・111・112 で戻す。
     w(&mut t, "\x1b]104;2\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07");
     w(&mut t, "\x1b]104;1\x07");
+    w(&mut t, "\x1b]11;#010203\x07\x1b]111;\x07");
     assert_eq!(t.colors(), &Colors::from_theme(&Theme::default()));
 }
 
