@@ -34,8 +34,11 @@ export interface MouseInput {
   x?: number;
   /** 画面の上端からの CSS ピクセル（`CSI ? 1016 h` のときだけ使う）。 */
   y?: number;
+  /** Shift を押している。 */
   shiftKey?: boolean;
+  /** Alt（Option）を押している。 */
   altKey?: boolean;
+  /** Ctrl を押している。 */
   ctrlKey?: boolean;
   /** 連続して押した回数（DOM の `MouseEvent.detail`）。1 は範囲、2 は単語、3 は行。`down` だけが使う。 */
   clickCount?: number;
@@ -47,12 +50,19 @@ export interface WheelInput {
   deltaY: number;
   /** 0 がピクセル、1 が行、2 がページ（DOM の `WheelEvent.deltaMode`）。 */
   deltaMode?: number;
+  /** 見えている画面の列（0 始まり）。報告が有効なときだけ使う（無ければ 0）。 */
   col?: number;
+  /** 見えている画面の行（0 始まり）。報告が有効なときだけ使う（無ければ 0）。 */
   row?: number;
+  /** 画面の左端からの CSS ピクセル（`CSI ? 1016 h` の報告だけが使う）。 */
   x?: number;
+  /** 画面の上端からの CSS ピクセル（`CSI ? 1016 h` の報告だけが使う）。 */
   y?: number;
+  /** Shift を押している。押していると縦に動かさない。 */
   shiftKey?: boolean;
+  /** Alt（Option）を押している。 */
   altKey?: boolean;
+  /** Ctrl を押している。 */
   ctrlKey?: boolean;
 }
 
@@ -623,7 +633,11 @@ export class Terminal {
       for (const l of [...this.cellSizeListeners]) l(size);
     });
     this.cleanups.push(() => renderer.dispose());
-    this.cleanups.push(this.bindPointer(el, canvas));
+    this.cleanups.push(
+      this.bindPointer(canvas),
+      this.bindWheel(el, canvas),
+      this.bindCopy(el),
+    );
     this.afterChange();
 
     this.cleanups.push(this.watchFonts(doc, renderer));
@@ -1057,70 +1071,74 @@ export class Terminal {
     return Math.trunc(amount);
   }
 
-  /** DOM のマウスとホイールのイベントを受ける。戻り値は後始末。 */
-  private bindPointer(el: HTMLElement, canvas: HTMLCanvasElement): () => void {
-    const doc = el.ownerDocument;
-    const cleanups: (() => void)[] = [];
-    let autoScroll: ReturnType<typeof setInterval> | undefined;
-    let lastMove: MouseEvent | undefined;
-
-    const toInput = (
-      e: MouseEvent,
-      type: MouseInput["type"],
-    ): MouseInput & { outside: -1 | 0 | 1 } => {
-      const rect = canvas.getBoundingClientRect();
-      const cell = this.renderer?.cellSize ?? { width: 1, height: 1 };
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      return {
-        type,
-        button: e.button,
-        col: Math.floor(x / cell.width),
-        row: Math.floor(y / cell.height),
-        x,
-        y,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-        ctrlKey: e.ctrlKey,
-        clickCount: e.detail,
-        outside: y < 0 ? -1 : y >= this.rows * cell.height ? 1 : 0,
-      };
+  /** DOM のマウスのイベントを `MouseInput` にする。 */
+  private pointerInput(
+    canvas: HTMLCanvasElement,
+    e: MouseEvent,
+    type: MouseInput["type"],
+  ): MouseInput & { outside: -1 | 0 | 1 } {
+    const rect = canvas.getBoundingClientRect();
+    const cell = this.renderer?.cellSize ?? { width: 1, height: 1 };
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    return {
+      type,
+      button: e.button,
+      col: Math.floor(x / cell.width),
+      row: Math.floor(y / cell.height),
+      x,
+      y,
+      shiftKey: e.shiftKey,
+      altKey: e.altKey,
+      ctrlKey: e.ctrlKey,
+      clickCount: e.detail,
+      outside: y < 0 ? -1 : y >= this.rows * cell.height ? 1 : 0,
     };
+  }
 
-    const stopAutoScroll = () => {
-      if (autoScroll !== undefined) clearInterval(autoScroll);
-      autoScroll = undefined;
+  /** 選択中に画面の外へ出たとき、その向きにスクロールし続ける。`move` を渡し続け、`stop` で止める。 */
+  private autoScroller(canvas: HTMLCanvasElement): {
+    move(e: MouseEvent): void;
+    stop(): void;
+  } {
+    let timer: ReturnType<typeof setInterval> | undefined;
+    let last: MouseEvent | undefined;
+    const stop = () => {
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
     };
+    return {
+      stop,
+      move: (e) => {
+        last = e;
+        const outside = this.pointerInput(canvas, e, "move").outside;
+        if (this.mouseOwner !== "select" || outside === 0) return stop();
+        timer ??= setInterval(() => {
+          const i = last && this.pointerInput(canvas, last, "move");
+          if (!i || this.mouseOwner !== "select" || i.outside === 0) return stop();
+          this.scrollLines(i.outside);
+          this.handleMouse(i);
+        }, 50);
+      },
+    };
+  }
 
+  /** 押す・動かす・離すを受ける。戻り値は後始末。 */
+  private bindPointer(canvas: HTMLCanvasElement): () => void {
+    const doc = canvas.ownerDocument;
+    const auto = this.autoScroller(canvas);
     const onMove = (e: MouseEvent) => {
-      lastMove = e;
-      const input = toInput(e, "move");
-      this.handleMouse(input);
-      // 選択中に画面の外へ出たら、その向きにスクロールし続ける
-      if (this.mouseOwner === "select" && input.outside !== 0) {
-        if (autoScroll === undefined) {
-          autoScroll = setInterval(() => {
-            if (!lastMove || this.mouseOwner !== "select") return stopAutoScroll();
-            const i = toInput(lastMove, "move");
-            if (i.outside === 0) return stopAutoScroll();
-            this.scrollLines(i.outside);
-            this.handleMouse(i);
-          }, 50);
-        }
-      } else {
-        stopAutoScroll();
-      }
+      this.handleMouse(this.pointerInput(canvas, e, "move"));
+      auto.move(e);
     };
-
     const onUp = (e: MouseEvent) => {
-      stopAutoScroll();
+      auto.stop();
       doc.removeEventListener("mousemove", onMove);
       doc.removeEventListener("mouseup", onUp);
-      this.handleMouse(toInput(e, "up"));
+      this.handleMouse(this.pointerInput(canvas, e, "up"));
     };
-
     const onDown = (e: MouseEvent) => {
-      if (this.handleMouse(toInput(e, "down"))) {
+      if (this.handleMouse(this.pointerInput(canvas, e, "down"))) {
         // ブラウザーの既定の選択やドラッグを止め、代わりにフォーカスを当てる
         e.preventDefault();
         this.focus();
@@ -1130,10 +1148,23 @@ export class Terminal {
     };
     // ボタンを押していない動きは、canvas の上のものだけ報告する
     const onHover = (e: MouseEvent) => {
-      if (!this.mouseOwner) this.handleMouse(toInput(e, "move"));
+      if (!this.mouseOwner) this.handleMouse(this.pointerInput(canvas, e, "move"));
     };
+    canvas.addEventListener("mousedown", onDown);
+    canvas.addEventListener("mousemove", onHover);
+    return () => {
+      auto.stop();
+      canvas.removeEventListener("mousedown", onDown);
+      canvas.removeEventListener("mousemove", onHover);
+      doc.removeEventListener("mousemove", onMove);
+      doc.removeEventListener("mouseup", onUp);
+    };
+  }
+
+  /** ホイールを受ける。戻り値は後始末。 */
+  private bindWheel(el: HTMLElement, canvas: HTMLCanvasElement): () => void {
     const onWheel = (e: WheelEvent) => {
-      const i = toInput(e, "move");
+      const i = this.pointerInput(canvas, e, "move");
       const consumed = this.handleWheel({
         deltaY: e.deltaY,
         deltaMode: e.deltaMode,
@@ -1147,27 +1178,26 @@ export class Terminal {
       });
       if (consumed) e.preventDefault();
     };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }
+
+  /**
+   * `copy` を受ける。ブラウザーは `copy` を、編集できる要素か選択の始点か `body` に送り、
+   * 欄の要素には送らないことがあるので、document で受けて、フォーカスが欄の中にあるときだけ扱う
+   * （別の入力欄でのコピーは邪魔しない）。戻り値は後始末。
+   */
+  private bindCopy(el: HTMLElement): () => void {
+    const doc = el.ownerDocument;
     const onCopy = (e: ClipboardEvent) => {
+      const active = doc.activeElement;
+      if (!active || !el.contains(active)) return;
       if (e.clipboardData && this.copySelection(e.clipboardData)) {
         e.preventDefault();
       }
     };
-    canvas.addEventListener("mousedown", onDown);
-    canvas.addEventListener("mousemove", onHover);
-    el.addEventListener("wheel", onWheel, { passive: false });
-    el.addEventListener("copy", onCopy);
-    cleanups.push(
-      () => canvas.removeEventListener("mousedown", onDown),
-      () => canvas.removeEventListener("mousemove", onHover),
-      () => el.removeEventListener("wheel", onWheel),
-      () => el.removeEventListener("copy", onCopy),
-      () => doc.removeEventListener("mousemove", onMove),
-      () => doc.removeEventListener("mouseup", onUp),
-      stopAutoScroll,
-    );
-    return () => {
-      for (const c of cleanups) c();
-    };
+    doc.addEventListener("copy", onCopy);
+    return () => doc.removeEventListener("copy", onCopy);
   }
 
   /** 後始末をする。書き込み待ちのデータは捨てる（`done` は呼ばない）。 */
