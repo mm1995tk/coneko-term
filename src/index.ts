@@ -36,10 +36,14 @@ export {
 } from "./terminal.js";
 
 export {
+  browserEnv,
   CanvasRenderer,
   Palette,
   SCROLLBAR_WIDTH,
   proposeDimensions,
   type CellSize,
   type FitInput,
+  type RenderEnv,
+  type RenderOptions,
+  type RenderSource,
 } from "./renderer.js";

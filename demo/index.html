@@ -31,9 +31,9 @@
   </head>
   <body>
     <div id="bar">
-      <button data-q="1">block</button>
-      <button data-q="3">underline</button>
-      <button data-q="5">bar</button>
+      <button data-q="2">block</button>
+      <button data-q="4">underline</button>
+      <button data-q="6">bar</button>
       <button id="blink">blink</button>
       <button id="more">add 200 lines</button>
       <span id="size"></span>
@@ -90,17 +90,19 @@
       ];
       term.write(lines.join("\r\n") + "\r\n");
 
+      // CSI Ps SP q: 1 点滅ブロック 2 ブロック 3 点滅下線 4 下線 5 点滅縦棒 6 縦棒。
+      // 点滅は奇数。blink ボタンは、いまの形の点滅あり / なしを切り替える
+      let shape = 2;
       document.querySelectorAll("[data-q]").forEach((b) =>
         b.addEventListener("click", () => {
-          term.write(`\x1b[${b.dataset.q} q`);
+          shape = Number(b.dataset.q);
+          term.write(`\x1b[${shape} q`);
           term.focus();
         }),
       );
-      let blink = false;
       document.getElementById("blink").addEventListener("click", () => {
-        blink = !blink;
-        // 点滅は CSI Ps SP q の偶数 / 奇数。形は今のまま、ここではブロックに戻す
-        term.write(blink ? "\x1b[1 q" : "\x1b[2 q");
+        shape = shape % 2 === 0 ? shape - 1 : shape + 1;
+        term.write(`\x1b[${shape} q`);
         term.focus();
       });
       let n = 0;

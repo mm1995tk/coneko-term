@@ -89,9 +89,13 @@ export class Palette {
 
 /** 描画が `Terminal` から読むもの。 */
 export interface RenderSource {
+  /** 列の数。 */
   readonly cols: number;
+  /** 行の数。 */
   readonly rows: number;
+  /** スクロールバックの行数。 */
   readonly scrollbackLength: number;
+  /** カーソルの状態。 */
   readonly cursor: {
     x: number;
     y: number;
@@ -99,30 +103,39 @@ export interface RenderSource {
     blinking: boolean;
     shape: "block" | "underline" | "bar";
   };
+  /** フォーカスがあるか。 */
   readonly isFocused: boolean;
   /** 画面の一番下から何行さかのぼって見ているか。 */
   readonly viewportOffset: number;
+  /** 変わった行を返し、印を消す。 */
   takeDirtyRows(): number[];
+  /** 表示位置を考えた、いま見えている `y` 行目。 */
   readViewportRow(y: number): RowView;
 }
 
 /** 描画の設定。 */
 export interface RenderOptions {
+  /** CSS の `font-family`。 */
   fontFamily: string;
   /** CSS ピクセル。 */
   fontSize: number;
   /** 字の高さに掛ける倍率。 */
   lineHeight: number;
+  /** 色の表。 */
   palette: Palette;
 }
 
 /** `CanvasRenderer` が使う Canvas 2D の道具。テストでは入れ替える。 */
 export interface RenderEnv {
+  /** 画面の `devicePixelRatio`。 */
   devicePixelRatio(): number;
+  /** 次のフレームで `cb` を呼ぶよう頼む（`requestAnimationFrame`）。 */
   requestFrame(cb: () => void): number;
+  /** `requestFrame` を取り消す。 */
   cancelFrame(id: number): void;
 }
 
+/** ブラウザーの `devicePixelRatio` と `requestAnimationFrame` を使う、既定の `RenderEnv`。 */
 export const browserEnv: RenderEnv = {
   devicePixelRatio: () => globalThis.devicePixelRatio || 1,
   requestFrame: (cb) => requestAnimationFrame(cb),
@@ -336,7 +349,6 @@ export class CanvasRenderer {
     const { palette } = this.options;
     const src = this.source;
     const row = src.readViewportRow(y);
-    const cells = row.cells;
     const cellW = this.cellW;
     const cellH = this.cellH;
     const top = y * cellH;
@@ -355,29 +367,66 @@ export class CanvasRenderer {
     ctx.fillRect(0, top, cols * cellW, cellH);
 
     const n = Math.min(row.length, cols);
-    // 背景。同じ色が続くところは 1 回で塗る
-    let runStart = 0;
-    let runColor: string | undefined;
-    const flush = (end: number) => {
-      if (runColor !== undefined && runColor !== palette.background) {
-        ctx.fillStyle = runColor;
-        ctx.fillRect(runStart * cellW, top, (end - runStart) * cellW, cellH);
-      }
-    };
+    const colors = this.resolveRowColors(row.cells, n, solidBlock ? cursor.x : -1);
+    this.fillBackgroundRuns(row.cells, colors, n, top);
+    this.drawGlyphsAndLines(row, colors, n, top);
+    ctx.globalAlpha = 1;
+
+    if (cursorOn && blinkVisible) this.drawCursorShape(cursor, row.cells, top);
+  }
+
+  /**
+   * 行のセルごとの前景色・背景色・属性を決める（反転を適用し、太字なら明るい色にする）。
+   * `blockX` 列は、ブロックカーソルの色にする（なければ -1）。
+   */
+  private resolveRowColors(
+    cells: Uint32Array,
+    n: number,
+    blockX: number,
+  ): { fg: string; bg: string; flags: number }[] {
+    const { palette } = this.options;
     const colors: { fg: string; bg: string; flags: number }[] = new Array(n);
     for (let x = 0; x < n; x++) {
       const o = x * CELL_STRIDE;
       const flags = cells[o + 4];
-      const bold = (flags & 1) !== 0;
-      let fg = palette.resolve(cells[o + 2], false, bold);
+      let fg = palette.resolve(cells[o + 2], false, (flags & 1) !== 0);
       let bg = palette.resolve(cells[o + 3], true);
       if (flags & 16) [fg, bg] = [bg, fg];
-      if (solidBlock && x === cursor.x) {
+      if (x === blockX) {
         bg = palette.cursor;
         fg = palette.background;
       }
       colors[x] = { fg, bg, flags };
-      if (cells[o + 1] === 0) continue; // 全角の右半分は、左半分と一緒に塗る
+    }
+    return colors;
+  }
+
+  /** 背景を塗る。同じ色が続くところは 1 回で塗る。 */
+  private fillBackgroundRuns(
+    cells: Uint32Array,
+    colors: { bg: string }[],
+    n: number,
+    top: number,
+  ): void {
+    const ctx = this.ctx;
+    const defaultBg = this.options.palette.background;
+    let runStart = 0;
+    let runColor: string | undefined;
+    const flush = (end: number) => {
+      if (runColor !== undefined && runColor !== defaultBg) {
+        ctx.fillStyle = runColor;
+        ctx.fillRect(
+          runStart * this.cellW,
+          top,
+          (end - runStart) * this.cellW,
+          this.cellH,
+        );
+      }
+    };
+    for (let x = 0; x < n; x++) {
+      // 全角の右半分（幅 0）は、左半分と一緒に塗る
+      if (cells[x * CELL_STRIDE + 1] === 0) continue;
+      const bg = colors[x].bg;
       if (bg !== runColor) {
         flush(x);
         runColor = bg;
@@ -385,9 +434,17 @@ export class CanvasRenderer {
       }
     }
     flush(n);
-    // 全角の右半分（幅 0）が runColor を変えないので、塗りは左半分から続く。
-    // 右半分だけ色が違うことは起きない（同じ属性で書く）。
+  }
 
+  /** 字と、下線・取り消し線を描く。 */
+  private drawGlyphsAndLines(
+    row: RowView,
+    colors: { fg: string; flags: number }[],
+    n: number,
+    top: number,
+  ): void {
+    const ctx = this.ctx;
+    const cells = row.cells;
     let lastFont = "";
     for (let x = 0; x < n; x++) {
       const o = x * CELL_STRIDE;
@@ -400,7 +457,7 @@ export class CanvasRenderer {
       const strike = (flags & 64) !== 0;
       const hasText = cp !== 0 && cp !== 0x20;
       if (!hasText && ul === 0 && !strike) continue;
-      const left = x * cellW;
+      const left = x * this.cellW;
       ctx.globalAlpha = flags & 2 ? 0.5 : 1;
       if (hasText) {
         const font = this.font((flags & 1) !== 0, (flags & 4) !== 0);
@@ -415,21 +472,23 @@ export class CanvasRenderer {
             : String.fromCodePoint(cp);
         ctx.fillText(text, left, top + this.baseline);
       }
-      const spanW = width * cellW;
+      const spanW = width * this.cellW;
       if (ul !== 0) {
         const word = cells[o + 5];
-        const color = word >>> 24 === 0 ? fg : palette.resolve(word, false);
+        const color =
+          word >>> 24 === 0 ? fg : this.options.palette.resolve(word, false);
         this.drawUnderline(ul, color, left, top, spanW);
       }
       if (strike) {
         ctx.fillStyle = fg;
-        const t = this.lineThickness();
-        ctx.fillRect(left, top + this.baseline - Math.round(this.baseline * 0.35), spanW, t);
+        ctx.fillRect(
+          left,
+          top + this.baseline - Math.round(this.baseline * 0.35),
+          spanW,
+          this.lineThickness(),
+        );
       }
     }
-    ctx.globalAlpha = 1;
-
-    if (cursorOn && blinkVisible) this.drawCursorShape(cursor, cells, top);
   }
 
   private lineThickness(): number {
@@ -540,6 +599,8 @@ export class Scrollbar {
   private slider: HTMLElement;
   private cleanups: (() => void)[] = [];
   private dragging = false;
+  /** いまのドラッグを終える関数。 */
+  private endDrag?: () => void;
 
   constructor(
     host: HTMLElement,
@@ -621,6 +682,7 @@ export class Scrollbar {
       this.api.scrollToLine(Math.round(startLine + (dy / range) * maxLine));
     };
     const up = () => {
+      this.endDrag = undefined;
       this.dragging = false;
       slider.style.background = "rgba(121, 121, 121, 0.4)";
       doc.removeEventListener("pointermove", move);
@@ -630,7 +692,7 @@ export class Scrollbar {
     doc.addEventListener("pointermove", move);
     doc.addEventListener("pointerup", up);
     doc.addEventListener("pointercancel", up);
-    this.cleanups.push(up);
+    this.endDrag = up;
   }
 
   /** 高さ（CSS ピクセル）と中身に合わせて、つまみの位置と大きさを決める。 */
@@ -650,7 +712,9 @@ export class Scrollbar {
     this.slider.style.top = `${pos}px`;
   }
 
+  /** 後始末。DOM から外し、ドラッグ中なら終える。 */
   dispose(): void {
+    this.endDrag?.();
     for (const c of this.cleanups) c();
     this.cleanups.length = 0;
     this.track.remove();

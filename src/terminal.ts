@@ -164,7 +164,7 @@ const sleep0 = () => new Promise<void>((r) => setTimeout(r, 0));
 
 /**
  * ターミナル。VT のバイト列を `write` で受け、画面の中身を持つ。DOM を使わないので
- * Node.js でも動く（`open` を呼ぶまで DOM に触らない）。描画は #8 が足す。
+ * Node.js でも動く（`open` を呼ぶまで DOM に触らない）。`open` すると Canvas 2D で描く。
  *
  * 使う前に `init()` を呼ぶこと。
  */
@@ -524,36 +524,43 @@ export class Terminal {
     this.cleanups.push(() => renderer.dispose());
     this.afterChange();
 
-    // フォントを読み終えてから測り直す（読む前は代わりのフォントの大きさになる）
+    this.cleanups.push(this.watchFonts(doc, renderer));
+    this.cleanups.push(this.watchDevicePixelRatio(doc, renderer));
+  }
+
+  /** フォントを読み終えてから測り直す（読む前は代わりのフォントの大きさになる）。戻り値は後始末。 */
+  private watchFonts(doc: Document, renderer: CanvasRenderer): () => void {
     const fonts = doc.fonts;
-    if (fonts) {
-      const remeasure = () => {
-        if (!this.disposed) renderer.measure();
-      };
-      const spec = `${this.options.fontSize ?? 15}px ${this.options.fontFamily ?? "monospace"}`;
-      void fonts.load(spec).then(remeasure, () => {});
-      void fonts.ready.then(remeasure, () => {});
-      fonts.addEventListener("loadingdone", remeasure);
-      this.cleanups.push(() =>
-        fonts.removeEventListener("loadingdone", remeasure),
-      );
-    }
-    // devicePixelRatio が変わったら（別のディスプレイへ動かした、ズームした）測り直す
+    if (!fonts) return () => {};
+    const remeasure = () => {
+      if (!this.disposed) renderer.measure();
+    };
+    const spec = `${this.options.fontSize ?? 15}px ${this.options.fontFamily ?? "monospace"}`;
+    void fonts.load(spec).then(remeasure, () => {});
+    void fonts.ready.then(remeasure, () => {});
+    fonts.addEventListener("loadingdone", remeasure);
+    return () => fonts.removeEventListener("loadingdone", remeasure);
+  }
+
+  /** `devicePixelRatio` が変わったら（別のディスプレイへ動かした、ズームした）測り直す。戻り値は後始末。 */
+  private watchDevicePixelRatio(
+    doc: Document,
+    renderer: CanvasRenderer,
+  ): () => void {
     const win = doc.defaultView;
-    if (win?.matchMedia) {
-      let mq: MediaQueryList | undefined;
-      const watch = () => {
-        mq?.removeEventListener("change", onDpr);
-        mq = win.matchMedia(`(resolution: ${win.devicePixelRatio}dppx)`);
-        mq.addEventListener("change", onDpr);
-      };
-      const onDpr = () => {
-        watch();
-        if (!this.disposed) renderer.measure();
-      };
+    if (!win?.matchMedia) return () => {};
+    let mq: MediaQueryList | undefined;
+    const watch = () => {
+      mq?.removeEventListener("change", onChange);
+      mq = win.matchMedia(`(resolution: ${win.devicePixelRatio}dppx)`);
+      mq.addEventListener("change", onChange);
+    };
+    const onChange = () => {
       watch();
-      this.cleanups.push(() => mq?.removeEventListener("change", onDpr));
-    }
+      if (!this.disposed) renderer.measure();
+    };
+    watch();
+    return () => mq?.removeEventListener("change", onChange);
   }
 
   private renderOptions() {
