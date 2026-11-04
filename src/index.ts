@@ -29,6 +29,8 @@ export {
   CLUSTER_FLAG,
   Terminal,
   type CursorState,
+  type MouseInput,
+  type WheelInput,
   type Disposable,
   type RowView,
   type TerminalOptions,
@@ -47,3 +49,11 @@ export {
   type RenderOptions,
   type RenderSource,
 } from "./renderer.js";
+
+export {
+  SelectionModel,
+  type BufferPosition,
+  type SelectionHost,
+  type SelectionKind,
+  type SelectionRange,
+} from "./selection.js";

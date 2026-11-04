@@ -10,7 +10,7 @@ coneko-term は、ターミナルの部品のライブラリです。最初の�
 
 最初のゴールは、xterm.js と入れ替えても shijimi-editor の GUI が今と同じように動くことです。kitty のプロトコルはそのあとに足します。「xterm.js と同じ」の物差しは、[xterm.js 6.0.0 の対応表](https://xtermjs.org/docs/api/vtfeatures/)と、そのソースです。
 
-**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。キーボードとマウス（ホイール・選択）はまだです。
+**状態:** WASM と TypeScript の API（`Terminal`）と、Canvas 2D の描画（`fit()` とスクロールバーつき）までできています。マウスの報告・ホイール・選択とコピーまでできています。キーボードと IME の入力はまだです。
 
 ## パッケージ
 
@@ -40,6 +40,10 @@ term.onCellSizeChange(() => term.fit()); // フォントを読み終えた、dev
 ```
 
 描画は Canvas 2D で、字はブラウザーのフォントで描きます（日本語は fallback で描けます）。`devicePixelRatio` が高くてもにじまず、`requestAnimationFrame` でまとめて、変わった行だけを描き直します。`viewportY`、`scrollLines(n)`、`scrollToTop()`、`scrollToBottom()`、`scrollToLine(n)`、`onScroll` でスクロールバックを見る位置を動かせます。一番下を見ているときは新しい出力に付いていきます。`npm run build && node demo/serve.mjs` のあと `/demo/` を開くと試せます。
+
+## マウスと選択
+
+`open()` がマウスを受けます。アプリがマウスの報告（モード 9、1000、1002、1003。書き方は既定・SGR 1006・ピクセル単位の SGR 1016）を頼むと、押した・離した・動かした・ホイールを `onData` から出します（xterm.js 6.0.0 と同じ。既定の書き方では、列か行が 223 を超える位置は送りません。1005 と 1015 は xterm.js が対応しないので既定の書き方として扱います）。Shift を押していれば、報告せずに選択します。報告が無効なら、ホイールは表示位置を動かし、代替画面では上下の矢印キーを送ります。ドラッグで範囲、ダブルクリックで単語（`wordSeparator` で区切りを変えられます）、トリプルクリックで行を選び、折り返した行は改行を入れずにつなぎます。`getSelection()`、`hasSelection()`、`getSelectionRange()`、`selectAll()`、`clearSelection()`、`onSelectionChange` が使え、要素は `copy` イベントに選択の字を渡します（xterm.js と同じ）。選択の色は `theme.selectionBackground` です。DOM が無いときは `handleMouse()` と `handleWheel()` を自分で呼びます。
 
 ## 開発
 

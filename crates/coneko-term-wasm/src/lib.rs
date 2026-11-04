@@ -3,8 +3,10 @@
 //! 画面の中身は、WASM のメモリにあるバッファー（[`WasmTerminal::cells_ptr`]）に 1 行ずつ
 //! 書き出す。TypeScript は `memory.buffer` から直接読む。
 
+use coneko_term::mouse::{MouseAction, MouseButton, MouseEvent};
 use coneko_term::screen::cell::{Cell, Color, Content, UnderlineStyle};
 use coneko_term::screen::Line;
+use coneko_term::selection::{self, Pos};
 use coneko_term::terminal::Theme;
 use coneko_term::{Event, Terminal};
 use wasm_bindgen::prelude::*;
@@ -223,6 +225,79 @@ impl WasmTerminal {
                 _ => 0,
             },
         ]
+    }
+
+    /// マウスの報告が有効か。
+    pub fn mouse_reporting(&self) -> bool {
+        self.term.mouse_reporting()
+    }
+
+    /// マウスのイベントを報告する。報告したら `true`（バイト列は `take_output` に出る）。
+    ///
+    /// `button`: 0 左、1 真ん中、2 右、3 押していない、4 戻る、5 進む、6 ホイール上、
+    /// 7 ホイール下、8 ホイール左、9 ホイール右。`action`: 0 押した、1 離した、2 動かした。
+    /// `mods`: ビット 0 が Shift、1 が Alt、2 が Ctrl。`col` と `row` は 0 始まり。
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_mouse(
+        &mut self,
+        button: u8,
+        action: u8,
+        col: usize,
+        row: usize,
+        x: u32,
+        y: u32,
+        mods: u8,
+    ) -> bool {
+        let button = match button {
+            0 => MouseButton::Left,
+            1 => MouseButton::Middle,
+            2 => MouseButton::Right,
+            4 => MouseButton::Back,
+            5 => MouseButton::Forward,
+            6 => MouseButton::WheelUp,
+            7 => MouseButton::WheelDown,
+            8 => MouseButton::WheelLeft,
+            9 => MouseButton::WheelRight,
+            _ => MouseButton::NoButton,
+        };
+        let action = match action {
+            0 => MouseAction::Press,
+            1 => MouseAction::Release,
+            _ => MouseAction::Move,
+        };
+        let mut e = MouseEvent::new(button, action, col, row);
+        e.x = x;
+        e.y = y;
+        e.shift = mods & 1 != 0;
+        e.alt = mods & 2 != 0;
+        e.ctrl = mods & 4 != 0;
+        self.term.report_mouse(&e)
+    }
+
+    /// スクロールバックの上から捨てた行の数の合計（代替画面では 0）。選択の位置を覚えるのに使う。
+    pub fn scrollback_trimmed(&self) -> f64 {
+        self.term.screen().scrollback_trimmed() as f64
+    }
+
+    /// 行の並び（スクロールバック + 画面）の `row` 行 `col` 列の単語の範囲 `[開始の行, 開始の列, 終わりの行, 終わりの列]`（終わりは含まない）。
+    pub fn word_range(&self, row: usize, col: usize, separators: &str) -> Vec<u32> {
+        let (a, b) = selection::word_at(self.term.screen(), row, col, separators);
+        vec![a.row as u32, a.col as u32, b.row as u32, b.col as u32]
+    }
+
+    /// `row` 行目を含む、折り返しでつながった行全体の範囲。並びは `word_range` と同じ。
+    pub fn line_range(&self, row: usize) -> Vec<u32> {
+        let (a, b) = selection::line_range(self.term.screen(), row);
+        vec![a.row as u32, a.col as u32, b.row as u32, b.col as u32]
+    }
+
+    /// 範囲 `[開始, 終わり)` の字。折り返した行は改行を入れずにつなぐ。
+    pub fn selection_text(&self, row0: usize, col0: usize, row1: usize, col1: usize) -> String {
+        selection::text(
+            self.term.screen(),
+            Pos::new(row0, col0),
+            Pos::new(row1, col1),
+        )
     }
 
     /// 代替画面か。

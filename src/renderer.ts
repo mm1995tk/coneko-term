@@ -62,6 +62,8 @@ export class Palette {
     readonly foreground: string,
     readonly background: string,
     readonly cursor: string,
+    /** 選択範囲の色。半透明でよい（CSS の色）。 */
+    readonly selection: string = "#ffffff4d",
   ) {
     this.colors = [...ansi];
     for (let i = 16; i < 256; i++) this.colors.push(extendedPaletteColor(i));
@@ -109,6 +111,8 @@ export interface RenderSource {
   readonly viewportOffset: number;
   /** 変わった行を返し、印を消す。 */
   takeDirtyRows(): number[];
+  /** 表示位置を考えた、いま見えている `y` 行目の選択範囲 `[開始の列, 終わりの列)`。選択が無ければ `undefined`。 */
+  selectionSpan?(y: number): [number, number] | undefined;
   /** 表示位置を考えた、いま見えている `y` 行目。 */
   readViewportRow(y: number): RowView;
 }
@@ -268,6 +272,12 @@ export class CanvasRenderer {
     this.requestRender();
   }
 
+  /** 行 `ys`（見えている画面の行番号）を次のフレームで描き直す。 */
+  invalidateRows(ys: Iterable<number>): void {
+    for (const y of ys) this.extraRows.add(y);
+    this.requestRender();
+  }
+
   /** 次のフレームで描く。何回呼んでも 1 回にまとめる。 */
   requestRender(): void {
     if (this.frame !== undefined || this.disposed) return;
@@ -369,6 +379,7 @@ export class CanvasRenderer {
     const n = Math.min(row.length, cols);
     const colors = this.resolveRowColors(row.cells, n, solidBlock ? cursor.x : -1);
     this.fillBackgroundRuns(row.cells, colors, n, top);
+    this.fillSelection(y, top);
     this.drawGlyphsAndLines(row, colors, n, top);
     ctx.globalAlpha = 1;
 
@@ -434,6 +445,18 @@ export class CanvasRenderer {
       }
     }
     flush(n);
+  }
+
+  /** 選択範囲を、背景の上に半透明で重ねる。字はこの上に描く。 */
+  private fillSelection(y: number, top: number): void {
+    const span = this.source.selectionSpan?.(y);
+    if (!span) return;
+    const [c0, c1] = span;
+    const end = Math.min(c1, this.source.cols);
+    if (end <= c0) return;
+    const ctx = this.ctx;
+    ctx.fillStyle = this.options.palette.selection;
+    ctx.fillRect(c0 * this.cellW, top, (end - c0) * this.cellW, this.cellH);
   }
 
   /** 字と、下線・取り消し線を描く。 */

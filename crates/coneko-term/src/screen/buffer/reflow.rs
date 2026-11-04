@@ -121,6 +121,7 @@ impl Buffer {
         for _ in 0..excess {
             out.pop_front();
         }
+        self.trimmed += excess as u64;
 
         self.lines = out;
         self.cols = cols;

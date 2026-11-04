@@ -10,7 +10,7 @@ coneko-term is a library of terminal building blocks. The first user is the GUI 
 
 The first goal is that shijimi-editor's GUI works with coneko-term as it does with xterm.js. kitty's protocol comes after that. "The same as xterm.js" is measured against the [xterm.js 6.0.0 feature table](https://xtermjs.org/docs/api/vtfeatures/) and its source.
 
-**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Keyboard and mouse (wheel, selection) are not.
+**Status:** the WASM and TypeScript API (`Terminal`) and Canvas 2D drawing (with `fit()` and a scrollbar) are in place. Mouse reporting, the wheel, and selection with copy are in place. Keyboard and IME input are not.
 
 ## Packages
 
@@ -40,6 +40,10 @@ term.onCellSizeChange(() => term.fit()); // fonts loaded, devicePixelRatio chang
 ```
 
 Drawing uses Canvas 2D with the browser's fonts (fallback fonts work for CJK), is crisp at any `devicePixelRatio`, and is batched with `requestAnimationFrame`: only changed rows are redrawn. `viewportY`, `scrollLines(n)`, `scrollToTop()`, `scrollToBottom()`, `scrollToLine(n)` and `onScroll` move the viewport into the scrollback; at the bottom it follows new output. Try it with `npm run build && node demo/serve.mjs` (open `/demo/`).
+
+## Mouse and selection
+
+`open()` binds the mouse for you. When the app asks for mouse reporting (modes 9, 1000, 1002, 1003 with the default, SGR 1006 or SGR-pixels 1016 encoding), presses, releases, motion and the wheel go out through `onData`, the same way as xterm.js 6.0.0 (the default encoding drops positions beyond column or row 223; 1005 and 1015 are treated as the default encoding, as xterm.js does not support them). Holding Shift forces selection instead. Without reporting, the wheel moves the viewport; on the alternate screen it sends Up/Down arrow keys. Drag selects a range, double click a word (`wordSeparator` option), triple click a line; wrapped lines are joined without a newline. `getSelection()`, `hasSelection()`, `getSelectionRange()`, `selectAll()`, `clearSelection()` and `onSelectionChange` are available, and the element answers the `copy` event with the selection (as xterm.js does). The selection color is `theme.selectionBackground`. Without a DOM, call `handleMouse()` and `handleWheel()` yourself.
 
 ## Development
 

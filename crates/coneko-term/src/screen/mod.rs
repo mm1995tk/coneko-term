@@ -131,6 +131,13 @@ impl Screen {
         self.buf().scrollback_len()
     }
 
+    /// スクロールバックの上から捨てた行の数の合計（代替画面では常に 0）。
+    /// 行の位置にこの値を足した「通し番号」は、スクロールで行が捨てられても変わらない。
+    /// 大きさを変えて組み直したときは、通し番号は引き継がれない。
+    pub fn scrollback_trimmed(&self) -> u64 {
+        self.buf().trimmed
+    }
+
     /// スクロールバックの `i` 行目。0 が一番古い行。
     pub fn scrollback_row(&self, i: usize) -> &Line {
         assert!(i < self.scrollback_len());

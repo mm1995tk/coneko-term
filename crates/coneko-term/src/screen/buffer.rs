@@ -129,6 +129,9 @@ pub(crate) struct Buffer {
     pub tabs: Vec<bool>,
     /// 列の数が変わったとき、折り返した行を組み直すか（主画面だけ）。
     pub reflow_enabled: bool,
+    /// スクロールバックの上から捨てた行の数の合計。行の「通し番号」（位置 + この値）が
+    /// 変わらないので、選択の位置を覚えておくのに使う。
+    pub trimmed: u64,
 }
 
 fn default_tabs(cols: usize) -> Vec<bool> {
@@ -150,6 +153,7 @@ impl Buffer {
             scroll_bottom: rows - 1,
             tabs: default_tabs(cols),
             reflow_enabled: true,
+            trimmed: 0,
         }
     }
 
@@ -213,6 +217,7 @@ impl Buffer {
                 self.lines.insert(at, Line::blank(self.cols, erase));
                 while self.lines.len() > self.rows + self.max_scrollback {
                     self.lines.pop_front();
+                    self.trimmed += 1;
                 }
             } else {
                 let (t, b) = (self.idx(top), self.idx(bottom));
@@ -430,6 +435,7 @@ impl Buffer {
     pub fn clear_scrollback(&mut self) {
         let n = self.scrollback_len();
         self.lines.drain(..n);
+        self.trimmed += n as u64;
     }
 
     /// 大きさを変える。主画面は折り返した行を組み直す（`reflow`）。代替画面は組み直さず、はみ出した
@@ -489,6 +495,7 @@ impl Buffer {
             self.rows = rows;
             while self.lines.len() > self.rows + self.max_scrollback {
                 self.lines.pop_front();
+                self.trimmed += 1;
             }
         } else if rows > self.rows {
             let add = rows - self.rows;
