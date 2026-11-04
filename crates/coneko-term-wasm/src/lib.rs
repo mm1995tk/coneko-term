@@ -10,8 +10,9 @@ use coneko_term::selection::{self, Pos};
 use coneko_term::terminal::{
     ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest,
     ClipboardWriteError, DndError, DndEvent, DndLocation, DndOperation, DndOperations,
-    DragEntryForm, DragImageFormat, DropForm, DropRequest, Notification, NotificationSupport,
-    Theme, When,
+    DragEntryForm, DragImageFormat, DropForm, DropRequest, FileCompression, FileTransferError,
+    FileTransferEvent, FileTransferListing, FileTransmission, FileType, Notification,
+    NotificationSupport, Theme, When,
 };
 use coneko_term::{Event, Terminal};
 use wasm_bindgen::prelude::*;
@@ -272,6 +273,84 @@ pub struct WasmEvent {
     clipboard_mimes: Vec<String>,
     clipboard_data: Vec<Vec<u8>>,
     dnd: DndPayload,
+    ft: FtPayload,
+}
+
+/// OSC 5113 のイベントの中身。`action` は 0 が send、1 が receive、2 が file、3 が data、4 が end_data、
+/// 5 が finish、6 が cancel。
+#[derive(Default)]
+struct FtPayload {
+    action: u8,
+    id: String,
+    file_id: String,
+    name: String,
+    bypass: Option<String>,
+    quiet: u8,
+    file_type: u8,
+    compression: u8,
+    transmission: u8,
+    mtime: Option<i64>,
+    permissions: Option<u32>,
+    size: Option<u64>,
+    parent: Option<String>,
+    data: Vec<u8>,
+}
+
+fn ft_payload(e: FileTransferEvent) -> Option<FtPayload> {
+    let mut p = FtPayload::default();
+    let is_send = matches!(e, FileTransferEvent::Send(_));
+    match e {
+        FileTransferEvent::Send(s) | FileTransferEvent::Receive(s) => {
+            p.action = u8::from(!is_send);
+            p.id = s.id;
+            p.bypass = s.bypass;
+            p.quiet = s.quiet;
+            p.size = s.paths;
+        }
+        FileTransferEvent::File(f) => {
+            p.action = 2;
+            p.id = f.id;
+            p.file_id = f.file_id;
+            p.name = f.name;
+            p.file_type = match f.file_type {
+                FileType::Regular => 0,
+                FileType::Directory => 1,
+                FileType::Symlink => 2,
+                FileType::Link => 3,
+                _ => return None,
+            };
+            p.compression = match f.compression {
+                FileCompression::None => 0,
+                FileCompression::Zlib => 1,
+                _ => return None,
+            };
+            p.transmission = match f.transmission {
+                FileTransmission::Simple => 0,
+                FileTransmission::Rsync => 1,
+                _ => return None,
+            };
+            p.mtime = f.mtime;
+            p.permissions = f.permissions;
+            p.size = f.size;
+            p.parent = f.parent;
+        }
+        FileTransferEvent::Data(d) => {
+            p.action = if d.end { 4 } else { 3 };
+            p.id = d.id;
+            p.file_id = d.file_id;
+            p.data = d.data;
+        }
+        FileTransferEvent::Finish { id } => {
+            p.action = 5;
+            p.id = id;
+        }
+        FileTransferEvent::Cancel { id } => {
+            p.action = 6;
+            p.id = id;
+        }
+        _ => return None,
+    }
+    Some(p)
 }
 
 impl WasmEvent {
@@ -286,6 +365,7 @@ impl WasmEvent {
             clipboard_mimes: Vec::new(),
             clipboard_data: Vec::new(),
             dnd: DndPayload::default(),
+            ft: FtPayload::default(),
         }
     }
 
@@ -406,6 +486,76 @@ impl WasmEvent {
     pub fn clipboard_item_data(&self, index: usize) -> Vec<u8> {
         self.clipboard_data.get(index).cloned().unwrap_or_default()
     }
+    /// OSC 5113 の命令の種類（`WasmEvent` の種類が 11 のとき）。0 が send、1 が receive、2 が file、
+    /// 3 が data、4 が end_data、5 が finish、6 が cancel。
+    #[wasm_bindgen(getter)]
+    pub fn ft_action(&self) -> u8 {
+        self.ft.action
+    }
+    /// セッションの `id`。
+    #[wasm_bindgen(getter)]
+    pub fn ft_id(&self) -> String {
+        self.ft.id.clone()
+    }
+    /// `fid`（file・data・end_data）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_file_id(&self) -> String {
+        self.ft.file_id.clone()
+    }
+    /// 戻したパス（file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_name(&self) -> String {
+        self.ft.name.clone()
+    }
+    /// 戻した `pw`（send・receive）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_bypass(&self) -> Option<String> {
+        self.ft.bypass.clone()
+    }
+    /// `q`（send・receive）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_quiet(&self) -> u8 {
+        self.ft.quiet
+    }
+    /// 0 が regular、1 が directory、2 が symlink、3 が link（file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_file_type(&self) -> u8 {
+        self.ft.file_type
+    }
+    /// 0 が圧縮なし、1 が zlib（file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_compression(&self) -> u8 {
+        self.ft.compression
+    }
+    /// 0 が simple、1 が rsync（file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_transmission(&self) -> u8 {
+        self.ft.transmission
+    }
+    /// `mod`（ナノ秒。file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_mtime(&self) -> Option<i64> {
+        self.ft.mtime
+    }
+    /// `prm`（file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_permissions(&self) -> Option<u32> {
+        self.ft.permissions
+    }
+    /// `sz`（file。send・receive では頼むパスの数）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_size(&self) -> Option<f64> {
+        self.ft.size.map(|s| s as f64)
+    }
+    /// `pr`（file）。
+    #[wasm_bindgen(getter)]
+    pub fn ft_parent(&self) -> Option<String> {
+        self.ft.parent.clone()
+    }
+    /// データ（data・end_data）。
+    pub fn ft_data(&self) -> Vec<u8> {
+        self.ft.data.clone()
+    }
     /// OSC 72 のイベントの種類（`WasmEvent` の種類が 10 のとき）。並びは `DndPayload` の説明のとおり。
     #[wasm_bindgen(getter)]
     pub fn dnd_kind(&self) -> u8 {
@@ -523,6 +673,14 @@ impl WasmTerminal {
                 }
                 ev
             }
+            Event::FileTransfer(e) => match ft_payload(*e) {
+                Some(ft) => {
+                    let mut ev = WasmEvent::new(11, 0, Vec::new());
+                    ev.ft = ft;
+                    ev
+                }
+                None => WasmEvent::new(255, 0, Vec::new()),
+            },
             Event::Dnd(d) => {
                 let dnd = dnd_payload(*d);
                 let mut ev = WasmEvent::new(if dnd.kind == 255 { 255 } else { 10 }, 0, Vec::new());
@@ -619,6 +777,106 @@ impl WasmTerminal {
             _ => ClipboardReadError::Eperm,
         };
         self.term.clipboard_read_reply_error(id, e);
+    }
+
+    // ---- kitty の file transfer protocol（OSC 5113）----
+
+    /// セッションの始まり（`send`・`receive`）や、ファイル・ディレクトリの受け付けを許す（`status=OK`）。
+    /// `file_id` は空なら付けない。`size` は書き終えたバイト数、`name` はホームディレクトリ（受け取りの一覧の終わり）。
+    pub fn file_transfer_ok(
+        &mut self,
+        id: &str,
+        file_id: &str,
+        size: Option<f64>,
+        name: Option<String>,
+    ) {
+        self.term.file_transfer_ok(
+            id,
+            (!file_id.is_empty()).then_some(file_id),
+            size.map(|s| s as u64),
+            name.as_deref(),
+        );
+    }
+
+    /// ファイルを受け付けた（`status=STARTED`）。
+    pub fn file_transfer_started(&mut self, id: &str, file_id: &str, rsync: bool) {
+        self.term.file_transfer_started(id, file_id, rsync);
+    }
+
+    /// データを書いた（`status=PROGRESS`）。
+    pub fn file_transfer_progress(&mut self, id: &str, file_id: &str, written: f64) {
+        self.term
+            .file_transfer_progress(id, file_id, written as u64);
+    }
+
+    /// エラーで答える。`error` は `EPERM`・`ENOENT`・`EEXIST`・`EISDIR`・`ENOTDIR`・`EACCES`・`EINVAL`・`EIO`・
+    /// `EFBIG`・`ENOSPC`。知らない値は `EIO`。`file_id` が空ならセッション全体のエラー。
+    pub fn file_transfer_error(&mut self, id: &str, file_id: &str, error: &str, message: &str) {
+        let e = match error {
+            "EPERM" => FileTransferError::Eperm,
+            "ENOENT" => FileTransferError::Enoent,
+            "EEXIST" => FileTransferError::Eexist,
+            "EISDIR" => FileTransferError::Eisdir,
+            "ENOTDIR" => FileTransferError::Enotdir,
+            "EACCES" => FileTransferError::Eacces,
+            "EINVAL" => FileTransferError::Einval,
+            "EFBIG" => FileTransferError::Efbig,
+            "ENOSPC" => FileTransferError::Enospc,
+            _ => FileTransferError::Eio,
+        };
+        self.term
+            .file_transfer_error(id, (!file_id.is_empty()).then_some(file_id), e, message);
+    }
+
+    /// セッションの始まりを断る。
+    pub fn file_transfer_refuse(&mut self, id: &str) {
+        self.term.file_transfer_refuse(id);
+    }
+
+    /// 取り消しに答える（`status=CANCELED`）。
+    pub fn file_transfer_canceled(&mut self, id: &str) {
+        self.term.file_transfer_canceled(id);
+    }
+
+    /// 受け取りの一覧に項目を足す。`file_type` は 0 が regular、1 が directory、2 が symlink、3 が link。
+    #[allow(clippy::too_many_arguments)]
+    pub fn file_transfer_listing(
+        &mut self,
+        id: &str,
+        request_id: String,
+        entry_id: String,
+        name: String,
+        file_type: u8,
+        mtime: Option<i64>,
+        permissions: Option<u32>,
+        size: Option<f64>,
+        parent: Option<String>,
+        data: Option<Vec<u8>>,
+    ) {
+        self.term.file_transfer_listing(
+            id,
+            &FileTransferListing {
+                request_id,
+                entry_id,
+                name,
+                file_type: match file_type {
+                    1 => FileType::Directory,
+                    2 => FileType::Symlink,
+                    3 => FileType::Link,
+                    _ => FileType::Regular,
+                },
+                mtime,
+                permissions,
+                size: size.map(|s| s as u64),
+                parent,
+                data,
+            },
+        );
+    }
+
+    /// 受け取るファイルのデータを送る。`last` が真なら最後を `end_data` にする。
+    pub fn file_transfer_data(&mut self, id: &str, file_id: &str, bytes: &[u8], last: bool) {
+        self.term.file_transfer_data(id, file_id, bytes, last);
     }
 
     // ---- kitty の drag and drop protocol（OSC 72）----

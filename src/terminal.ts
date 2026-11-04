@@ -497,6 +497,133 @@ function dndEventOf(ev: WasmEvent): DndEvent | undefined {
   }
 }
 
+/** ファイル転送のセッションの始まり（`send` と `receive`）。 */
+export interface FileTransferStart {
+  /** セッションの `id`。答えに渡す。 */
+  id: string;
+  /** `pw` を戻した文字列（仕様では `sha256:<hash>`）。比べるのは呼ぶ側。無ければ `null`。 */
+  bypass: string | null;
+  /** `q`。0 は全部返す、1 はエラーだけ、2 は何も返さない。省くのは coneko-term がする。 */
+  quiet: 0 | 1 | 2;
+  /** `sz`。`receive` が頼むパスの数。 */
+  paths: number | null;
+}
+
+/** ファイルの種類。 */
+export type FileTransferFileType = "regular" | "directory" | "symlink" | "link";
+
+/** ファイル転送のエラーの記号名。知らない値は `EIO`。 */
+export type FileTransferErrorName =
+  | "EPERM"
+  | "ENOENT"
+  | "EEXIST"
+  | "EISDIR"
+  | "ENOTDIR"
+  | "EACCES"
+  | "EINVAL"
+  | "EIO"
+  | "EFBIG"
+  | "ENOSPC";
+
+/**
+ * kitty の file transfer protocol（OSC 5113）で、クライアントが送った命令。`onFileTransfer` で受ける。
+ * データの圧縮（`compression: "zlib"`）と rsync の署名・差分は読み解かず、バイト列のまま渡す。
+ */
+export type FileTransferEvent =
+  /** `ac=send`: ファイルを送りたい。`replyFileTransferOk` か `refuseFileTransfer` で答える。 */
+  | ({ type: "send" } & FileTransferStart)
+  /** `ac=receive`: ファイルを受け取りたい。答え方は `send` と同じ。 */
+  | ({ type: "receive" } & FileTransferStart)
+  /** `ac=file`: 送るファイルの情報、または受け取るパスの頼み。 */
+  | {
+      type: "file";
+      id: string;
+      fileId: string;
+      /** 戻したパス（UTF-8。`~/` はホームからの相対）。coneko-term は検査しない。 */
+      name: string;
+      fileType: FileTransferFileType;
+      compression: "none" | "zlib";
+      transmission: "simple" | "rsync";
+      /** 更新時刻（ナノ秒）。指定なしは `null`。 */
+      mtime: bigint | null;
+      permissions: number | null;
+      size: number | null;
+      parent: string | null;
+    }
+  /** `ac=data` と `ac=end_data`（`end` が真）。 */
+  | { type: "data"; id: string; fileId: string; data: Uint8Array; end: boolean }
+  /** `ac=finish`: クライアントがセッションを閉じた。 */
+  | { type: "finish"; id: string }
+  /** `ac=cancel`: クライアントが取り消した。`replyFileTransferCanceled` で答える。 */
+  | { type: "cancel"; id: string };
+
+/** 受け取りの一覧の 1 項目。 */
+export interface FileTransferListing {
+  /** クライアントの頼み（`file`）の `fileId`。ディレクトリを広げた項目も、頼みと同じ値。 */
+  requestId: string;
+  /** この項目自身の `fid`。 */
+  entryId: string;
+  /** 絶対パス。 */
+  name: string;
+  fileType: FileTransferFileType;
+  mtime?: bigint;
+  permissions?: number;
+  size?: number;
+  /** 入っているディレクトリの `entryId`。 */
+  parent?: string;
+  /** リンクの先（一覧にある先なら、その `entryId` の UTF-8。シンボリックリンクで一覧に無ければ、先のパス）。 */
+  data?: Uint8Array;
+}
+
+const FILE_TYPES = ["regular", "directory", "symlink", "link"] as const;
+
+function fileTransferEventOf(ev: WasmEvent): FileTransferEvent | undefined {
+  const id = ev.ft_id;
+  switch (ev.ft_action) {
+    case 0:
+    case 1: {
+      const q = ev.ft_quiet;
+      const size = ev.ft_size;
+      return {
+        type: ev.ft_action === 0 ? "send" : "receive",
+        id,
+        bypass: ev.ft_bypass ?? null,
+        quiet: q === 1 ? 1 : q === 2 ? 2 : 0,
+        paths: size ?? null,
+      };
+    }
+    case 2:
+      return {
+        type: "file",
+        id,
+        fileId: ev.ft_file_id,
+        name: ev.ft_name,
+        fileType: FILE_TYPES[ev.ft_file_type] ?? "regular",
+        compression: ev.ft_compression === 1 ? "zlib" : "none",
+        transmission: ev.ft_transmission === 1 ? "rsync" : "simple",
+        mtime: ev.ft_mtime ?? null,
+        permissions: ev.ft_permissions ?? null,
+        size: ev.ft_size ?? null,
+        parent: ev.ft_parent ?? null,
+      };
+    case 3:
+    case 4:
+      return {
+        type: "data",
+        id,
+        fileId: ev.ft_file_id,
+        data: ev.ft_data(),
+        end: ev.ft_action === 4,
+      };
+    case 5:
+      return { type: "finish", id };
+    case 6:
+      return { type: "cancel", id };
+    default:
+      return undefined;
+  }
+}
+
 /** カーソルの状態。 */
 export interface CursorState {
   x: number;
@@ -662,6 +789,7 @@ export class Terminal {
     (r: ClipboardReadRequest) => void
   >();
   private dndListeners = new Set<(e: DndEvent) => void>();
+  private fileTransferListeners = new Set<(e: FileTransferEvent) => void>();
   private oscHandlers = new Map<number, Set<(data: string) => void>>();
   private element?: HTMLElement;
   private cleanups: (() => void)[] = [];
@@ -941,6 +1069,21 @@ export class Terminal {
           for (const l of [...this.dndListeners]) l(e);
           break;
         }
+        case 11: {
+          const e = fileTransferEventOf(ev);
+          if (!e) break;
+          if (this.fileTransferListeners.size === 0) {
+            // 聞き手がいなければ許さない。取り消しには、取り消したと答える。
+            if (e.type === "send" || e.type === "receive") {
+              this.core.file_transfer_refuse(e.id);
+            } else if (e.type === "cancel") {
+              this.core.file_transfer_canceled(e.id);
+            }
+            break;
+          }
+          for (const l of [...this.fileTransferListeners]) l(e);
+          break;
+        }
         case 3: {
           const text = this.decoder.decode(data);
           for (const l of [...(this.oscHandlers.get(ev.ident) ?? [])]) l(text);
@@ -1145,6 +1288,103 @@ export class Terminal {
    */
   onDnd(listener: (e: DndEvent) => void): Disposable {
     return addListener(this.dndListeners, listener);
+  }
+
+  /**
+   * kitty の file transfer protocol（OSC 5113）の、クライアントからの命令を受ける。種類は
+   * `FileTransferEvent` を見ること。許すかどうかと、OS のファイルの読み書きは呼ぶ側の仕事で、
+   * `replyFileTransfer*`・`refuseFileTransfer` で答える。聞き手がいないとき、`send` と `receive` には
+   * `EPERM`（断る）で、`cancel` には `CANCELED` で答える。
+   */
+  onFileTransfer(listener: (e: FileTransferEvent) => void): Disposable {
+    return addListener(this.fileTransferListeners, listener);
+  }
+
+  /**
+   * 成功の知らせ（`status=OK`）。セッションの始まり（`send`・`receive`）を許すときは `id` だけ。
+   * ディレクトリの受け付けと、`end_data` のあとの完了は `fileId`（完了には `size` に書いたバイト数）。
+   * 受け取りの一覧を並べ終えたら、`name` にホームディレクトリを付ける。`q` に従って省くことがある。
+   */
+  replyFileTransferOk(
+    id: string,
+    opts: { fileId?: string; size?: number; name?: string } = {},
+  ): void {
+    if (this.disposed) return;
+    this.core.file_transfer_ok(id, opts.fileId ?? "", opts.size, opts.name);
+    this.flush();
+  }
+
+  /** ファイルを受け付けた（`status=STARTED`）。`rsync` は、署名を送れるとき。 */
+  replyFileTransferStarted(id: string, fileId: string, rsync = false): void {
+    if (this.disposed) return;
+    this.core.file_transfer_started(id, fileId, rsync);
+    this.flush();
+  }
+
+  /** データを書いた（`status=PROGRESS`）。`written` はここまでに書いたバイト数。 */
+  replyFileTransferProgress(id: string, fileId: string, written: number): void {
+    if (this.disposed) return;
+    this.core.file_transfer_progress(id, fileId, written);
+    this.flush();
+  }
+
+  /** エラーで答える。`fileId` を省くと、セッション全体のエラー。 */
+  replyFileTransferError(
+    id: string,
+    error: FileTransferErrorName,
+    message = "",
+    fileId = "",
+  ): void {
+    if (this.disposed) return;
+    this.core.file_transfer_error(id, fileId, error, message);
+    this.flush();
+  }
+
+  /** セッションの始まりを断る（`EPERM`）。 */
+  refuseFileTransfer(id: string): void {
+    if (this.disposed) return;
+    this.core.file_transfer_refuse(id);
+    this.flush();
+  }
+
+  /** 取り消し（`cancel`）に答える（`status=CANCELED`）。 */
+  replyFileTransferCanceled(id: string): void {
+    if (this.disposed) return;
+    this.core.file_transfer_canceled(id);
+    this.flush();
+  }
+
+  /** 受け取りの一覧に項目を足す。全部並べたら `replyFileTransferOk(id, { name: ホーム })` で終える。 */
+  replyFileTransferListing(id: string, entry: FileTransferListing): void {
+    if (this.disposed) return;
+    this.core.file_transfer_listing(
+      id,
+      entry.requestId,
+      entry.entryId,
+      entry.name,
+      Math.max(0, FILE_TYPES.indexOf(entry.fileType)),
+      entry.mtime,
+      entry.permissions,
+      entry.size,
+      entry.parent,
+      entry.data,
+    );
+    this.flush();
+  }
+
+  /**
+   * 受け取るファイルのデータを送る。4096 バイトごとのパケットに分ける。`end` が真なら最後を
+   * `end_data` にする（`data` が空でも送る）。圧縮や rsync の差分は、作ったバイト列をそのまま渡す。
+   */
+  replyFileTransferData(
+    id: string,
+    fileId: string,
+    data: Uint8Array,
+    end = false,
+  ): void {
+    if (this.disposed) return;
+    this.core.file_transfer_data(id, fileId, data, end);
+    this.flush();
   }
 
   /** プログラムがドロップを受け付けると言っているか。偽の間、`dropMove` などは何もしない。 */
@@ -2252,6 +2492,7 @@ export class Terminal {
     this.notificationQueryListeners.clear();
     this.notificationAliveListeners.clear();
     this.dndListeners.clear();
+    this.fileTransferListeners.clear();
     this.oscHandlers.clear();
     this.wasm.free();
   }

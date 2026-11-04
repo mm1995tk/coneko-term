@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { before, test } from "node:test";
-import { init, Terminal } from "../dist/index.js";
+import { init, Terminal, type FileTransferEvent } from "../dist/index.js";
 
 before(async () => {
   await init(
@@ -523,5 +523,100 @@ test("drag and drop (OSC 72): a drag start with no listener is refused", async (
   await write(t, osc72("t=o:o=1", "text/plain") + osc72("t=P:x=-1"));
   assert.deepEqual(out, ["\x1b]72;t=E;EPERM\x1b\\"]);
   assert.equal(t.dragStarted(), false);
+  t.dispose();
+});
+
+const osc5113 = (body: string) => `\x1b]5113;${body}\x1b\\`;
+
+test("file transfer (OSC 5113): a send session runs from start to finish", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  const events: FileTransferEvent[] = [];
+  t.onFileTransfer((e) => events.push(e));
+  await write(
+    t,
+    osc5113("ac=send;id=s1") +
+      osc5113(`ac=file;id=s1;fid=f1;n=${b64("/tmp/a")};mod=1700000000000000000;prm=420;zip=zlib`) +
+      osc5113("ac=end_data;id=s1;fid=f1;d=AQID") +
+      osc5113("ac=finish;id=s1"),
+  );
+  assert.deepEqual(events, [
+    { type: "send", id: "s1", bypass: null, quiet: 0, paths: null },
+    {
+      type: "file",
+      id: "s1",
+      fileId: "f1",
+      name: "/tmp/a",
+      fileType: "regular",
+      compression: "zlib",
+      transmission: "simple",
+      mtime: 1700000000000000000n,
+      permissions: 420,
+      size: null,
+      parent: null,
+    },
+    { type: "data", id: "s1", fileId: "f1", data: new Uint8Array([1, 2, 3]), end: true },
+    { type: "finish", id: "s1" },
+  ]);
+  t.replyFileTransferOk("s1");
+  t.replyFileTransferStarted("s1", "f1");
+  t.replyFileTransferOk("s1", { fileId: "f1", size: 3 });
+  t.replyFileTransferError("s1", "EIO", "bad", "f1");
+  assert.equal(
+    out.join(""),
+    osc5113(`ac=status;id=s1;st=${b64("OK")}`) +
+      osc5113(`ac=status;id=s1;fid=f1;st=${b64("STARTED")}`) +
+      osc5113(`ac=status;id=s1;fid=f1;st=${b64("OK")};sz=3`) +
+      osc5113(`ac=status;id=s1;fid=f1;st=${b64("EIO:bad")}`),
+  );
+  t.dispose();
+});
+
+test("file transfer (OSC 5113): a receive session sends the listing and the data", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  const events: FileTransferEvent[] = [];
+  t.onFileTransfer((e) => events.push(e));
+  await write(
+    t,
+    osc5113("ac=receive;id=r1;sz=1") + osc5113(`ac=file;id=r1;fid=f1;n=${b64("/d")}`),
+  );
+  assert.equal(events[0].type, "receive");
+  t.replyFileTransferOk("r1");
+  t.replyFileTransferListing("r1", {
+    requestId: "f1",
+    entryId: "e1",
+    name: "/d/a",
+    fileType: "regular",
+    size: 5,
+  });
+  t.replyFileTransferOk("r1", { name: "/home/u" });
+  t.replyFileTransferData("r1", "e1", new TextEncoder().encode("hello"), true);
+  assert.equal(
+    out.join(""),
+    osc5113(`ac=status;id=r1;st=${b64("OK")}`) +
+      osc5113(`ac=file;id=r1;fid=f1;st=${b64("e1")};n=${b64("/d/a")};ft=regular;sz=5`) +
+      osc5113(`ac=status;id=r1;st=${b64("OK")};n=${b64("/home/u")}`) +
+      osc5113(`ac=end_data;id=r1;fid=e1;d=${b64("hello")}`),
+  );
+  t.dispose();
+});
+
+test("file transfer (OSC 5113): cancel, and without a listener sessions are refused", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(
+    t,
+    osc5113("ac=send;id=a") + osc5113("ac=receive;id=b") + osc5113("ac=cancel;id=c"),
+  );
+  assert.equal(
+    out.join(""),
+    osc5113(`ac=status;id=a;st=${b64("EPERM:User refused the transfer")}`) +
+      osc5113(`ac=status;id=b;st=${b64("EPERM:User refused the transfer")}`) +
+      osc5113(`ac=status;id=c;st=${b64("CANCELED")}`),
+  );
   t.dispose();
 });
