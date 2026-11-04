@@ -1,25 +1,18 @@
-import wasmInit, {
-  initSync,
-  version as wasmVersion,
-} from "./wasm/coneko_term_wasm.js";
-
-export type WasmSource = BufferSource | WebAssembly.Module;
-
-let ready = false;
+import wasmInit, { version as wasmVersion } from "./wasm/coneko_term_wasm.js";
 
 /**
- * WebAssembly を読み込む。ほかの関数を呼ぶ前に 1 回呼ぶ。
+ * `init()` に渡せる .wasm。
+ * .wasm のバイト列（`BufferSource`）か、コンパイル済みの `WebAssembly.Module`。
+ */
+export type WasmSource = BufferSource | WebAssembly.Module;
+
+/**
+ * WebAssembly を読み込む。ほかの関数を呼ぶ前に呼ぶ。2 回目以降は何もしない。
  * 引数を省くと、パッケージ内の .wasm を fetch で読む。
  * Node.js などで fetch できないときは、.wasm のバイト列かモジュールを渡す。
  */
 export async function init(source?: WasmSource): Promise<void> {
-  if (ready) return;
-  if (source === undefined) {
-    await wasmInit();
-  } else {
-    initSync({ module: source });
-  }
-  ready = true;
+  await wasmInit(source === undefined ? undefined : { module_or_path: source });
 }
 
 /** coneko-term の版。`init()` のあとに呼ぶ。 */

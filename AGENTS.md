@@ -18,7 +18,7 @@ Run these from the Nix devShell (`nix develop`, or `direnv allow`). Do not insta
 
 ```sh
 cargo test           # must pass
-npm run build && npm test   # builds the WASM and the package, runs the TypeScript tests
+npm ci --ignore-scripts && npm run build && npm test   # builds the WASM and the package, runs the TypeScript tests
 nix fmt              # must leave no changes (nixfmt / rustfmt / taplo / prettier)
 nix flake check      # what CI runs: formatting, cargo test, and the npm package build with its tests
 ```

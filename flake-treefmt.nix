@@ -11,7 +11,7 @@ _: {
     enable = true;
     includes = [
       "package.json"
-      "tsconfig.json"
+      "tsconfig*.json"
       "src/**/*.ts"
       "test/**/*.ts"
     ];

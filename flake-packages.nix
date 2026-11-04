@@ -1,7 +1,7 @@
 { pkgs, rustPlatform }:
 let
   inherit (pkgs) lib;
-  version = "0.0.0";
+  version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
   rustSrc = lib.fileset.toSource {
     root = ./.;
@@ -83,6 +83,10 @@ let
       runHook preInstall
       mkdir -p $out
       npm_config_cache=$TMPDIR/npm-cache npm pack --ignore-scripts --pack-destination $out
+      # 配る tarball に .wasm と .d.ts が入っていること（prepack は --ignore-scripts では走らない）
+      for f in dist/index.d.ts dist/wasm/coneko_term_wasm_bg.wasm dist/wasm/coneko_term_wasm.d.ts; do
+        tar tzf $out/*.tgz | grep -qx "package/$f"
+      done
       runHook postInstall
     '';
     dontNpmInstall = true;
