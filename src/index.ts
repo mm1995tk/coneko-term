@@ -1,4 +1,5 @@
 import wasmInit, { version as wasmVersion } from "./wasm/coneko_term_wasm.js";
+import { setMemory } from "./memory.js";
 
 /**
  * `init()` に渡せる .wasm。
@@ -7,15 +8,29 @@ import wasmInit, { version as wasmVersion } from "./wasm/coneko_term_wasm.js";
 export type WasmSource = BufferSource | WebAssembly.Module;
 
 /**
- * WebAssembly を読み込む。ほかの関数を呼ぶ前に呼ぶ。2 回目以降は何もしない。
+ * WebAssembly を読み込む。ほかの関数や `Terminal` を使う前に呼ぶ。2 回目以降は何もしない。
  * 引数を省くと、パッケージ内の .wasm を fetch で読む。
  * Node.js などで fetch できないときは、.wasm のバイト列かモジュールを渡す。
  */
 export async function init(source?: WasmSource): Promise<void> {
-  await wasmInit(source === undefined ? undefined : { module_or_path: source });
+  const out = await wasmInit(
+    source === undefined ? undefined : { module_or_path: source },
+  );
+  setMemory(out.memory);
 }
 
 /** coneko-term の版。`init()` のあとに呼ぶ。 */
 export function version(): string {
   return wasmVersion();
 }
+
+export {
+  CELL_STRIDE,
+  CLUSTER_FLAG,
+  Terminal,
+  type CursorState,
+  type Disposable,
+  type RowView,
+  type TerminalOptions,
+  type Theme,
+} from "./terminal.js";

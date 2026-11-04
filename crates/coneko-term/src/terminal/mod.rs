@@ -56,6 +56,14 @@ pub enum Event {
     Title(String),
     /// アイコンの名前が変わった（OSC 0、OSC 1）。
     IconName(String),
+    /// [`Terminal::register_osc`] で登録した番号の OSC が来た。`data` は番号と `;` のあとの
+    /// バイト列（`;` が無ければ空）。
+    Osc {
+        /// OSC の番号。
+        ident: u32,
+        /// 番号のあとのバイト列。
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +152,8 @@ struct State {
     theme: Theme,
     /// PTY へ送るバイト列。
     output: Vec<u8>,
+    /// 呼ぶ側が拾う OSC の番号。
+    osc_handlers: Vec<u32>,
 }
 
 impl Terminal {
@@ -166,6 +176,7 @@ impl Terminal {
                 modes: Modes::default(),
                 theme: Theme::default(),
                 output: Vec::new(),
+                osc_handlers: Vec::new(),
             },
         }
     }
@@ -183,6 +194,26 @@ impl Terminal {
     /// 画面を変える。描いたあとに `take_dirty_rows` を呼ぶときなど。
     pub fn screen_mut(&mut self) -> &mut Screen {
         &mut self.state.screen
+    }
+
+    /// 完全に初期状態へ戻す（RIS と同じ）。溜まっているイベントと出力、登録した OSC の番号、
+    /// テーマは残す。
+    pub fn reset(&mut self) {
+        self.parser = Parser::new();
+        self.state.full_reset();
+    }
+
+    /// OSC の番号 `ident` を呼ぶ側で拾う。その番号の OSC は、ターミナルは処理せず
+    /// [`Event::Osc`] になる（0・1・2・4・10・11・12 を登録すると、内蔵の処理の代わりになる）。
+    pub fn register_osc(&mut self, ident: u32) {
+        if !self.state.osc_handlers.contains(&ident) {
+            self.state.osc_handlers.push(ident);
+        }
+    }
+
+    /// [`Terminal::register_osc`] の登録を外す。
+    pub fn unregister_osc(&mut self, ident: u32) {
+        self.state.osc_handlers.retain(|&i| i != ident);
     }
 
     /// 大きさを変える。
@@ -622,6 +653,17 @@ impl State {
     }
 
     fn osc(&mut self, data: &[u8], bell: bool) {
+        let end = data.iter().position(|&b| b == b';').unwrap_or(data.len());
+        if let Some(ident) = std::str::from_utf8(&data[..end])
+            .ok()
+            .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|s| s.parse::<u32>().ok())
+            .filter(|i| self.osc_handlers.contains(i))
+        {
+            let rest = data.get(end + 1..).unwrap_or(&[]).to_vec();
+            self.events.push(Event::Osc { ident, data: rest });
+            return;
+        }
         let Some(sep) = data.iter().position(|&b| b == b';') else {
             return;
         };

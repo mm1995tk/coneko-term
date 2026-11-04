@@ -10,7 +10,7 @@ coneko-term は、ターミナルの部品のライブラリです。最初の�
 
 最初のゴールは、xterm.js と入れ替えても shijimi-editor の GUI が今と同じように動くことです。kitty のプロトコルはそのあとに足します。「xterm.js と同じ」の物差しは、[xterm.js 6.0.0 の対応表](https://xtermjs.org/docs/api/vtfeatures/)と、そのソースです。
 
-**状態:** 土台だけです。API は `version()` の 1 つだけです。
+**状態:** WASM と TypeScript の API（`Terminal`）までできています。描画・キーボード・マウスはまだです。
 
 ## パッケージ
 
@@ -18,11 +18,16 @@ coneko-term は、ターミナルの部品のライブラリです。最初の�
 - npm パッケージ `coneko-term`: WASM と TypeScript の型。ビルド済みの `.wasm` が入っているので、`npm --ignore-scripts` でも動きます。
 
 ```ts
-import { init, version } from "coneko-term";
+import { init, Terminal } from "coneko-term";
 
 await init();
-console.log(version());
+const term = new Terminal({ cols: 80, rows: 24, scrollback: 1000 });
+term.onData((bytes) => pty.write(bytes)); // 問い合わせへの返事（DSR など）と input() の出口
+term.registerOscHandler(133, (data) => console.log("OSC 133", data));
+term.write("hello\r\n", () => console.log("処理し終えた"));
 ```
+
+`Terminal` は DOM に依存しません（`open(host)` はフォーカスを受ける要素を作るだけで、描画は描画の部品で足します）。大きな `write` は小分けにして処理し、そのデータを処理し終えたら `done` を呼びます。`takeDirtyRows()` と `readRow(y)` で、変わった行を WASM のメモリ上のセルとして読めます。
 
 ## 開発
 

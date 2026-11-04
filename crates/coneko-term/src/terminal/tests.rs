@@ -727,3 +727,42 @@ fn dirty_rows_after_write() {
     w(&mut t, "\x1b[2;1Hx");
     assert_eq!(t.screen_mut().take_dirty_rows(), vec![1]);
 }
+
+#[test]
+fn registered_osc_becomes_event() {
+    let mut t = Terminal::new(3, 10);
+    t.register_osc(133);
+    t.register_osc(2);
+    t.write(b"\x1b]133;A;x=1\x07\x1b]133\x07\x1b]2;t\x07\x1b]1;i\x07");
+    assert_eq!(
+        t.take_events(),
+        vec![
+            Event::Osc {
+                ident: 133,
+                data: b"A;x=1".to_vec()
+            },
+            Event::Osc {
+                ident: 133,
+                data: vec![]
+            },
+            Event::Osc {
+                ident: 2,
+                data: b"t".to_vec()
+            },
+            Event::IconName("i".into()),
+        ]
+    );
+    t.unregister_osc(2);
+    t.write(b"\x1b]2;u\x07");
+    assert_eq!(t.take_events(), vec![Event::Title("u".into())]);
+}
+
+#[test]
+fn reset_restores_initial_state() {
+    let mut t = Terminal::new(3, 10);
+    t.write(b"abc\x1b[?2004h\x1b[2;2H");
+    t.reset();
+    assert!(!t.modes().bracketed_paste);
+    assert_eq!(t.screen().row(0).cells()[0].text(), "");
+    assert_eq!(t.screen().cursor().x, 0);
+}

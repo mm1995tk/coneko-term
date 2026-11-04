@@ -10,7 +10,7 @@ coneko-term is a library of terminal building blocks. The first user is the GUI 
 
 The first goal is that shijimi-editor's GUI works with coneko-term as it does with xterm.js. kitty's protocol comes after that. "The same as xterm.js" is measured against the [xterm.js 6.0.0 feature table](https://xtermjs.org/docs/api/vtfeatures/) and its source.
 
-**Status:** the foundation only. The API has one function, `version()`.
+**Status:** the WASM and TypeScript API (`Terminal`) is in place. Drawing, keyboard and mouse are not.
 
 ## Packages
 
@@ -18,11 +18,16 @@ The first goal is that shijimi-editor's GUI works with coneko-term as it does wi
 - npm package `coneko-term`: the WASM and the TypeScript types. The built `.wasm` is in the package, so it works with `npm --ignore-scripts`.
 
 ```ts
-import { init, version } from "coneko-term";
+import { init, Terminal } from "coneko-term";
 
 await init();
-console.log(version());
+const term = new Terminal({ cols: 80, rows: 24, scrollback: 1000 });
+term.onData((bytes) => pty.write(bytes)); // replies (DSR and so on) and input() go out here
+term.registerOscHandler(133, (data) => console.log("OSC 133", data));
+term.write("hello\r\n", () => console.log("processed"));
 ```
+
+`Terminal` has no DOM dependency (`open(host)` only creates a focusable element; drawing comes with the renderer). Large `write`s are processed in small slices, and `done` is called when that data has been processed. `takeDirtyRows()` and `readRow(y)` give the changed rows as cells in WASM memory.
 
 ## Development
 
