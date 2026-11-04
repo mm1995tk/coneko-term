@@ -177,6 +177,8 @@ export interface KeyHandlerHost {
   send(data: string): void;
   /** DECCKM（#5）。 */
   applicationCursorKeys(): boolean;
+  /** kitty keyboard protocol のいまのフラグ。 */
+  keyboardFlags(): number;
   /** 表示位置を `n` ページ動かす（負で上）。 */
   scrollPages(n: number): void;
   /** 一番下へ戻す（`scrollOnUserInput` が true のとき）。 */
@@ -252,6 +254,7 @@ export class KeyHandler {
       h.applicationCursorKeys(),
       h.isMac,
       h.macOptionIsMeta,
+      h.keyboardFlags(),
     );
 
     if (result.type === "pageUp" || result.type === "pageDown") {
