@@ -34,12 +34,23 @@ term.write("hello\r\n", () => console.log("processed"));
 ```ts
 const term = new Terminal({ fontFamily: "'JetBrains Mono', monospace", fontSize: 15, lineHeight: 1 });
 await document.fonts.load("15px 'JetBrains Mono'"); // optional: the cell size is measured again when fonts finish loading
-term.open(pane); // creates a focusable element with a canvas and a scrollbar
+term.open(pane); // creates an element with a canvas, a scrollbar and a hidden textarea (it takes the focus)
 term.fit(); // cols and rows from the size of `pane` (minus the scrollbar width, as xterm.js's FitAddon)
 term.onCellSizeChange(() => term.fit()); // fonts loaded, devicePixelRatio changed
 ```
 
 Drawing uses Canvas 2D with the browser's fonts (fallback fonts work for CJK), is crisp at any `devicePixelRatio`, and is batched with `requestAnimationFrame`: only changed rows are redrawn. `viewportY`, `scrollLines(n)`, `scrollToTop()`, `scrollToBottom()`, `scrollToLine(n)` and `onScroll` move the viewport into the scrollback; at the bottom it follows new output. Try it with `npm run build && node demo/serve.mjs` (open `/demo/`).
+
+## Keyboard, IME and paste
+
+`open(host)` puts a hidden `textarea` in the element; `focus()` focuses it. Keys, IME text and pastes go out through `onData`, the same outlet as the replies. The bytes for keys are the same as xterm.js 6.0.0 (`evaluateKeyboardEvent` is exported and is a port of its `Keyboard.ts`):
+
+- Enter, Backspace, Tab, Shift+Tab, Esc, arrows (`CSI` or `SS3` by DECCKM), Home, End, PageUp, PageDown, Insert, Delete, F1 to F12, modifiers (`CSI 1;m X`), Ctrl+letter, Alt as an ESC prefix. Shift+PageUp and Shift+PageDown scroll the viewport.
+- On macOS, Option types a character (`macOptionIsMeta: false`, as xterm.js); set `macOptionIsMeta: true` to send ESC-prefixed keys. Keys with Cmd are not sent (left to the app's shortcuts).
+- IME: nothing is sent while converting; the confirmed text is sent. The text being converted is shown at the cursor.
+- `paste` events are handled; `term.paste(text)` does the same. Newlines become `\r`; with bracketed paste (2004) the text is wrapped in `ESC [200~` and `ESC [201~`.
+- With focus reporting (1004), `CSI I` and `CSI O` are sent when the `textarea` gains and loses focus.
+- `attachCustomKeyEventHandler(fn)` sees key events first; return `false` to skip a key. `scrollOnUserInput` (default true) returns to the bottom when you type.
 
 ## Development
 

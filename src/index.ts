@@ -47,3 +47,21 @@ export {
   type RenderOptions,
   type RenderSource,
 } from "./renderer.js";
+
+export {
+  bracketTextForPaste,
+  evaluateKeyboardEvent,
+  prepareTextForTerminal,
+  type KeyEventLike,
+  type KeyResult,
+  type KeyResultType,
+} from "./keyboard.js";
+
+export {
+  CompositionHelper,
+  KeyHandler,
+  type CompositionAnchor,
+  type CompositionViewLike,
+  type KeyHandlerHost,
+  type TextareaLike,
+} from "./input.js";
