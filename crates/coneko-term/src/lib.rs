@@ -3,6 +3,8 @@
 
 pub mod screen;
 
+pub mod parser;
+
 /// このライブラリの版を返す。
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
