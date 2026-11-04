@@ -9,7 +9,9 @@ use coneko_term::screen::Line;
 use coneko_term::selection::{self, Pos};
 use coneko_term::terminal::{
     ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest,
-    ClipboardWriteError, Notification, NotificationSupport, Theme, When,
+    ClipboardWriteError, DndError, DndEvent, DndLocation, DndOperation, DndOperations,
+    DragEntryForm, DragImageFormat, DropForm, DropRequest, Notification, NotificationSupport,
+    Theme, When,
 };
 use coneko_term::{Event, Terminal};
 use wasm_bindgen::prelude::*;
@@ -72,6 +74,188 @@ fn location_code(l: ClipboardLocation) -> u8 {
     }
 }
 
+/// OSC 72 のイベント（`WasmEvent` の種類 10）を、数・文字列・バイト列にして持つ。
+/// `dnd_kind` ごとの並びは次のとおり（`ints` / `strings` / `blobs`）。
+///
+/// - 0 `DropEnabled`: / MIME の種類 /
+/// - 1 `DropDisabled`
+/// - 2 `DropResponse`: `[操作 (0 なし、1 copy、2 move), MIME の一覧があるか]` / MIME の種類 /
+/// - 3 `DropRequest`: `[種類 (0 Data、1 Entry、2 DirEntry、3 DirClose), a, b]`。Data は `[0, index, 0]`、
+///   Entry は `[1, index, sub_index]`、DirEntry は `[2, handle, index]`、DirClose は `[3, handle, 0]`
+/// - 4 `DropFinished`: `[操作]`
+/// - 5 `DragEnabled`: `[機械の ID があるか]` / `[機械の ID]` /
+/// - 6 `DragDisabled`
+/// - 7 `DragStart`: `[許す操作, 始める画像の番号 (無ければ -1), MIME の数 n, 画像の数 m,
+///   先に送ったデータがあるか × n, (形式 0 Rgb・1 Rgba・2 Png・3 Text, 幅, 高さ, 不透明度) × m,
+///   機械の ID があるか]` / `MIME の種類 × n, [機械の ID]` / `データ × n, 画像のデータ × m`
+/// - 8 `DragImage`: `[番号 (外すなら -1)]`
+/// - 9 `DragData`: `[番号]` / / `[データ]`
+/// - 10 `DragDataError`: `[番号]` / `[記号名, 説明]` /
+/// - 11 `DragEntry`: `[index, sub_index, parent, 形 (0 File、1 Symlink、2 Directory), handle]` / / `[データ]`
+/// - 12 `DragCanceled`
+/// - 13 `DragAborted`: / `[記号名, 説明]` /
+#[derive(Default)]
+struct DndPayload {
+    kind: u8,
+    ints: Vec<i32>,
+    strings: Vec<String>,
+    blobs: Vec<Vec<u8>>,
+}
+
+fn op_code(op: Option<DndOperation>) -> i32 {
+    match op {
+        None => 0,
+        Some(DndOperation::Copy) => 1,
+        Some(DndOperation::Move) => 2,
+    }
+}
+
+fn dnd_payload(ev: DndEvent) -> DndPayload {
+    let mut p = DndPayload::default();
+    match ev {
+        DndEvent::DropEnabled { mimes } => {
+            p.kind = 0;
+            p.strings = mimes;
+        }
+        DndEvent::DropDisabled => p.kind = 1,
+        DndEvent::DropResponse { operation, mimes } => {
+            p.kind = 2;
+            p.ints = vec![op_code(operation), mimes.is_some() as i32];
+            p.strings = mimes.unwrap_or_default();
+        }
+        DndEvent::DropRequest(r) => {
+            p.kind = 3;
+            p.ints = match r {
+                DropRequest::Data { index } => vec![0, index as i32, 0],
+                DropRequest::Entry { index, sub_index } => vec![1, index as i32, sub_index as i32],
+                DropRequest::DirEntry { handle, index } => vec![2, handle as i32, index as i32],
+                DropRequest::DirClose { handle } => vec![3, handle as i32, 0],
+            };
+        }
+        DndEvent::DropFinished { operation } => {
+            p.kind = 4;
+            p.ints = vec![op_code(operation)];
+        }
+        DndEvent::DragEnabled { machine_id } => {
+            p.kind = 5;
+            p.ints = vec![machine_id.is_some() as i32];
+            p.strings = machine_id.into_iter().collect();
+        }
+        DndEvent::DragDisabled => p.kind = 6,
+        DndEvent::DragStart(o) => {
+            let o = *o;
+            p.kind = 7;
+            let ops = o.operations.copy as i32 | (o.operations.r#move as i32) << 1;
+            p.ints = vec![
+                ops,
+                o.image.map_or(-1, |i| i as i32),
+                o.mimes.len() as i32,
+                o.images.len() as i32,
+            ];
+            p.ints.extend(o.data.iter().map(|d| d.is_some() as i32));
+            for img in &o.images {
+                p.ints.push(match img.format {
+                    DragImageFormat::Rgb => 0,
+                    DragImageFormat::Rgba => 1,
+                    DragImageFormat::Png => 2,
+                    _ => 3,
+                });
+                p.ints.push(img.width as i32);
+                p.ints.push(img.height as i32);
+                p.ints.push(img.opacity as i32);
+            }
+            p.ints.push(o.machine_id.is_some() as i32);
+            p.strings = o.mimes;
+            p.strings.extend(o.machine_id);
+            p.blobs = o.data.into_iter().map(Option::unwrap_or_default).collect();
+            p.blobs.extend(o.images.into_iter().map(|i| i.data));
+        }
+        DndEvent::DragImage { index } => {
+            p.kind = 8;
+            p.ints = vec![index.map_or(-1, |i| i as i32)];
+        }
+        DndEvent::DragData { index, data } => {
+            p.kind = 9;
+            p.ints = vec![index as i32];
+            p.blobs = vec![data];
+        }
+        DndEvent::DragDataError {
+            index,
+            error,
+            description,
+        } => {
+            p.kind = 10;
+            p.ints = vec![index as i32];
+            p.strings = vec![error, description];
+        }
+        DndEvent::DragEntry { key, form, data } => {
+            p.kind = 11;
+            let (form, handle) = match form {
+                DragEntryForm::File => (0, 0),
+                DragEntryForm::Symlink => (1, 0),
+                DragEntryForm::Directory(h) => (2, h as i32),
+            };
+            p.ints = vec![
+                key.index as i32,
+                key.sub_index as i32,
+                key.parent as i32,
+                form,
+                handle,
+            ];
+            p.blobs = vec![data];
+        }
+        DndEvent::DragCanceled => p.kind = 12,
+        DndEvent::DragAborted { error, description } => {
+            p.kind = 13;
+            p.strings = vec![error, description];
+        }
+        _ => p.kind = 255,
+    }
+    p
+}
+
+fn dnd_error(name: &str) -> DndError {
+    match name {
+        "ENOENT" => DndError::Enoent,
+        "EINVAL" => DndError::Einval,
+        "EPERM" => DndError::Eperm,
+        "EMFILE" => DndError::Emfile,
+        "ENOMEM" => DndError::Enomem,
+        "EFBIG" => DndError::Efbig,
+        "EUNKNOWN" => DndError::Eunknown,
+        _ => DndError::Eio,
+    }
+}
+
+fn dnd_location(x: i32, y: i32, pixel_x: i32, pixel_y: i32) -> DndLocation {
+    DndLocation {
+        x,
+        y,
+        pixel_x,
+        pixel_y,
+    }
+}
+
+fn dnd_ops(bits: u8) -> DndOperations {
+    DndOperations::from_bits(bits).unwrap_or_default()
+}
+
+fn dnd_request(kind: u8, a: u32, b: u32) -> Option<DropRequest> {
+    Some(match kind {
+        0 => DropRequest::Data { index: a },
+        1 => DropRequest::Entry {
+            index: a,
+            sub_index: b,
+        },
+        2 => DropRequest::DirEntry {
+            handle: a,
+            index: b,
+        },
+        3 => DropRequest::DirClose { handle: a },
+        _ => return None,
+    })
+}
+
 /// ターミナルが外へ知らせること 1 つ。`kind` は 0 が BEL、1 が題名、2 がアイコン名、3 が OSC、
 /// 4 が通知（OSC 99）、5 が通知を閉じる求め、6 が通知の対応の問い合わせ（`p=?`）、
 /// 7 が生きている通知の問い合わせ（`p=alive`）、8 がクリップボードへの書き込み（OSC 5522）、
@@ -87,6 +271,7 @@ pub struct WasmEvent {
     clipboard_list: bool,
     clipboard_mimes: Vec<String>,
     clipboard_data: Vec<Vec<u8>>,
+    dnd: DndPayload,
 }
 
 impl WasmEvent {
@@ -100,6 +285,7 @@ impl WasmEvent {
             clipboard_list: false,
             clipboard_mimes: Vec::new(),
             clipboard_data: Vec::new(),
+            dnd: DndPayload::default(),
         }
     }
 
@@ -220,6 +406,25 @@ impl WasmEvent {
     pub fn clipboard_item_data(&self, index: usize) -> Vec<u8> {
         self.clipboard_data.get(index).cloned().unwrap_or_default()
     }
+    /// OSC 72 のイベントの種類（`WasmEvent` の種類が 10 のとき）。並びは `DndPayload` の説明のとおり。
+    #[wasm_bindgen(getter)]
+    pub fn dnd_kind(&self) -> u8 {
+        self.dnd.kind
+    }
+    /// OSC 72 のイベントの数の並び。
+    #[wasm_bindgen(getter)]
+    pub fn dnd_ints(&self) -> Vec<i32> {
+        self.dnd.ints.clone()
+    }
+    /// OSC 72 のイベントの文字列の並び。
+    #[wasm_bindgen(getter)]
+    pub fn dnd_strings(&self) -> Vec<String> {
+        self.dnd.strings.clone()
+    }
+    /// OSC 72 のイベントの `index` 番目のバイト列。
+    pub fn dnd_blob(&self, index: usize) -> Vec<u8> {
+        self.dnd.blobs.get(index).cloned().unwrap_or_default()
+    }
 }
 
 /// ターミナル。
@@ -318,6 +523,12 @@ impl WasmTerminal {
                 }
                 ev
             }
+            Event::Dnd(d) => {
+                let dnd = dnd_payload(*d);
+                let mut ev = WasmEvent::new(if dnd.kind == 255 { 255 } else { 10 }, 0, Vec::new());
+                ev.dnd = dnd;
+                ev
+            }
             _ => WasmEvent::new(255, 0, Vec::new()),
         })
     }
@@ -408,6 +619,165 @@ impl WasmTerminal {
             _ => ClipboardReadError::Eperm,
         };
         self.term.clipboard_read_reply_error(id, e);
+    }
+
+    // ---- kitty の drag and drop protocol（OSC 72）----
+
+    /// プログラムがドロップを受け付けると言っているか。
+    pub fn drop_accepting(&self) -> bool {
+        self.term.drop_accepting()
+    }
+
+    /// プログラムがドロップを受け付けると言った MIME の種類。
+    pub fn drop_accepted_mimes(&self) -> Vec<String> {
+        self.term.drop_accepted_mimes().to_vec()
+    }
+
+    /// プログラムが渡した機械の ID（ドロップ側）。
+    pub fn drop_machine_id(&self) -> Option<String> {
+        self.term.drop_machine_id().map(str::to_string)
+    }
+
+    /// ドラッグが窓の上を動いた。`allowed` は 1 が copy、2 が move、3 が両方。
+    pub fn drop_move(
+        &mut self,
+        x: i32,
+        y: i32,
+        pixel_x: i32,
+        pixel_y: i32,
+        mimes: Vec<String>,
+        allowed: u8,
+    ) -> bool {
+        self.term.drop_move(
+            dnd_location(x, y, pixel_x, pixel_y),
+            &mimes,
+            dnd_ops(allowed),
+        )
+    }
+
+    /// ドラッグが窓から出た。
+    pub fn drop_leave(&mut self) -> bool {
+        self.term.drop_leave()
+    }
+
+    /// ドロップされた。
+    pub fn drop_drop(
+        &mut self,
+        x: i32,
+        y: i32,
+        pixel_x: i32,
+        pixel_y: i32,
+        mimes: Vec<String>,
+        allowed: u8,
+        from_this_window: bool,
+    ) -> bool {
+        self.term.drop_drop(
+            dnd_location(x, y, pixel_x, pixel_y),
+            &mimes,
+            dnd_ops(allowed),
+            from_this_window,
+        )
+    }
+
+    /// ドロップのデータの頼み（`dnd_ints` の並びの `request_kind`・`a`・`b`）にデータで答える。
+    /// `form` は 0 が MIME の種類のデータ（`flag` が遠くの機械か）、1 がファイル、2 がシンボリックリンク、
+    /// 3 がディレクトリ（`handle` がその handle）。
+    pub fn drop_data_reply(
+        &mut self,
+        request_kind: u8,
+        a: u32,
+        b: u32,
+        form: u8,
+        handle: u32,
+        remote: bool,
+        data: Vec<u8>,
+    ) {
+        let Some(req) = dnd_request(request_kind, a, b) else {
+            return;
+        };
+        let form = match form {
+            0 => DropForm::Mime { remote },
+            1 => DropForm::File,
+            2 => DropForm::Symlink,
+            _ => DropForm::Directory(handle),
+        };
+        self.term.drop_data_reply(&req, form, &data);
+    }
+
+    /// ドロップのデータの頼みにエラーで答える。`error` は POSIX の記号名（`ENOENT` など）。
+    pub fn drop_error_reply(
+        &mut self,
+        request_kind: u8,
+        a: u32,
+        b: u32,
+        error: &str,
+        description: &str,
+    ) {
+        let Some(req) = dnd_request(request_kind, a, b) else {
+            return;
+        };
+        self.term
+            .drop_error_reply(&req, dnd_error(error), description);
+    }
+
+    /// プログラムがドラッグを始められると言っているか。
+    pub fn drag_offers_enabled(&self) -> bool {
+        self.term.drag_offers_enabled()
+    }
+
+    /// プログラムが渡した機械の ID（ドラッグ側）。
+    pub fn drag_machine_id(&self) -> Option<String> {
+        self.term.drag_machine_id().map(str::to_string)
+    }
+
+    /// ドラッグの身振りを見つけた。
+    pub fn drag_gesture(&mut self, x: i32, y: i32, pixel_x: i32, pixel_y: i32) -> bool {
+        self.term.drag_gesture(dnd_location(x, y, pixel_x, pixel_y))
+    }
+
+    /// OS のドラッグが始まった。
+    pub fn drag_started(&mut self) -> bool {
+        self.term.drag_started()
+    }
+
+    /// ドラッグを始められなかった・止める。`error` は POSIX の記号名。
+    pub fn drag_error(&mut self, error: &str, description: &str) -> bool {
+        self.term.drag_error(dnd_error(error), description)
+    }
+
+    /// ドラッグが受け入れられた。
+    pub fn drag_accepted(&mut self, index: u32) -> bool {
+        self.term.drag_accepted(index)
+    }
+
+    /// 相手が行いそうな操作が変わった。`operation` は 0 が受け付けない、1 が copy、2 が move。
+    pub fn drag_action(&mut self, operation: u8) -> bool {
+        let op = match operation {
+            1 => Some(DndOperation::Copy),
+            2 => Some(DndOperation::Move),
+            _ => None,
+        };
+        self.term.drag_action(op)
+    }
+
+    /// ドラッグが相手に落とされた。
+    pub fn drag_dropped(&mut self) -> bool {
+        self.term.drag_dropped()
+    }
+
+    /// ドラッグが終わった。
+    pub fn drag_finished(&mut self, canceled: bool) -> bool {
+        self.term.drag_finished(canceled)
+    }
+
+    /// MIME の種類のデータをプログラムに頼む。
+    pub fn drag_data_request(&mut self, index: u32) -> bool {
+        self.term.drag_data_request(index)
+    }
+
+    /// 遠くの機械へのドラッグで、`text/uri-list` の項目をプログラムに頼む。
+    pub fn drag_entry_request(&mut self, index: u32) -> bool {
+        self.term.drag_entry_request(index)
     }
 
     /// PTY へ送るバイト列を取り出す。

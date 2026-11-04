@@ -6,7 +6,7 @@
 //!
 //! # 外へ出すもの（[`Event`]）
 //!
-//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
+//! BEL・題名の変更・通知（OSC 99）・クリップボード（OSC 5522）・drag and drop（OSC 72）は [`Event`] になって溜まる。[`Terminal::take_events`] で取り出す。
 //! 呼ぶ側が取り出さないと溜まり続けるので、`write` のたびに取り出すこと。
 //!
 //! # PTY へ送るバイト列（出口は 1 つ）
@@ -34,6 +34,9 @@
 //! 文字集合（G0〜G3 と GL）、直前に書いた字（REP 用）、DECSC で保存した文字集合。
 
 mod clipboard;
+mod dnd;
+#[cfg(test)]
+mod dnd_tests;
 mod kitty_keyboard;
 #[cfg(test)]
 mod mode_tests;
@@ -47,6 +50,10 @@ mod theme;
 pub use clipboard::{
     ClipboardItem, ClipboardLocation, ClipboardReadError, ClipboardReadRequest, ClipboardWrite,
     ClipboardWriteError,
+};
+pub use dnd::{
+    DndError, DndEvent, DndLocation, DndOperation, DndOperations, DragEntryForm, DragEntryKey,
+    DragImage, DragImageFormat, DragOffer, DropForm, DropRequest,
 };
 pub use kitty_keyboard::{KeyboardFlagStack, DISAMBIGUATE, MAX_DEPTH as KEYBOARD_STACK_DEPTH};
 pub use modes::{Modes, MouseEncoding, MouseProtocol};
@@ -103,6 +110,8 @@ pub enum Event {
         /// 頼まれたもの。
         request: ClipboardReadRequest,
     },
+    /// kitty の drag and drop protocol（OSC 72）のイベント。
+    Dnd(Box<DndEvent>),
     /// [`Terminal::register_osc`] で登録した番号の OSC が来た。`data` は番号と `;` のあとの
     /// バイト列（`;` が無ければ空）。
     Osc {
@@ -219,6 +228,8 @@ struct State {
     notifications: notification::Notifications,
     /// 組み立て中のクリップボードへの書き込み（OSC 5522）。
     clipboard: clipboard::Clipboard,
+    /// kitty の drag and drop protocol（OSC 72）の状態。
+    dnd: dnd::Dnd,
 }
 
 impl Terminal {
@@ -247,6 +258,7 @@ impl Terminal {
                 graphics: Graphics::default(),
                 notifications: Default::default(),
                 clipboard: Default::default(),
+                dnd: Default::default(),
             },
         }
     }
@@ -365,6 +377,156 @@ impl Terminal {
     /// 読み取りの頼み（[`Event::ClipboardRead`]）を断る・失敗を知らせる。許さないなら `Eperm`。
     pub fn clipboard_read_reply_error(&mut self, id: &str, error: ClipboardReadError) {
         self.queue_output(&clipboard::read_error_reply(id, error));
+    }
+
+    // ---- kitty の drag and drop protocol（OSC 72）----
+
+    /// プログラムがドロップを受け付けると言っているか（`t=a` のあと、`t=A` の前）。
+    /// 偽の間、`drop_*` は何もしない。
+    pub fn drop_accepting(&self) -> bool {
+        self.state.dnd.accepting()
+    }
+
+    /// プログラムが受け付けると言った MIME の種類（`t=a` のペイロード。空でもよい）。
+    pub fn drop_accepted_mimes(&self) -> &[String] {
+        self.state.dnd.accept_mimes()
+    }
+
+    /// プログラムが `t=a:x=1` で渡した機械の ID。GUI は、自分の機械の ID と比べて、別の機械なら
+    /// [`DropForm::Mime`] の `remote` を真にする（知らない版の ID は別の機械として扱う）。
+    pub fn drop_machine_id(&self) -> Option<&str> {
+        self.state.dnd.machine_id()
+    }
+
+    /// ドラッグが窓の上を動いた。`mimes` はドラッグされているものの MIME の種類、`allowed` は
+    /// 許す操作。MIME の一覧は、最初の移動と変わったときだけ PTY へ付ける。受け付けていないとき・
+    /// 位置が負のときは何もせず、偽を返す。
+    pub fn drop_move(
+        &mut self,
+        location: DndLocation,
+        mimes: &[String],
+        allowed: DndOperations,
+    ) -> bool {
+        let ok = self.state.dnd.drop_move(location, mimes, allowed);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// ドラッグが窓から出た（`x`・`y` が -1 の `t=m`）。ドラッグの途中で持っていたデータは捨てる。
+    /// 窓の上に無かったときは何もせず、偽を返す。
+    pub fn drop_leave(&mut self) -> bool {
+        let ok = self.state.dnd.drop_leave();
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// ドロップされた（`t=M`）。`mimes` は落とされたものの MIME の種類で、空ではいけない。
+    /// `from_this_window` は、ドラッグがこの窓から始まったか（真なら、遠くの機械向けの
+    /// ファイルの読み取りを `EPERM` で断る。仕様）。
+    pub fn drop_drop(
+        &mut self,
+        location: DndLocation,
+        mimes: &[String],
+        allowed: DndOperations,
+        from_this_window: bool,
+    ) -> bool {
+        let ok = self
+            .state
+            .dnd
+            .drop_drop(location, mimes, allowed, from_this_window);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// [`DndEvent::DropRequest`] に、データで答える。データは全部を一度に渡す
+    /// （4096 バイトのパケットに分けて、終わりの空のパケットまで出す）。
+    pub fn drop_data_reply(&mut self, request: &DropRequest, form: DropForm, data: &[u8]) {
+        self.state.dnd.drop_data_reply(request, form, data);
+        self.state.flush_dnd();
+    }
+
+    /// [`DndEvent::DropRequest`] に、エラーで答える（`t=R`）。`description` は省いてよい。
+    pub fn drop_error_reply(&mut self, request: &DropRequest, error: DndError, description: &str) {
+        self.state.dnd.drop_error_reply(request, error, description);
+        self.state.flush_dnd();
+    }
+
+    /// プログラムがドラッグを始められると言っているか（`t=o:x=1` のあと、`t=o:x=2` の前）。
+    pub fn drag_offers_enabled(&self) -> bool {
+        self.state.dnd.offers_enabled()
+    }
+
+    /// プログラムが `t=o:x=1` で渡した機械の ID。
+    pub fn drag_machine_id(&self) -> Option<&str> {
+        self.state.dnd.offer_machine_id()
+    }
+
+    /// ドラッグの身振りを見つけた。プログラムへ `t=o`（位置つき）を送り、続く申し出を 1 回だけ
+    /// 受ける。申し出ていないとき・ドラッグの途中のときは何もせず、偽を返す。
+    pub fn drag_gesture(&mut self, location: DndLocation) -> bool {
+        let ok = self.state.dnd.drag_gesture(location);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// [`DndEvent::DragStart`] に答える: OS のドラッグが始まった（`t=E ; OK`）。
+    pub fn drag_started(&mut self) -> bool {
+        let ok = self.state.dnd.drag_started();
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// [`DndEvent::DragStart`] に失敗で答える、またはドラッグを止める（`t=E`）。すでにユーザーが
+    /// 取り消していたら `Eperm`、画像が大きすぎれば `Efbig`。ドラッグの状態は捨てる。
+    pub fn drag_error(&mut self, error: DndError, description: &str) -> bool {
+        let ok = self.state.dnd.drag_error(error, description);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// ドラッグが受け入れられた（`t=e:x=1`）。`index` は、相手が欲しがりそうな MIME の種類（0 始まり）。
+    pub fn drag_accepted(&mut self, index: u32) -> bool {
+        let ok = self.state.dnd.drag_accepted(index);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// 相手が行いそうな操作が変わった（`t=e:x=2`）。`None` は受け付けない。
+    pub fn drag_action(&mut self, operation: Option<DndOperation>) -> bool {
+        let ok = self.state.dnd.drag_action(operation);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// ドラッグが相手に落とされた（`t=e:x=3`）。このあと [`DndEvent::DragData`] の頼みが来る。
+    pub fn drag_dropped(&mut self) -> bool {
+        let ok = self.state.dnd.drag_dropped();
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// ドラッグが終わった（`t=e:x=4`）。`canceled` が真ならユーザーが取り消した。
+    /// ドラッグの状態は捨てる。
+    pub fn drag_finished(&mut self, canceled: bool) -> bool {
+        let ok = self.state.dnd.drag_finished(canceled);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// MIME の種類 `index`（0 始まり）のデータをプログラムに頼む（`t=e:x=5`）。答えは
+    /// [`DndEvent::DragData`] か [`DndEvent::DragDataError`]。
+    pub fn drag_data_request(&mut self, index: u32) -> bool {
+        let ok = self.state.dnd.drag_data_request(index);
+        self.state.flush_dnd();
+        ok
+    }
+
+    /// 遠くの機械へのドラッグで、`text/uri-list` の `index` 番目（1 始まり）の項目をプログラムに
+    /// 頼む（`t=k`）。答えは [`DndEvent::DragEntry`]。
+    pub fn drag_entry_request(&mut self, index: u32) -> bool {
+        let ok = self.state.dnd.drag_entry_request(index);
+        self.state.flush_dnd();
+        ok
     }
 
     /// 受け取った画像を ID で引く（kitty graphics の `i=`）。
@@ -752,6 +914,17 @@ impl State {
         self.graphics.clear();
         self.notifications.clear();
         self.clipboard.clear();
+        self.dnd.reset();
+        self.flush_dnd();
+    }
+
+    /// OSC 72 の状態が溜めたイベントと返事を、出口へ移す。
+    fn flush_dnd(&mut self) {
+        for ev in self.dnd.take_events() {
+            self.events.push(Event::Dnd(Box::new(ev)));
+        }
+        let out = self.dnd.take_out();
+        self.output.extend_from_slice(&out);
     }
 
     /// 主画面と代替画面を切り替える。カーソルの位置は引き継ぐ（xterm.js と同じ）。
@@ -1024,6 +1197,10 @@ impl State {
                 Some(clipboard::Output::Reply(bytes)) => self.output.extend_from_slice(&bytes),
                 None => {}
             },
+            b"72" => {
+                self.dnd.osc(&data[sep + 1..]);
+                self.flush_dnd();
+            }
             cmd @ (b"4" | b"10" | b"11" | b"12") => {
                 let rest = text();
                 self.osc_color_query(cmd, &rest, bell);

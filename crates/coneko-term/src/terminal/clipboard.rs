@@ -365,7 +365,7 @@ fn error(id: &str, e: ClipboardWriteError) -> Output {
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn encode_base64(src: &[u8]) -> String {
+pub(super) fn encode_base64(src: &[u8]) -> String {
     let mut out = String::with_capacity(src.len().div_ceil(3) * 4);
     for c in src.chunks(3) {
         let n = (c[0] as u32) << 16
@@ -384,7 +384,7 @@ fn encode_base64(src: &[u8]) -> String {
 
 /// 厳密な base64（標準の文字、詰め物は必須、字の間の空白や途中の `=` は不可）を戻す。
 /// 仕様: 不正な字を黙って捨ててはいけない。
-fn decode_base64(src: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn decode_base64(src: &[u8]) -> Option<Vec<u8>> {
     if src.len() % 4 != 0 {
         return None;
     }

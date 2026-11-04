@@ -383,3 +383,145 @@ test("clipboard (OSC 5522): without a listener, reads and writes are refused", a
   );
   t.dispose();
 });
+
+const osc72 = (meta: string, payload = "") =>
+  `\x1b]72;${meta}${payload ? ";" + payload : ""}\x1b\\`;
+
+test("drag and drop (OSC 72): support query is answered before DA1", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, osc72("t=q:i=3") + "\x1b[c");
+  assert.equal(out.join(""), "\x1b]72;t=q:i=3\x1b\\\x1b[?1;2c");
+  t.dispose();
+});
+
+test("drag and drop (OSC 72): accepting a drop and reading its data", async () => {
+  const t = new Terminal();
+  const events: unknown[] = [];
+  t.onDnd((e) => events.push(e));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+
+  assert.equal(t.dropAccepting, false);
+  assert.equal(t.dropMove({ x: 1, y: 1, pixelX: 8, pixelY: 16 }, ["text/plain"]), false);
+  await write(t, osc72("t=a", "text/plain"));
+  assert.equal(t.dropAccepting, true);
+  assert.deepEqual(t.dropAcceptedMimes, ["text/plain"]);
+
+  const loc = { x: 2, y: 3, pixelX: 20, pixelY: 60 };
+  assert.equal(t.dropMove(loc, ["text/plain", "text/uri-list"]), true);
+  await write(t, osc72("t=m:o=1", "text/plain"));
+  assert.equal(t.dropDrop(loc, ["text/plain", "text/uri-list"], { copy: true }), true);
+  assert.deepEqual(out, [
+    "\x1b]72;t=m:x=2:y=3:X=20:Y=60:o=3;text/plain text/uri-list\x1b\\",
+    "\x1b]72;t=M:x=2:y=3:X=20:Y=60:o=1;text/plain text/uri-list\x1b\\",
+  ]);
+  out.length = 0;
+
+  await write(t, osc72("t=r:x=1"));
+  assert.deepEqual(events.slice(0, 3), [
+    { type: "dropEnabled", mimes: ["text/plain"] },
+    { type: "dropResponse", operation: "copy", mimes: ["text/plain"] },
+    { type: "dropRequest", request: { type: "data", index: 1 } },
+  ]);
+  t.replyDropData(
+    { type: "data", index: 1 },
+    { kind: "mime" },
+    new TextEncoder().encode("hi"),
+  );
+  assert.deepEqual(out, [
+    `\x1b]72;t=r:x=1:m=1;${b64("hi")}\x1b\\\x1b]72;t=r:x=1:m=0\x1b\\`,
+  ]);
+  out.length = 0;
+  t.replyDropError({ type: "data", index: 1 }, "EIO", "oops");
+  assert.deepEqual(out, ["\x1b]72;t=R:x=1;EIO:oops\x1b\\"]);
+
+  await write(t, osc72("t=r:o=2"));
+  assert.deepEqual(events[3], { type: "dropFinished", operation: "move" });
+  await write(t, osc72("t=A"));
+  assert.equal(t.dropAccepting, false);
+  t.dispose();
+});
+
+test("drag and drop (OSC 72): a data request with no listener is refused", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, osc72("t=a"));
+  const loc = { x: 0, y: 0, pixelX: 0, pixelY: 0 };
+  t.dropMove(loc, ["text/plain"]);
+  t.dropDrop(loc, ["text/plain"]);
+  out.length = 0;
+  await write(t, osc72("t=r:x=1"));
+  assert.deepEqual(out, ["\x1b]72;t=R:x=1;EPERM\x1b\\"]);
+  t.dispose();
+});
+
+test("drag and drop (OSC 72): starting a drag", async () => {
+  const t = new Terminal();
+  const events: any[] = [];
+  t.onDnd((e) => events.push(e));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+
+  await write(t, osc72("t=o:x=1", "1:abc"));
+  assert.equal(t.dragOffersEnabled, true);
+  assert.equal(t.dragMachineId, "1:abc");
+  assert.equal(t.dragGesture({ x: 4, y: 5, pixelX: 40, pixelY: 100 }), true);
+  await write(
+    t,
+    osc72("t=o:o=3", "text/plain text/uri-list") +
+      osc72("t=p:x=0", b64("hello")) +
+      osc72("t=p:x=-1:y=32:X=1:Y=1", b64(new Uint8Array([1, 2, 3, 4]))) +
+      osc72("t=P:x=-1"),
+  );
+  assert.deepEqual(out, ["\x1b]72;t=o:x=4:y=5:X=40:Y=100\x1b\\"]);
+  out.length = 0;
+  const start = events.at(-1);
+  assert.equal(start.type, "dragStart");
+  assert.deepEqual(start.operations, { copy: true, move: true });
+  assert.deepEqual(start.mimes, ["text/plain", "text/uri-list"]);
+  assert.deepEqual(start.data, [new TextEncoder().encode("hello"), null]);
+  assert.deepEqual(start.images, [
+    { format: "rgba", width: 1, height: 1, opacity: 0, data: new Uint8Array([1, 2, 3, 4]) },
+  ]);
+  assert.equal(start.image, 0);
+  assert.equal(start.machineId, "1:abc");
+
+  assert.equal(t.dragStarted(), true);
+  t.dragAccepted(0);
+  t.dragAction("move");
+  t.dragDropped();
+  t.requestDragData(1);
+  assert.deepEqual(out, [
+    "\x1b]72;t=E;OK\x1b\\",
+    "\x1b]72;t=e:x=1:y=0\x1b\\",
+    "\x1b]72;t=e:x=2:o=2\x1b\\",
+    "\x1b]72;t=e:x=3\x1b\\",
+    "\x1b]72;t=e:x=5:y=1\x1b\\",
+  ]);
+  await write(t, osc72("t=e:y=1:m=1", b64("ab")) + osc72("t=e:y=1:m=0"));
+  assert.deepEqual(events.at(-1), {
+    type: "dragData",
+    index: 1,
+    data: new TextEncoder().encode("ab"),
+  });
+  await write(t, osc72("t=E:y=-1"));
+  assert.deepEqual(events.at(-1), { type: "dragCanceled" });
+  assert.equal(t.dragFinished(), false);
+  t.dispose();
+});
+
+test("drag and drop (OSC 72): a drag start with no listener is refused", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, osc72("t=o:x=1"));
+  t.dragGesture({ x: 0, y: 0, pixelX: 0, pixelY: 0 });
+  out.length = 0;
+  await write(t, osc72("t=o:o=1", "text/plain") + osc72("t=P:x=-1"));
+  assert.deepEqual(out, ["\x1b]72;t=E;EPERM\x1b\\"]);
+  assert.equal(t.dragStarted(), false);
+  t.dispose();
+});
