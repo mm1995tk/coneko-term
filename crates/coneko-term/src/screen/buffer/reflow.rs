@@ -69,7 +69,8 @@ fn locate(
 impl Buffer {
     /// 列の数を `cols` にして、折り返しでつながった行を 1 本に戻してから折り直す
     /// （スクロールバックも）。行の数は変えない。カーソルと保存したカーソルは、
-    /// 組み直したあとも同じ字の上に来る。
+    /// 組み直したあとも同じ字の上に来る。ただし見える範囲より上（スクロールバック）
+    /// に出てしまうときは、列はそのままで一番上の行に寄せる。
     pub(super) fn reflow(&mut self, cols: usize) {
         let rows = self.rows;
         let old: Vec<Line> = std::mem::take(&mut self.lines).into();
@@ -113,9 +114,8 @@ impl Buffer {
         while out.len() > rows && out.len() - 1 > cursor.0 && out[out.len() - 1].is_blank() {
             out.pop_back();
         }
-        // カーソルは見える範囲に収める。下に行が余るときは捨てる
-        let start0 = (out.len() - rows).min(cursor.0);
-        out.truncate(start0 + rows);
+        // 見える範囲は常に末尾の `rows` 行。中身のある行は捨てない
+        let start0 = out.len() - rows;
         // スクロールバックの上限を超えた古い行を捨てる
         let excess = start0.saturating_sub(self.max_scrollback);
         for _ in 0..excess {
@@ -125,7 +125,7 @@ impl Buffer {
         self.lines = out;
         self.cols = cols;
         self.cursor.x = cursor.1;
-        self.cursor.y = (cursor.0 - start0).min(rows - 1);
+        self.cursor.y = cursor.0.saturating_sub(start0).min(rows - 1);
         self.cursor.pending_wrap = cursor.2;
         if let Some(s) = &mut self.saved {
             let (abs, x, pending) = tracked[1].result.expect("saved cursor is tracked");
@@ -154,15 +154,17 @@ fn rewrap_group(
     // 最後の行は、右端の空のセルを捨てる。
     let mut starts = Vec::with_capacity(group.len());
     let mut flat: Vec<Cell> = Vec::new();
-    for (k, line) in group.iter_mut().enumerate() {
+    for k in 0..group.len() {
         starts.push(flat.len());
-        let mut cells = std::mem::take(&mut line.cells);
+        // 次の行が全角の字で始まるなら、この行の最後の空のセルは入りきらなかった余り
+        let next_wide = group.get(k + 1).is_some_and(|l| l.cells[0].width == 2);
+        let mut cells = std::mem::take(&mut group[k].cells);
         let keep = if single && trimmed_len(&cells) <= cols {
             // 組み直す必要が無い行は、右端の空のセルの属性も残す
             cells.len().min(cols)
         } else if k == last {
             trimmed_len(&cells)
-        } else if cells.last().is_some_and(|c| c.is_empty()) {
+        } else if next_wide && cells.last().is_some_and(|c| c.is_empty()) {
             cells.len() - 1
         } else {
             cells.len()
@@ -407,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_in_scrollback_range_after_narrowing_stays_visible() {
+    fn content_below_cursor_is_not_dropped_when_narrowing() {
         let mut s = Screen::new(3, 12);
         s.print_str("abcdefghijkl");
         s.carriage_return();
@@ -415,10 +417,10 @@ mod tests {
         s.print_str("second line");
         s.set_cursor(0, 0);
         s.resize(3, 3);
-        // 下の行が多くなっても、カーソルは見える範囲に残る
-        let c = s.cursor();
-        assert!(c.y < 3);
-        assert_eq!(s.row(c.y).cells()[c.x].text(), "a");
+        // 下の行は捨てずに、見える範囲は末尾の 3 行（"second line" が残る）。カーソルは一番上に寄る
+        assert_eq!(rows(&s), ["ond+", " li+", "ne"]);
+        assert_eq!(s.cursor().y, 0);
+        assert!(s.scrollback_len() > 0);
     }
 
     #[test]
