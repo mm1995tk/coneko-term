@@ -393,6 +393,14 @@ export class Terminal {
     return this.core.bracketed_paste();
   }
 
+  /**
+   * kitty keyboard protocol のいまのフラグ（アプリが `CSI > u` などで決める）。
+   * 1 が立っていれば disambiguate escape codes。対応しているのは 1 だけ。
+   */
+  get keyboardFlags(): number {
+    return this.core.keyboard_flags();
+  }
+
   /** アプリケーションカーソルキー（DECCKM）か。矢印・Home・End の送り方が変わる。 */
   get applicationCursorKeys(): boolean {
     return this.core.application_cursor_keys();
@@ -743,6 +751,7 @@ export class Terminal {
       {
         send: (data) => this.sendUserInput(data),
         applicationCursorKeys: () => this.applicationCursorKeys,
+        keyboardFlags: () => this.keyboardFlags,
         scrollPages: (n) => this.scrollLines(n * (this.rows - 1)),
         scrollToBottom: () => {
           if (this.options.scrollOnUserInput !== false) this.scrollToBottom();

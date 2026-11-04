@@ -68,6 +68,67 @@ const FUNCTION_KEYS: Record<number, [number | string, boolean]> = {
   123: [24, false],
 };
 
+// 修飾キーのビット（CSI のパラメーターは 1 + ビットの和）
+const MOD_SHIFT = 1;
+const MOD_ALT = 2;
+const MOD_CTRL = 4;
+const MOD_SUPER = 8;
+
+/** kitty keyboard protocol のフラグ 1（disambiguate escape codes）。 */
+export const KITTY_DISAMBIGUATE = 1;
+
+/**
+ * フラグ 1 のときの `CSI ... u` を作る。このフラグで形が変わるキーでなければ `undefined`
+ * （そのときは xterm.js と同じ送り方に任せる）。
+ *
+ * - Esc: `CSI 27 u`（修飾キーつきは `CSI 27 ; m u`）。
+ * - Enter・Tab・Backspace: 修飾キーなしは今のまま。修飾キーつきは `CSI 13|9|127 ; m u`。
+ * - F3: `CSI R` は カーソル位置の報告とぶつかるので、`CSI 13 ~`（修飾キーつきは `CSI 13 ; m ~`）。
+ * - 字・数字・記号・空白: Ctrl・Alt・Super のどれかが付いているとき、押したキーの字（Shift なしの
+ *   小文字）を番号にして `CSI code ; m u`。Shift だけなら字そのもの。
+ * - 矢印・Home・End・PageUp・PageDown・Insert・Delete・F1・F2・F4〜F12 は今のまま。
+ *
+ * `m` は 1 + (Shift 1, Alt 2, Ctrl 4, Super 8)。Super は `metaKey`。
+ *
+ * やらないもの（#30 以降）: Caps Lock などの字を出さないキー、テンキーの非文字キー（KP_Enter など）、
+ * 修飾キーそのものの押下。`keyCode` だけで決めるので、これらは今の送り方のまま。
+ */
+function kittyDisambiguate(
+  ev: KeyEventLike,
+  modifiers: number,
+  isMac: boolean,
+  macOptionIsMeta: boolean,
+): string | undefined {
+  const csi = (code: number, final: string) =>
+    modifiers
+      ? `${ESC}[${code};${modifiers + 1}${final}`
+      : `${ESC}[${code}${final}`;
+  const u = (code: number) => csi(code, "u");
+  switch (ev.keyCode) {
+    case 27:
+      return u(27);
+    case 8:
+      return modifiers ? u(127) : undefined;
+    case 9:
+      return modifiers ? u(9) : undefined;
+    case 13:
+      return modifiers ? u(13) : undefined;
+    case 114:
+      return csi(13, "~");
+  }
+  // 字を打つキーで、Ctrl・Alt・Super が付いているもの
+  if (!(modifiers & (MOD_ALT | MOD_CTRL | MOD_SUPER))) return undefined;
+  // macOS の Option（macOptionIsMeta が false）は字を打つキー。Windows の AltGr は呼ぶ側が除く
+  if (isMac && !macOptionIsMeta && ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+    return undefined;
+  }
+  if (ev.keyCode >= 65 && ev.keyCode <= 90) return u(ev.keyCode + 32);
+  if (ev.keyCode === 32) return u(32);
+  const mapping = KEYCODE_KEY_MAPPINGS[ev.keyCode];
+  if (mapping) return u(mapping[0].charCodeAt(0));
+  return undefined;
+}
+
 /** 矢印・Home・End。修飾キーが無ければ、アプリケーションカーソルキーで `SS3`、そうでなければ `CSI`。 */
 function cursorKey(
   letter: string,
@@ -82,6 +143,8 @@ function cursorKey(
  * キーが押されたとき、PTY へ送る文字列を決める（xterm.js 6.0.0 の `evaluateKeyboardEvent` と同じ）。
  *
  * - `applicationCursorMode`: DECCKM（#5）。矢印・Home・End が `CSI` か `SS3` かを決める。
+ * - `kittyFlags`: kitty keyboard protocol のフラグ（`Terminal.keyboardFlags`）。1 が立っていれば、
+ *   Esc や、Ctrl・Alt つきの字などを `CSI ... u` で送る。0 なら xterm.js と同じ。
  * - `isMac`: macOS か。Option は `macOptionIsMeta` が false なら字を打つキーとして扱い、ここでは送らない。
  * - Cmd（`metaKey`）つきのキーをアプリに任せるかどうかは呼ぶ側が決める（`KeyHandler` が送らない）。
  */
@@ -90,13 +153,22 @@ export function evaluateKeyboardEvent(
   applicationCursorMode: boolean,
   isMac: boolean,
   macOptionIsMeta: boolean,
+  kittyFlags = 0,
 ): KeyResult {
   const result: KeyResult = { type: "send", cancel: false, key: undefined };
   const modifiers =
-    (ev.shiftKey ? 1 : 0) |
-    (ev.altKey ? 2 : 0) |
-    (ev.ctrlKey ? 4 : 0) |
-    (ev.metaKey ? 8 : 0);
+    (ev.shiftKey ? MOD_SHIFT : 0) |
+    (ev.altKey ? MOD_ALT : 0) |
+    (ev.ctrlKey ? MOD_CTRL : 0) |
+    (ev.metaKey ? MOD_SUPER : 0);
+  if (kittyFlags & KITTY_DISAMBIGUATE) {
+    const key = kittyDisambiguate(ev, modifiers, isMac, macOptionIsMeta);
+    if (key !== undefined) {
+      result.key = key;
+      result.cancel = true;
+      return result;
+    }
+  }
   switch (ev.keyCode) {
     case 0: {
       // iOS の矢印

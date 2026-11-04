@@ -315,6 +315,12 @@ impl WasmTerminal {
         self.term.modes().application_cursor_keys
     }
 
+    /// いまの画面の kitty keyboard protocol のフラグ（`CSI ? u` で答える値）。
+    /// 1 が立っていれば disambiguate escape codes。
+    pub fn keyboard_flags(&self) -> u32 {
+        self.term.keyboard_flags()
+    }
+
     /// 変わった行（見えている画面の行番号）を返し、「変わった」の印を消す。
     pub fn take_dirty_rows(&mut self) -> Vec<u32> {
         self.term
