@@ -60,6 +60,8 @@ let
         ./tsconfig.json
         ./tsconfig.test.json
         ./src/index.ts
+        ./src/memory.ts
+        ./src/terminal.ts
         ./test
         ./LICENSE
       ];
