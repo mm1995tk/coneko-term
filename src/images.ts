@@ -77,7 +77,7 @@ export interface ImageDecoder {
   fromPng(bytes: Uint8Array): Promise<DrawableImage>;
   /** RGBA（1 画素 4 バイト）の画素から作る。 */
   fromRgba(rgba: Uint8ClampedArray, width: number, height: number): Promise<DrawableImage>;
-  /** PNG を RGBA の画素に読み解く。アニメーションのコマの合成に使う。無ければ、PNG のコマは使わない。 */
+  /** PNG を RGBA の画素に読み解く。アニメーションのコマの合成に使う。無ければ、PNG の画像はアニメーションにせず、根だけを描く。 */
   toRgba?(bytes: Uint8Array): Promise<Pixels>;
 }
 
@@ -151,6 +151,8 @@ interface AnimState {
 interface Entry {
   serial: number;
   image?: DrawableImage;
+  /** 根を通常の画像として読み解き始めたか。 */
+  started?: boolean;
   anim?: AnimState;
 }
 
@@ -234,7 +236,7 @@ export class ImageCache {
   /** 読み解き終えた画像。まだ、または読み解けなかったら `undefined`（初めて頼まれたら読み解きを始める）。 */
   get(id: number): DrawableImage | undefined {
     let entry = this.entries.get(id);
-    const anim = this.animation(id);
+    const anim = entry?.anim?.dead ? undefined : this.animation(id);
     if (anim) {
       if (!entry) {
         const info = this.source.imageInfo(id);
@@ -244,11 +246,24 @@ export class ImageCache {
       }
       return this.getAnimated(id, entry, anim);
     }
-    if (entry) return entry.image;
+    if (entry) {
+      // コマを使えない画像は、根だけを通常の画像として描く
+      if (entry.anim?.dead && !entry.started) this.startDecode(id, entry);
+      return entry.image;
+    }
     const info = this.source.imageInfo(id);
     if (info.length < 5) return undefined;
     const fresh: Entry = { serial: info[0] };
     this.entries.set(id, fresh);
+    this.startDecode(id, fresh);
+    return undefined;
+  }
+
+  /** 画像そのもの（根）を読み解き始める。 */
+  private startDecode(id: number, fresh: Entry): void {
+    const info = this.source.imageInfo(id);
+    if (info.length < 5) return;
+    fresh.started = true;
     const data = this.source.imageData(id);
     void this.decode(info, data).then(
       (image) => {
@@ -261,7 +276,6 @@ export class ImageCache {
       },
       () => {}, // 読み解けない画像は描かない
     );
-    return undefined;
   }
 
   private drop(id: number, entry: Entry): void {
@@ -397,7 +411,8 @@ export class ImageCache {
         if (old && old !== a.shown) old.close?.();
       }
     } catch {
-      // 当てられない操作は飛ばして、次へ（コマの絵が足りなくても、描かないだけ）
+      // 根が読めなければ、コマは使わない。操作が当てられないだけなら、飛ばして次へ
+      if (a.frames.length === 0) a.dead = true;
     } finally {
       a.busy = false;
     }
@@ -416,7 +431,7 @@ export class ImageCache {
       const [, srcFrame, dstFrame, sx, sy, dx, dy, w, h, overwrite] = Array.from(op);
       const src = a.frames[srcFrame - 1];
       const dst = a.frames[dstFrame - 1];
-      if (src && dst && src !== dst) {
+      if (src && dst) {
         // 絵を作っている途中の写しと取り違えないよう、新しい画素に差し替える
         const next = clone(dst);
         compose(next, src, sx, sy, dx, dy, w, h, overwrite !== 0);

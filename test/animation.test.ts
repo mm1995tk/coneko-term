@@ -290,3 +290,18 @@ test("animation: PNG frames are read with the decoder's toRgba", async () => {
   await showing(RED);
   t.dispose();
 });
+
+test("animation: a=c within one frame composes rectangles that do not overlap", async () => {
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { showing, advance } = setup(t);
+  await sendRoot(t);
+  await write(t, apc("a=f,f=32,s=2,v=2,i=1,z=10", [...GREEN, ...RED, ...RED, ...RED]));
+  await write(t, apc("a=a,i=1,r=1,z=10,s=3"));
+  await showing(rep(RED, 4));
+  await advance(10);
+  await showing([...GREEN, ...RED, ...RED, ...RED]);
+  // コマ 2 の左の列を、同じコマの右の列へ
+  await write(t, apc("a=c,i=1,r=2,c=2,w=1,h=2,X=0,Y=0,x=1,y=0,C=1"));
+  await showing([...GREEN, ...GREEN, ...RED, ...RED]);
+  t.dispose();
+});

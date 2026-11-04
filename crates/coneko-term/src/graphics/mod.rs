@@ -304,7 +304,7 @@ impl Graphics {
     }
 
     /// `keep` 以外の画像を古い順に、合計が `limit` 以下になるまで捨てる。
-    pub(super) fn evict_keeping(&mut self, limit: usize, keep: u32) {
+    fn evict_keeping(&mut self, limit: usize, keep: u32) {
         while self.bytes > limit {
             let Some(pos) = self.images.iter().position(|i| i.id != keep) else {
                 break;
