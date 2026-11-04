@@ -6,6 +6,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::cell::{Attrs, Cell, Content};
 
+mod reflow;
+
 /// 行。
 #[derive(Clone, Debug)]
 pub struct Line {
@@ -21,6 +23,11 @@ impl Line {
             wrapped: false,
             dirty: true,
         }
+    }
+
+    /// 何も書かれていない行か。
+    pub(crate) fn is_blank(&self) -> bool {
+        self.cells.iter().all(Cell::is_empty)
     }
 
     /// 行のセル。列数と同じ数ある。
@@ -120,6 +127,8 @@ pub(crate) struct Buffer {
     pub scroll_top: usize,
     pub scroll_bottom: usize,
     pub tabs: Vec<bool>,
+    /// 列の数が変わったとき、折り返した行を組み直すか（主画面だけ）。
+    pub reflow_enabled: bool,
 }
 
 fn default_tabs(cols: usize) -> Vec<bool> {
@@ -140,6 +149,15 @@ impl Buffer {
             scroll_top: 0,
             scroll_bottom: rows - 1,
             tabs: default_tabs(cols),
+            reflow_enabled: true,
+        }
+    }
+
+    /// 代替画面のバッファ。スクロールバックを持たず、組み直しもしない。
+    pub fn new_alt(rows: usize, cols: usize) -> Buffer {
+        Buffer {
+            reflow_enabled: false,
+            ..Buffer::new(rows, cols, 0)
         }
     }
 
@@ -414,13 +432,21 @@ impl Buffer {
         self.lines.drain(..n);
     }
 
+    /// 大きさを変える。主画面は折り返した行を組み直す（`reflow`）。代替画面は組み直さず、はみ出した
+    /// 列を切り詰める（xterm.js と同じ）。
     pub fn resize(&mut self, rows: usize, cols: usize) {
-        let mut shifted = 0;
+        self.resize_rows(rows);
+        let mut reflowed = false;
         if cols != self.cols {
-            for line in &mut self.lines {
-                line.resize(cols);
+            if self.reflow_enabled {
+                self.reflow(cols);
+                reflowed = true;
+            } else {
+                for line in &mut self.lines {
+                    line.resize(cols);
+                }
+                self.cols = cols;
             }
-            self.cols = cols;
             // 広げた分には既定のタブ位置を足す
             let old = self.tabs.len();
             let defaults = default_tabs(cols);
@@ -429,35 +455,57 @@ impl Buffer {
                 self.tabs[old..].copy_from_slice(&defaults[old..]);
             }
         }
+        self.scroll_top = 0;
+        self.scroll_bottom = rows - 1;
+        self.cursor.y = self.cursor.y.min(rows - 1);
+        self.cursor.x = self.cursor.x.min(cols - 1);
+        if !reflowed {
+            self.cursor.pending_wrap = false;
+        }
+        if let Some(s) = &mut self.saved {
+            s.y = s.y.min(rows - 1);
+            s.x = s.x.min(cols - 1);
+        }
+        self.mark_all_dirty();
+    }
+
+    /// 行の数だけを変える（xterm.js 6.0.0 と同じ）。
+    /// 減るとき: カーソルより下の行を捨て、足りなければ上の行をスクロールバックへ送る。
+    /// 増えるとき: カーソルが最下行でスクロールバックがあれば、そこから行を引き戻す。
+    /// そうでなければ下に空行を足す。
+    fn resize_rows(&mut self, rows: usize) {
         if rows < self.rows {
             let remove = self.rows - rows;
-            // カーソルより下の行は捨て、足りなければ上の行をスクロールバックへ送る
             let below = self.rows - 1 - self.cursor.y;
             let drop_bottom = remove.min(below);
             for _ in 0..drop_bottom {
                 self.lines.pop_back();
             }
-            shifted = remove - drop_bottom;
+            let shifted = remove - drop_bottom;
             self.cursor.y -= shifted;
+            if let Some(s) = &mut self.saved {
+                s.y = s.y.saturating_sub(shifted);
+            }
             self.rows = rows;
             while self.lines.len() > self.rows + self.max_scrollback {
                 self.lines.pop_front();
             }
         } else if rows > self.rows {
-            for _ in self.rows..rows {
-                self.lines.push_back(Line::blank(cols, Attrs::default()));
+            let add = rows - self.rows;
+            let pulled = if self.cursor.y == self.rows - 1 {
+                add.min(self.scrollback_len())
+            } else {
+                0
+            };
+            for _ in pulled..add {
+                self.lines
+                    .push_back(Line::blank(self.cols, Attrs::default()));
+            }
+            self.cursor.y += pulled;
+            if let Some(s) = &mut self.saved {
+                s.y += pulled;
             }
             self.rows = rows;
         }
-        self.scroll_top = 0;
-        self.scroll_bottom = rows - 1;
-        self.cursor.y = self.cursor.y.min(rows - 1);
-        self.cursor.x = self.cursor.x.min(cols - 1);
-        self.cursor.pending_wrap = false;
-        if let Some(s) = &mut self.saved {
-            s.y = s.y.saturating_sub(shifted).min(rows - 1);
-            s.x = s.x.min(cols - 1);
-        }
-        self.mark_all_dirty();
     }
 }
