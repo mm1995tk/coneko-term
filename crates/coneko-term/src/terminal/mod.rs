@@ -276,7 +276,7 @@ impl State {
         let c = self.screen.cursor();
         if self.modes.reverse_wraparound
             && c.x == 0
-            && c.y > 0
+            && c.y > self.screen.scroll_region().0
             && self.screen.row(c.y - 1).is_wrapped()
         {
             let cols = self.screen.cols();
@@ -396,6 +396,12 @@ impl State {
         let (charsets, gl) = self.saved_charsets.unwrap_or(([Charset::Ascii; 4], 0));
         self.charsets = charsets;
         self.gl = gl;
+        if self.modes.origin {
+            // 原点モードでは、カーソルはスクロール範囲の外に出ない（xterm.js の _restrictCursor）。
+            let (top, bottom) = self.screen.scroll_region();
+            let c = self.screen.cursor();
+            self.screen.set_cursor(c.x, c.y.clamp(top, bottom));
+        }
     }
 
     fn full_reset(&mut self) {
@@ -568,7 +574,11 @@ impl State {
             0
         };
         let q = if private { "?" } else { "" };
-        self.reply(&format!("\x1b[{q}{};{}R", c.y - top + 1, c.x + 1));
+        self.reply(&format!(
+            "\x1b[{q}{};{}R",
+            c.y.saturating_sub(top) + 1,
+            c.x + 1
+        ));
     }
 
     fn reply_color(&mut self, ps: &str, color: Rgb, bell: bool) {

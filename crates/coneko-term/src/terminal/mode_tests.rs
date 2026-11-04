@@ -424,3 +424,19 @@ fn replies_survive_split_writes() {
     w(&mut t, "n");
     assert_eq!(out(&mut t), "\x1b[0n");
 }
+
+#[test]
+fn origin_mode_restore_cursor_stays_in_region() {
+    let mut t = term(10, 10);
+    w(&mut t, "\x1b7\x1b[3;6r\x1b[?6h\x1b8");
+    assert_eq!(pos(&t), (0, 2));
+    w(&mut t, "\x1b[6n");
+    assert_eq!(out(&mut t), "\x1b[1;1R");
+}
+
+#[test]
+fn reverse_wraparound_stops_at_region_top() {
+    let mut t = term(5, 4);
+    w(&mut t, "abcde\x1b[?45h\x1b[2;4r\x1b[2;1H\x08");
+    assert_eq!(pos(&t), (0, 1));
+}
