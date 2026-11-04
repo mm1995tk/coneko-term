@@ -553,6 +553,8 @@ test("multiple cursors: set, query and clear through the Terminal", async () => 
   // 画面を消すと、全部消える
   await write(t, "\x1b[2J");
   assert.deepEqual(t.extraCursors, []);
+  t.dispose();
+});
 
 const osc5113 = (body: string) => `\x1b]5113;${body}\x1b\\`;
 
