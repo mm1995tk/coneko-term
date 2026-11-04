@@ -82,7 +82,7 @@ impl Screen {
         assert!(rows >= 1 && cols >= 1, "rows and cols must be at least 1");
         Screen {
             primary: Buffer::new(rows, cols, scrollback),
-            alt: Buffer::new(rows, cols, 0),
+            alt: Buffer::new_alt(rows, cols),
             alt_active: false,
             pen: Attrs::default(),
             wraparound: true,
@@ -433,7 +433,7 @@ impl Screen {
             return;
         }
         let (rows, cols) = (self.primary.rows, self.primary.cols);
-        self.alt = Buffer::new(rows, cols, 0);
+        self.alt = Buffer::new_alt(rows, cols);
         self.alt_active = true;
     }
 
@@ -448,8 +448,10 @@ impl Screen {
 
     // ---- 大きさ ----
 
-    /// 大きさを変える。折り返し直しはしない（#6）。はみ出した列は切り詰める。
+    /// 大きさを変える。主画面は、列の数が変わったら折り返した行を組み直す（スクロールバックも）。
+    /// 代替画面は組み直さず、はみ出した列を切り詰める。
     /// 行が減るときは、カーソルより下の行を捨て、足りなければ上の行をスクロールバックへ送る。
+    /// 増えるときは、カーソルが最下行ならスクロールバックから行を引き戻す。
     pub fn resize(&mut self, rows: usize, cols: usize) {
         assert!(rows >= 1 && cols >= 1, "rows and cols must be at least 1");
         self.primary.resize(rows, cols);

@@ -377,8 +377,9 @@ fn cursor_appearance() {
 }
 
 #[test]
-fn resize_truncates_without_reflow() {
+fn resize_truncates_on_alt_screen() {
     let mut s = Screen::new(3, 6);
+    s.enter_alt_screen();
     s.print_str("abcdef");
     s.resize(3, 3);
     assert_eq!(row_text(&s, 0), "abc");
@@ -390,8 +391,9 @@ fn resize_truncates_without_reflow() {
 }
 
 #[test]
-fn resize_cutting_wide_char_clears_it() {
+fn resize_cutting_wide_char_on_alt_screen_clears_it() {
     let mut s = Screen::new(2, 4);
+    s.enter_alt_screen();
     s.print_str("abあ");
     s.resize(2, 3);
     assert_eq!(row_text(&s, 0), "ab");
