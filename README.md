@@ -69,7 +69,7 @@ nix flake check      # formatting, cargo test, npm package build and tests (what
 nix build .#npm      # the npm tarball, with the .wasm and the .d.ts
 ```
 
-See [AGENTS.md](AGENTS.md) for the rules.
+See [AGENTS.md](AGENTS.md) for the rules. For publishing to crates.io and npm, see [RELEASING.md](RELEASING.md).
 
 ## License
 

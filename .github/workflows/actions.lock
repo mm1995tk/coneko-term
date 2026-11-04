@@ -6,6 +6,10 @@ workflows:
     '.github/workflows/check.yml':
         - 'actions/checkout@v7.0.1'
         - 'cachix/install-nix-action@v31.11.3'
+    '.github/workflows/release.yml':
+        - 'actions/checkout@v7.0.1'
+        - 'cachix/install-nix-action@v31.11.3'
+        - 'rust-lang/crates-io-auth-action@v1.0.6'
 dependencies:
     'actions/checkout@v7.0.1':
         ref: 'v7.0.1'
@@ -17,3 +21,8 @@ dependencies:
         commit: 'sha1-75c75c31ebece974e48ebc36b4ad125bd97bd97b'
         owner_id: 36824654
         repo_id: 212301524
+    'rust-lang/crates-io-auth-action@v1.0.6':
+        ref: 'v1.0.6'
+        commit: 'sha1-3268eb413133e2960fa4ae0e963ca76380c54cd9'
+        owner_id: 5430905
+        repo_id: 1008931044
