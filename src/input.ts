@@ -179,6 +179,8 @@ export interface KeyHandlerHost {
   applicationCursorKeys(): boolean;
   /** 表示位置を `n` ページ動かす（負で上）。 */
   scrollPages(n: number): void;
+  /** 一番下へ戻す（`scrollOnUserInput` が true のとき）。 */
+  scrollToBottom(): void;
   readonly isMac: boolean;
   readonly isWindows: boolean;
   readonly macOptionIsMeta: boolean;
@@ -230,13 +232,16 @@ export class KeyHandler {
     this.keyDownSeen = true;
     const custom = this.host.customKeyHandler();
     if (custom && custom(ev as unknown as KeyboardEvent) === false) return false;
-    // Cmd を押したキーは送らない（アプリのショートカットに任せる）
-    if (this.host.isMac && ev.metaKey) return true;
-
     const h = this.host;
     // macOptionIsMeta のとき、Option の変換は使わない
     const ignoreComposition = h.isMac && h.macOptionIsMeta && ev.altKey;
-    if (!ignoreComposition && !this.composition.keydown(ev)) return false;
+    if (!ignoreComposition && !this.composition.keydown(ev)) {
+      // 変換のキー。変換中の字は一番下のカーソルの位置に出すので、さかのぼっていたら戻す（xterm.js と同じ）
+      h.scrollToBottom();
+      return false;
+    }
+    // Cmd を押したキーは送らない（アプリのショートカットに任せる）。変換の確定のあとで判断する
+    if (h.isMac && ev.metaKey) return true;
 
     if (!ignoreComposition && (ev.key === "Dead" || ev.key === "AltGraph")) {
       this.unprocessedDeadKey = true;
@@ -267,7 +272,7 @@ export class KeyHandler {
       this.unprocessedDeadKey = false;
       return true;
     }
-    // Ctrl+C か Enter のあとは、`textarea` を空にする
+    // xterm.js と同じく、Ctrl+C と Enter のあとは `textarea` に字をためない
     if (result.key === "\x03" || result.key === "\r") this.textarea.value = "";
 
     h.send(result.key);
@@ -275,8 +280,10 @@ export class KeyHandler {
     return false;
   }
 
-  keyUp(): void {
+  keyUp(ev: KeyDownLike): void {
     this.keyDownSeen = false;
+    const custom = this.host.customKeyHandler();
+    if (custom && custom(ev as unknown as KeyboardEvent) === false) return;
     this.keyPressHandled = false;
   }
 

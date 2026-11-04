@@ -4,6 +4,7 @@ import {
   CompositionHelper,
   KeyHandler,
   detectPlatform,
+  type CompositionAnchor,
   type CompositionViewLike,
 } from "./input.js";
 import { bracketTextForPaste, prepareTextForTerminal } from "./keyboard.js";
@@ -126,6 +127,9 @@ const ANSI_NAMES = [
   "brightWhite",
 ] as const;
 
+const DEFAULT_FONT_FAMILY = "monospace";
+const DEFAULT_FONT_SIZE = 15;
+
 // xterm.js 6.0.0 の既定のテーマ（Rust の本体の既定と同じ）
 const DEFAULT_THEME: Required<Omit<Theme, "selectionBackground">> = {
   foreground: "#ffffff",
@@ -237,6 +241,14 @@ export class Terminal {
       Uint8Array.from(parseColor(t.cursor)),
       ansi,
     );
+  }
+
+  private get fontFamily(): string {
+    return this.options.fontFamily ?? DEFAULT_FONT_FAMILY;
+  }
+
+  private get fontSize(): number {
+    return this.options.fontSize ?? DEFAULT_FONT_SIZE;
   }
 
   /** 列の数。 */
@@ -521,7 +533,7 @@ export class Terminal {
   }
 
   /**
-   * 欄の要素に付ける。canvas とスクロールバーを持つ要素（`tabindex` つき）を作り、
+   * 欄の要素に付ける。canvas・スクロールバー・見えない `textarea`（フォーカスを受ける）を持つ要素を作り、
    * Canvas 2D で描き始める。字の幅と高さは、フォントを読み終えてから測り直す。
    * 欄の大きさに合わせるには `fit()` を呼ぶ。
    */
@@ -574,81 +586,51 @@ export class Terminal {
    * 変換中の字は、カーソルの位置に重ねて見せる。
    */
   private setupInput(doc: Document, el: HTMLElement): void {
-    const textarea = doc.createElement("textarea");
-    textarea.className = "coneko-term-input";
-    textarea.setAttribute("aria-label", "Terminal input");
-    textarea.setAttribute("autocorrect", "off");
-    textarea.setAttribute("autocapitalize", "off");
-    textarea.setAttribute("autocomplete", "off");
-    textarea.setAttribute("spellcheck", "false");
-    textarea.setAttribute("wrap", "off");
-    textarea.tabIndex = 0;
-    Object.assign(textarea.style, {
-      position: "absolute",
-      left: "-9999em",
-      top: "0",
-      width: "0",
-      height: "0",
-      padding: "0",
-      border: "0",
-      margin: "0",
-      opacity: "0",
-      zIndex: "-5",
-      whiteSpace: "nowrap",
-      overflow: "hidden",
-      resize: "none",
-    });
-
-    const viewEl = doc.createElement("div");
-    viewEl.className = "coneko-term-composition";
-    Object.assign(viewEl.style, {
-      display: "none",
-      position: "absolute",
-      whiteSpace: "nowrap",
-      zIndex: "1",
-      background: this.resolvedTheme.background,
-      color: this.resolvedTheme.foreground,
-    });
-    const view: CompositionViewLike = {
-      get textContent() {
-        return viewEl.textContent;
-      },
-      set textContent(v) {
-        viewEl.textContent = v;
-      },
-      style: viewEl.style as unknown as CompositionViewLike["style"],
-      getBoundingClientRect: () => viewEl.getBoundingClientRect(),
-      show: () => void (viewEl.style.display = "inline-block"),
-      hide: () => void (viewEl.style.display = "none"),
-    };
+    const textarea = createInputTextarea(doc);
+    const { element: viewEl, view } = createCompositionView(
+      doc,
+      this.resolvedTheme.background,
+      this.resolvedTheme.foreground,
+    );
     el.append(textarea, viewEl);
-
-    const platform = detectPlatform();
     const composition = new CompositionHelper(
       textarea,
       view,
       (data) => this.sendUserInput(data),
-      () => {
-        const cell = this.renderer?.cellSize;
-        if (!cell || this.viewportOffset !== 0) return undefined;
-        const c = this.cursor;
-        return {
-          left: Math.min(c.x, this.cols - 1) * cell.width,
-          top: c.y * cell.height,
-          cellHeight: cell.height,
-        };
-      },
-      () => ({
-        family: this.options.fontFamily ?? "monospace",
-        size: this.options.fontSize ?? 15,
-      }),
+      () => this.compositionAnchor(),
+      () => ({ family: this.fontFamily, size: this.fontSize }),
     );
     this.composition = composition;
-    const keys = new KeyHandler(
+    this.textarea = textarea;
+    const keys = this.createKeyHandler(textarea, composition);
+    this.bindInputEvents(textarea, el, keys, composition);
+  }
+
+  /** 変換中の字を出す位置。さかのぼって見ていて、カーソルが見えないときは `undefined`。 */
+  private compositionAnchor(): CompositionAnchor | undefined {
+    const cell = this.renderer?.cellSize;
+    if (!cell || this.viewportOffset !== 0) return undefined;
+    const c = this.cursor;
+    return {
+      left: Math.min(c.x, this.cols - 1) * cell.width,
+      top: c.y * cell.height,
+      cellHeight: cell.height,
+    };
+  }
+
+  private createKeyHandler(
+    textarea: HTMLTextAreaElement,
+    composition: CompositionHelper,
+  ): KeyHandler {
+    const platform = detectPlatform();
+    return new KeyHandler(
       {
         send: (data) => this.sendUserInput(data),
         applicationCursorKeys: () => this.applicationCursorKeys,
         scrollPages: (n) => this.scrollLines(n * (this.rows - 1)),
+        scrollToBottom: () => {
+          if (this.options.scrollOnUserInput !== false) this.scrollToBottom();
+        },
         isMac: platform.isMac,
         isWindows: platform.isWindows,
         macOptionIsMeta: this.options.macOptionIsMeta ?? false,
@@ -657,8 +639,14 @@ export class Terminal {
       textarea,
       composition,
     );
-    this.textarea = textarea;
+  }
 
+  private bindInputEvents(
+    textarea: HTMLTextAreaElement,
+    el: HTMLElement,
+    keys: KeyHandler,
+    composition: CompositionHelper,
+  ): void {
     const on = <E extends Event>(
       target: EventTarget,
       type: string,
@@ -670,7 +658,7 @@ export class Terminal {
       this.cleanups.push(() => target.removeEventListener(type, h, capture));
     };
     on<KeyboardEvent>(textarea, "keydown", (e) => void keys.keyDown(e), true);
-    on<KeyboardEvent>(textarea, "keyup", () => keys.keyUp(), true);
+    on<KeyboardEvent>(textarea, "keyup", (e) => keys.keyUp(e), true);
     on<KeyboardEvent>(textarea, "keypress", (e) => void keys.keyPress(e), true);
     on<InputEvent>(textarea, "input", (e) => void keys.input(e), true);
     on<CompositionEvent>(textarea, "compositionstart", () =>
@@ -709,7 +697,7 @@ export class Terminal {
     const remeasure = () => {
       if (!this.disposed) renderer.measure();
     };
-    const spec = `${this.options.fontSize ?? 15}px ${this.options.fontFamily ?? "monospace"}`;
+    const spec = `${this.fontSize}px ${this.fontFamily}`;
     void fonts.load(spec).then(remeasure, () => {});
     void fonts.ready.then(remeasure, () => {});
     fonts.addEventListener("loadingdone", remeasure);
@@ -740,8 +728,8 @@ export class Terminal {
   private renderOptions() {
     const t = this.resolvedTheme;
     return {
-      fontFamily: this.options.fontFamily ?? "monospace",
-      fontSize: this.options.fontSize ?? 15,
+      fontFamily: this.fontFamily,
+      fontSize: this.fontSize,
       lineHeight: this.options.lineHeight ?? 1,
       palette: new Palette(
         ANSI_NAMES.map((n) => t[n]),
@@ -934,4 +922,64 @@ function stripUndefined<T extends object>(o: T): Partial<T> {
   return Object.fromEntries(
     Object.entries(o).filter(([, v]) => v !== undefined),
   ) as Partial<T>;
+}
+
+/** キーと変換を受ける、見えない `textarea`。 */
+function createInputTextarea(doc: Document): HTMLTextAreaElement {
+  const textarea = doc.createElement("textarea");
+  textarea.className = "coneko-term-input";
+  textarea.setAttribute("aria-label", "Terminal input");
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocapitalize", "off");
+  textarea.setAttribute("autocomplete", "off");
+  textarea.setAttribute("spellcheck", "false");
+  textarea.setAttribute("wrap", "off");
+  textarea.tabIndex = 0;
+  Object.assign(textarea.style, {
+    position: "absolute",
+    left: "-9999em",
+    top: "0",
+    width: "0",
+    height: "0",
+    padding: "0",
+    border: "0",
+    margin: "0",
+    opacity: "0",
+    zIndex: "-5",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    resize: "none",
+  });
+  return textarea;
+}
+
+/** 変換中の字を見せる要素と、`CompositionHelper` が使う見え方。 */
+function createCompositionView(
+  doc: Document,
+  background: string,
+  color: string,
+): { element: HTMLElement; view: CompositionViewLike } {
+  const element = doc.createElement("div");
+  element.className = "coneko-term-composition";
+  Object.assign(element.style, {
+    display: "none",
+    position: "absolute",
+    whiteSpace: "nowrap",
+    zIndex: "1",
+    background,
+    color,
+  });
+  const view: CompositionViewLike = {
+    get textContent() {
+      return element.textContent;
+    },
+    set textContent(v) {
+      element.textContent = v;
+    },
+    style: element.style,
+    getBoundingClientRect: () => element.getBoundingClientRect(),
+    show: () => void (element.style.display = "inline-block"),
+    hide: () => void (element.style.display = "none"),
+  };
+  return { element, view };
 }

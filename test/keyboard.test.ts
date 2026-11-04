@@ -240,6 +240,7 @@ function makeHandler(opts: { isMac?: boolean; macOptionIsMeta?: boolean; app?: b
       send: (d) => sent.push(d),
       applicationCursorKeys: () => opts.app ?? false,
       scrollPages: (n) => pages.push(n),
+      scrollToBottom: () => {},
       isMac: opts.isMac ?? false,
       isWindows: false,
       macOptionIsMeta: opts.macOptionIsMeta ?? false,
@@ -289,7 +290,7 @@ test("KeyHandler leaves capital letters to keypress, and Cmd keys to the app", (
   assert.equal(h.handler.keyDown(cmdC), true);
   assert.equal(cmdC.prevented, false);
   assert.deepEqual(h.sent, ["A"]);
-  h.handler.keyUp();
+  h.handler.keyUp(domEvent(65));
   // Option は字を打つキー。keydown では送らず、字は input で来る
   const opt = domEvent(65, { key: "å", altKey: true });
   h.handler.keyDown(opt);
@@ -342,4 +343,16 @@ test("composition: Enter while converting confirms the text first", () => {
   assert.deepEqual(h.sent, ["かな", "\r"]);
   h.run();
   assert.deepEqual(h.sent, ["かな", "\r"]);
+});
+
+test("composition: a Cmd key while converting confirms the text, then is left to the app", () => {
+  const h = makeHandler({ isMac: true });
+  h.composition.compositionstart();
+  h.textarea.value = "かな";
+  h.composition.compositionupdate("かな");
+  h.run();
+  const e = domEvent(67, { key: "c", metaKey: true });
+  assert.equal(h.handler.keyDown(e), true);
+  assert.deepEqual(h.sent, ["かな"]);
+  assert.equal(e.prevented, false);
 });
