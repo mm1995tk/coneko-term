@@ -1,12 +1,22 @@
 name: リリース
 
-# v0.1.0 の形のタグを push すると、crate を crates.io に、npm パッケージを npm に公開する。
+# Actions の画面（または gh workflow run release.yml -f bump=<桁>）で main から起動する。
+# 版を上げてコミットし、タグ vX.Y.Z を打って main と release ブランチと一緒に push し、
+# crate を crates.io に、npm パッケージを npm に公開する。
 # 長く使えるトークンは置かない。どちらも trusted publishing（GitHub Actions の OIDC）で認証する。
 # 手順と、最初の 1 回だけ手で要ること（初回公開と trusted publisher の登録）は RELEASING.md を見よ。
 
 on:
-  push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "上げるバージョンの桁"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
 
 permissions:
   contents: read
@@ -16,34 +26,83 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
-    name: 検査
+  release:
+    name: 版を上げてタグを打つ
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      next: ${{ steps.ver.outputs.next }}
     steps:
+      - name: main 以外では実行しない
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::main ブランチで実行してください（現在: $GITHUB_REF）"
+          exit 1
+
       - uses: actions/checkout@v7.0.1
+        with:
+          # release ブランチを早送りで進めるとき、git が今の release が新しいコミットの祖先だと確かめられるよう、
+          # 履歴を全部取る（1 コミット分だけだと push が拒否される）。
+          fetch-depth: 0
       - uses: cachix/install-nix-action@v31.11.3
-      - name: タグと版がそろっている
-        run: nix develop -c sh scripts/check-release-version.sh "$GITHUB_REF_NAME"
+
+      - name: バージョンを上げる
+        id: ver
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          next=$(nix develop -c sh scripts/bump-version.sh "$BUMP")
+          if git ls-remote --exit-code --tags origin "refs/tags/v$next" > /dev/null; then
+            echo "::error::タグ v$next はすでにあります"
+            exit 1
+          fi
+          nix develop -c sh scripts/check-release-version.sh "v$next"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+
+      # 上げた版で検査する。落ちたら、コミットもタグも push しない
       - name: nix flake check
         run: nix flake check --print-build-logs
 
+      - name: コミットしてタグを打つ
+        env:
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "v$NEXT"
+          git tag "v$NEXT"
+          # コミット・タグ・release ブランチを同時に push する（どれかが失敗したら全部失敗する）。
+          # release ブランチは最新のリリースを指し、Nix の利用者は github:mm1995tk/coneko-term/release で
+          # main の未リリースの変更を取らずに済む。
+          git push --atomic origin HEAD:main HEAD:refs/heads/release "v$NEXT"
+
+      - name: GitHub Release を作る
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: gh release create "v$NEXT" --title "v$NEXT" --generate-notes --verify-tag
+
   crates-io:
     name: crates.io に公開
-    needs: verify
+    needs: release
     runs-on: ubuntu-latest
-    environment: release
     permissions:
       contents: read
       id-token: write # trusted publishing の OIDC トークン
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: v${{ needs.release.outputs.next }}
+          persist-credentials: false
       - uses: cachix/install-nix-action@v31.11.3
       - name: 公開済みか調べる
         id: published
+        env:
+          NEXT: ${{ needs.release.outputs.next }}
         run: |
-          version=${GITHUB_REF_NAME#v}
-          if curl -fsS -o /dev/null -A "coneko-term-release" "https://crates.io/api/v1/crates/coneko-term/${version}"; then
-            echo "coneko-term ${version} は crates.io に公開済み。飛ばす"
+          if curl -fsS -o /dev/null -A "coneko-term-release" "https://crates.io/api/v1/crates/coneko-term/${NEXT}"; then
+            echo "coneko-term ${NEXT} は crates.io に公開済み。飛ばす"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
       - uses: rust-lang/crates-io-auth-action@v1.0.6
@@ -57,50 +116,29 @@ jobs:
 
   npm:
     name: npm に公開
-    needs: verify
+    needs: release
     runs-on: ubuntu-latest
-    environment: release
     permissions:
       contents: read
       id-token: write # trusted publishing の OIDC トークン（provenance にも使う）
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          ref: v${{ needs.release.outputs.next }}
+          persist-credentials: false
       - uses: cachix/install-nix-action@v31.11.3
       - name: tarball を作る（nix flake check で試したものと同じ）
         run: nix build .#npm --out-link npm-package
       - name: 公開済みか調べる
         id: published
+        env:
+          NEXT: ${{ needs.release.outputs.next }}
         run: |
-          version=${GITHUB_REF_NAME#v}
-          if nix develop -c npm view "coneko-term@${version}" version > /dev/null 2>&1; then
-            echo "coneko-term ${version} は npm に公開済み。飛ばす"
+          if nix develop -c npm view "coneko-term@${NEXT}" version > /dev/null 2>&1; then
+            echo "coneko-term ${NEXT} は npm に公開済み。飛ばす"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           fi
+      # 途中で落ちたら、このジョブの再実行だけで公開できる
       - name: npm publish
         if: steps.published.outputs.skip != 'true'
-        run: |
-          # プレリリース（v0.2.0-rc.1 など）は latest にしない
-          case "$GITHUB_REF_NAME" in
-            *-*) tag=next ;;
-            *) tag=latest ;;
-          esac
-          nix develop -c npm publish ./npm-package/*.tgz --access public --provenance --tag "$tag"
-
-  github-release:
-    name: GitHub のリリースを作る
-    needs: [crates-io, npm]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - name: リリースノートを作って公開
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          case "$GITHUB_REF_NAME" in
-            *-*) flag=--prerelease ;;
-            *) flag= ;;
-          esac
-          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag $flag
+        run: nix develop -c npm publish ./npm-package/*.tgz --access public --provenance --ignore-scripts

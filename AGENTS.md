@@ -28,7 +28,6 @@ Run every command from the root of the repository.
 ## Rules that CI or tests enforce
 
 - **Dependencies**: after changing `Cargo.toml`, commit the updated `Cargo.lock`. The `wasm-bindgen` crate version must equal the `wasm-bindgen-cli` version in nixpkgs (the build fails with a schema version error otherwise).
-  After changing `package-lock.json`, update `npmDepsHash` in `flake-packages.nix` (set it to `lib.fakeHash`, run `nix build .#npm`, and copy the hash it prints).
   After adding or changing a `uses:` in `.github/workflows/`, update `.github/workflows/actions.lock` (`gh actions-lock`).
 
 ## Conventions

@@ -36,7 +36,7 @@ jobs:
           nix fmt
           git diff --exit-code
 
-  # 公開の予行。tag を打つ前に、crates.io と npm が受け取れる形かを確かめる。
+  # 公開の予行。リリースを起動する前に、crates.io と npm が受け取れる形かを確かめる。
   # release.yml と同じ手順で、公開だけしない。ネットワークが要るので nix flake check には入れない
   publish-dry-run:
     runs-on: ubuntu-latest
