@@ -73,8 +73,18 @@ let
         ./LICENSE
       ];
     };
-    # package-lock.json を変えたら、ここを lib.fakeHash にして nix build .#npm を回し、出た値に直す
-    npmDepsHash = "sha256-Uh5Vt83VY/99PbAzQD0eW8ACs9ZmVypyOaYMpBr11tk=";
+    # 依存は package-lock.json の integrity から取る。ハッシュを別に持たないので、
+    # release.yml が版を上げて package-lock.json が変わっても、ここを直さなくてよい
+    npmDeps = pkgs.importNpmLock {
+      npmRoot = lib.fileset.toSource {
+        root = ./.;
+        fileset = lib.fileset.unions [
+          ./package.json
+          ./package-lock.json
+        ];
+      };
+    };
+    npmConfigHook = pkgs.importNpmLock.npmConfigHook;
     npmFlags = [ "--ignore-scripts" ];
     postPatch = ''
       mkdir -p src/wasm
