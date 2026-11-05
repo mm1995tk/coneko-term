@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/coneko-term", "crates/coneko-term-wasm"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/mm1995tk/coneko-term"
