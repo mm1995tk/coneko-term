@@ -315,8 +315,9 @@ export class KeyHandler {
     if (flags & KITTY_REPORT_EVENT_TYPES && (key.startsWith("\x1b[") || key.startsWith("\x1bO"))) {
       this.reported.add(keyId(ev));
     }
-    // keydown が字そのものを送る場合（小文字など）。Ctrl・Alt を押したものは字のキーではない
-    if (hasNoCommandModifier(ev) && key.length === 1 && key >= " " && key !== "\x7f") {
+    // keydown が字を送る場合（小文字、Ctrl+a の `\x01`、Alt+a の `ESC a` など）。
+    // kitty は、押すを従来の形で送ったキーも、離すは `CSI <code>;<mods>:3u` で送る
+    if (!ev.metaKey && [...ev.key].length === 1) {
       this.textPressed.add(keyId(ev));
     }
   }
@@ -342,10 +343,15 @@ export class KeyHandler {
     if (!(flags & KITTY_REPORT_EVENT_TYPES)) return;
     // 変換の途中の keyup は送らない（変換の動きは変えない）
     if (this.composition.isComposing || ev.keyCode === 229) return;
+    // 字を打つ修飾（macOS の Option・Windows の AltGr）。kitty は離すのとき、Option を Alt として
+    // 送り、AltGr は修飾に出さない（Linux）。押すは字のまま送るので、ここは離すだけの扱い
+    const thirdLevel = wasText && this.isThirdLevelShift(ev);
     const result = evaluateKeyboardEvent(
-      ev,
+      !thirdLevel ? ev : h.isWindows ? override(ev, { ctrlKey: false, altKey: false }) : override(ev, { key: "" }),
       h.applicationCursorKeys(),
-      h.isMac,
+      // kittyKeyOf は macOS の Option を字のキーとして除く。離すは除かない。
+      // Option で変わった字（å）ではなく、押したキー（a）の番号で送る（kitty と同じ）
+      thirdLevel && h.isMac ? false : h.isMac,
       h.macOptionIsMeta,
       // 字のキーの離すは、フラグ 8 が無くても `CSI <code>;<mods>:3u`（kitty と同じ）。
       // evaluateKeyboardEvent は字のキーをフラグ 8 のときだけ `CSI` にするので、離すに限って足す。
@@ -403,6 +409,17 @@ export class KeyHandler {
     }
     return false;
   }
+}
+
+/** `ev` の一部の値を差し替えて見せる。 */
+function override(ev: KeyDownLike, values: Partial<Record<keyof KeyDownLike, unknown>>): KeyDownLike {
+  return new Proxy(ev, {
+    get(target, prop) {
+      if (prop in values) return values[prop as keyof KeyDownLike];
+      const v = Reflect.get(target, prop, target);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
 }
 
 /** Ctrl・Alt・Cmd のどれも押していない。 */
