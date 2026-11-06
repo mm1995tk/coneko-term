@@ -298,6 +298,10 @@ impl Out {
             self.cup(at, row);
             self.set_pen(cell.attrs);
             self.text(cell);
+        } else if cell.content == Content::Empty {
+            // 空のセルは字を書けない。空白を書いてから ECH で消す（ECH は折り返し待ちを動かさない）。
+            self.set_pen(cell.attrs);
+            self.raw(" \x1b[1X");
         }
     }
 
@@ -330,7 +334,7 @@ impl Out {
                 continue;
             }
             let first = &next.cells()[0];
-            if cx == cols && starts_text(first) {
+            if cx == cols && starts_text(first, absolute) {
                 carry = true;
             } else if cx < cols
                 && is_plain_blank(&line.cells()[cols - 1])
@@ -437,9 +441,14 @@ fn is_plain_blank(c: &Cell) -> bool {
 }
 
 /// 折り返しの続きとして、字を書けるセルか。
-fn starts_text(c: &Cell) -> bool {
-    matches!(
-        &c.content,
-        Content::Char(_) | Content::Cluster(_) | Content::Sized { dx: 0, dy: 0, .. }
-    )
+fn starts_text(c: &Cell, allow_tall: bool) -> bool {
+    match &c.content {
+        Content::Char(_) | Content::Cluster(_) => true,
+        Content::Sized {
+            block,
+            dx: 0,
+            dy: 0,
+        } => block.scale == 1 || allow_tall,
+        _ => false,
+    }
 }

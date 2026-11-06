@@ -336,3 +336,40 @@ fn replayed_terminal_keeps_working() {
         "after more writes",
     );
 }
+
+#[test]
+fn scrollback_wrapped_line_followed_by_tall_text() {
+    let mut t = term();
+    w(
+        &mut t,
+        &format!("{}\x1b]66;s=2;X\x07y\r\n", "a".repeat(COLS)),
+    );
+    for i in 0..ROWS + 1 {
+        w(&mut t, &format!("r{i}\r\n"));
+    }
+    // 高い字は scrollback には書かないが、前の行は壊れず、行の数も変わらない。
+    let mut b = term();
+    b.write(&t.serialize(5000));
+    let (sa, sb) = (t.screen(), b.screen());
+    assert_eq!(sa.scrollback_len(), sb.scrollback_len());
+    assert_eq!(sa.scrollback_row(0).cells(), sb.scrollback_row(0).cells());
+    for y in 0..ROWS {
+        assert_eq!(sa.row(y).cells(), sb.row(y).cells());
+    }
+}
+
+#[test]
+fn cursor_waiting_to_wrap_on_an_erased_cell() {
+    let mut t = term();
+    w(&mut t, &format!("{}\x1b[K", "a".repeat(COLS)));
+    assert!(t.screen().cursor().pending_wrap);
+    let mut b = replay(&t, 5000);
+    let mut a = t;
+    w(&mut a, "n");
+    w(&mut b, "n");
+    same_buffer(
+        a.screen().buffers().0,
+        b.screen().buffers().0,
+        "after next char",
+    );
+}
