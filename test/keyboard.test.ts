@@ -209,7 +209,7 @@ test("Terminal.paste returns to the bottom when scrolled back", async () => {
 
 // ---- KeyHandler と CompositionHelper（DOM の代わりに偽物を使う）
 
-function makeHandler(opts: { isMac?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number } = {}) {
+function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number } = {}) {
   const sent: string[] = [];
   const pages: number[] = [];
   const timers: (() => void)[] = [];
@@ -243,7 +243,7 @@ function makeHandler(opts: { isMac?: boolean; macOptionIsMeta?: boolean; app?: b
       scrollPages: (n) => pages.push(n),
       scrollToBottom: () => {},
       isMac: opts.isMac ?? false,
-      isWindows: false,
+      isWindows: opts.isWindows ?? false,
       macOptionIsMeta: opts.macOptionIsMeta ?? false,
       customKeyHandler: () => undefined,
     },
@@ -683,6 +683,43 @@ test("KeyHandler: flag 2 release of a text key typed through input", () => {
   assert.deepEqual(h.sent, ["é", `${ESC}[233;1:3u`]);
 });
 
+test("KeyHandler: flag 2 without flag 8 releases Ctrl and Alt text keys like kitty", () => {
+  const h = makeHandler({ flags: F2 });
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA", ctrlKey: true }));
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA", ctrlKey: true }));
+  assert.deepEqual(h.sent, ["\x01", `${ESC}[97;5:3u`]);
+  h.sent.length = 0;
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA", altKey: true }));
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA", altKey: true }));
+  assert.deepEqual(h.sent, [`${ESC}a`, `${ESC}[97;3:3u`]);
+});
+
+test("KeyHandler: flag 2 without flag 8 releases a macOS Option text key", () => {
+  const press = (h: ReturnType<typeof makeHandler>) => {
+    h.handler.keyDown(domEvent(65, { key: "å", code: "KeyA", altKey: true }));
+    h.handler.keyPress({ ...domEvent(65, { key: "å", code: "KeyA", altKey: true }), charCode: 229 });
+  };
+  // Option を押したまま離す
+  const a = makeHandler({ flags: F2, isMac: true });
+  press(a);
+  a.handler.keyUp(domEvent(65, { key: "å", code: "KeyA", altKey: true }));
+  assert.deepEqual(a.sent, ["å", `${ESC}[97;3:3u`]);
+  // Option を先に離す
+  const b = makeHandler({ flags: F2, isMac: true });
+  press(b);
+  b.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(b.sent, ["å", `${ESC}[97;1:3u`]);
+});
+
+test("KeyHandler: flag 2 without flag 8 releases a Windows AltGr text key without Ctrl+Alt", () => {
+  const h = makeHandler({ flags: F2, isWindows: true });
+  const e = { key: "@", code: "KeyQ", ctrlKey: true, altKey: true };
+  h.handler.keyDown(domEvent(81, e));
+  h.handler.keyPress({ ...domEvent(81, e), charCode: 64 });
+  h.handler.keyUp(domEvent(81, e));
+  assert.deepEqual(h.sent, ["@", `${ESC}[64;1:3u`]);
+});
+
 test("KeyHandler: flag 2 without flag 8 does not release keys whose press was not sent", () => {
   // Enter・Tab・Backspace は、フラグ 8 が無ければ離すを送らない
   const h = makeHandler({ flags: F2 });
@@ -695,11 +732,10 @@ test("KeyHandler: flag 2 without flag 8 does not release keys whose press was no
     h.handler.keyUp(domEvent(kc, { key, code }));
   }
   assert.deepEqual(h.sent, ["\r", "\t", "\x7f"]);
-  // keypress も input も来なかったキー（押すを送っていない）
+  // 押すを送っていないキー（keydown が来ていない）
   h.sent.length = 0;
-  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA", ctrlKey: true }));
   h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
-  assert.deepEqual(h.sent, ["\x01"]);
+  assert.deepEqual(h.sent, []);
   // Cmd（macOS）を押したキー
   const m = makeHandler({ flags: F2, isMac: true });
   m.handler.keyDown(domEvent(67, { key: "c", code: "KeyC", metaKey: true }));
