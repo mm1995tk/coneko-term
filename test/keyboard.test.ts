@@ -649,6 +649,79 @@ test("KeyHandler sends repeat and release with flag 2, only for keys it reported
   assert.deepEqual(h.sent, [`${ESC}[97;2;65u`, `${ESC}[97;1:3u`]);
 });
 
+test("KeyHandler: flag 2 without flag 8 sends the release of a text key (press stays a plain character)", () => {
+  const h = makeHandler({ flags: F2 });
+  // 小文字や記号: 字は keydown が送る
+  h.handler.keyDown(domEvent(220, { key: "\\", code: "Backslash" }));
+  h.handler.keyUp(domEvent(220, { key: "\\", code: "Backslash" }));
+  assert.deepEqual(h.sent, ["\\", `${ESC}[92;1:3u`]);
+  // 大文字（Shift）は keypress が送る。離したときの key は小文字でも、押したキーの離すを送る
+  h.sent.length = 0;
+  h.handler.keyDown(domEvent(65, { key: "A", code: "KeyA", shiftKey: true }));
+  h.handler.keyPress({ ...domEvent(65, { key: "A", code: "KeyA" }), charCode: 65 });
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, ["A", `${ESC}[97;1:3u`]);
+  // 離すは 1 回だけ
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.equal(h.sent.length, 2);
+});
+
+test("KeyHandler: flag 2 release of a text key typed through input", () => {
+  // デッドキーのあとの字は keydown では送らず、input で来る
+  const h = makeHandler({ flags: F2 });
+  h.handler.keyDown(domEvent(69, { key: "Dead", code: "KeyE" }));
+  h.handler.keyUp(domEvent(69, { key: "Dead", code: "KeyE" }));
+  h.handler.keyDown(domEvent(69, { key: "é", code: "KeyE" }));
+  h.handler.input({
+    data: "é",
+    inputType: "insertText",
+    composed: false,
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  h.handler.keyUp(domEvent(69, { key: "é", code: "KeyE" }));
+  assert.deepEqual(h.sent, ["é", `${ESC}[233;1:3u`]);
+});
+
+test("KeyHandler: flag 2 without flag 8 does not release keys whose press was not sent", () => {
+  // Enter・Tab・Backspace は、フラグ 8 が無ければ離すを送らない
+  const h = makeHandler({ flags: F2 });
+  for (const [kc, key, code] of [
+    [13, "Enter", "Enter"],
+    [9, "Tab", "Tab"],
+    [8, "Backspace", "Backspace"],
+  ] as const) {
+    h.handler.keyDown(domEvent(kc, { key, code }));
+    h.handler.keyUp(domEvent(kc, { key, code }));
+  }
+  assert.deepEqual(h.sent, ["\r", "\t", "\x7f"]);
+  // keypress も input も来なかったキー（押すを送っていない）
+  h.sent.length = 0;
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA", ctrlKey: true }));
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, ["\x01"]);
+  // Cmd（macOS）を押したキー
+  const m = makeHandler({ flags: F2, isMac: true });
+  m.handler.keyDown(domEvent(67, { key: "c", code: "KeyC", metaKey: true }));
+  m.handler.keyPress({ ...domEvent(67, { key: "c", code: "KeyC", metaKey: true }), charCode: 99 });
+  m.handler.keyUp(domEvent(67, { key: "c", code: "KeyC", metaKey: true }));
+  assert.deepEqual(m.sent, []);
+  // 変換の途中の keyup（keyCode 229）
+  const i = makeHandler({ flags: F2 });
+  i.composition.compositionstart();
+  i.handler.keyDown(domEvent(229, { key: "Process", code: "KeyN" }));
+  i.handler.keyUp(domEvent(229, { key: "Process", code: "KeyN" }));
+  assert.deepEqual(i.sent, []);
+});
+
+test("KeyHandler: a text key pressed before blur does not release after reset", () => {
+  const h = makeHandler({ flags: F2 });
+  h.handler.keyDown(domEvent(65, { key: "a", code: "KeyA" }));
+  h.handler.reset();
+  h.handler.keyUp(domEvent(65, { key: "a", code: "KeyA" }));
+  assert.deepEqual(h.sent, ["a"]);
+});
+
 test("KeyHandler releases arrows pressed as SS3 (application cursor keys)", () => {
   const h = makeHandler({ app: true, flags: F2 });
   h.handler.keyDown(domEvent(38, { key: "ArrowUp", code: "ArrowUp" }));
