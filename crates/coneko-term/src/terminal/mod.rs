@@ -66,6 +66,9 @@ mod program_status_tests;
 mod rect;
 #[cfg(test)]
 mod rect_tests;
+mod serialize;
+#[cfg(test)]
+mod serialize_tests;
 mod sgr;
 #[cfg(test)]
 mod tests;

@@ -32,6 +32,11 @@ pub struct KeyboardFlagStack {
 }
 
 impl KeyboardFlagStack {
+    /// 積んでいるフラグ。古いものが先。
+    pub(crate) fn entries(&self) -> &[u32] {
+        &self.stack
+    }
+
     /// いまのフラグ。
     pub fn flags(&self) -> u32 {
         self.stack.last().copied().unwrap_or(0)
