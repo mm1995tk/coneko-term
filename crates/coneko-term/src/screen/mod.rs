@@ -16,7 +16,7 @@ mod tests;
 use unicode_width::UnicodeWidthChar;
 
 use crate::graphics::Placement;
-use buffer::Buffer;
+pub(crate) use buffer::Buffer;
 pub use buffer::{Line, SavedCursor};
 pub use cell::{Align, Attrs, Cell, Color, Content, SizedBlock, Underline, UnderlineStyle};
 pub use extra_cursors::{ExtraCursorColor, ExtraCursorShape, ExtraCursors};
@@ -98,6 +98,11 @@ impl Screen {
             insert_mode: false,
             extra_cursors: ExtraCursors::default(),
         }
+    }
+
+    /// 主画面と代替画面のバッファ（書き出し用）。
+    pub(crate) fn buffers(&self) -> (&Buffer, &Buffer) {
+        (&self.primary, &self.alt)
     }
 
     fn buf(&self) -> &Buffer {

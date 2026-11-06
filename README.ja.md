@@ -29,6 +29,21 @@ term.write("hello\r\n", () => console.log("処理し終えた"));
 
 `Terminal` は `open(host)` を呼ぶまで DOM に依存しません。大きな `write` は小分けにして処理し、そのデータを処理し終えたら `done` を呼びます。`takeDirtyRows()` と `readRow(y)` で、変わった行を WASM のメモリ上のセルとして読めます。
 
+## 画面の状態の書き出し（Rust の crate）
+
+crate の `Terminal::serialize(max_scrollback)` は、同じ大きさの新しい `Terminal` に書けば同じ画面になるバイト列を返します。xterm.js の `SerializeAddon` と同じ考え方です。サーバーが画面を持たない `Terminal` を動かしておき、あとから繋いだクライアントには、過去の出力を流し直す代わりにこの状態を渡せます（流し直すと、DECRQM などの昔の問い合わせにもう一度返事をしてしまい、その返事がシェルに入力として届きます）。
+
+```rust
+let bytes = term.serialize(5000); // scrollback は新しいほうから 5000 行
+let mut other = coneko_term::Terminal::new(rows, cols);
+other.write(&bytes);
+assert!(other.take_output().is_empty()); // 問い合わせは入っていない
+```
+
+含むもの: 見えている画面と、主画面の scrollback（新しいほうから `max_scrollback` 行。文字・SGR の属性・折り返した行のつながり）、代替画面を出しているか（主画面も一緒に書く）、カーソル（位置・折り返し待ち・形・点滅・表示）、DECSC で保存したカーソル、スクロール範囲、タブ位置、主画面と代替画面それぞれの kitty keyboard のフラグの積み重ね、DEC モード（マウス報告・bracketed paste・フォーカスの報告・DECCKM・DECOM・自動折り返しなど）、IRM、LNM、`Theme` から変わっている文字・背景・カーソルの色とパレット（書く側と書かれる側のテーマは同じにしてください）。
+
+含まないもの: kitty graphics の画像とその配置、文字集合（G0〜G3）、`CSI ? s` で保存したモード、追加のカーソル、色の積み重ね、OSC 21 だけで変わる色、題名、通知・クリップボード・drag and drop・file transfer の途中の状態。scrollback の最後の行の「折り返している」印は残らず、scrollback の中では 1 行より高い OSC 66 の文字は書きません。npm 版にはまだ出していません。
+
 ## 描画
 
 ```ts

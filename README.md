@@ -29,6 +29,21 @@ term.write("hello\r\n", () => console.log("processed"));
 
 `Terminal` has no DOM dependency until you call `open(host)`. Large `write`s are processed in small slices, and `done` is called when that data has been processed. `takeDirtyRows()` and `readRow(y)` give the changed rows as cells in WASM memory.
 
+## Saving the screen state (Rust crate)
+
+`Terminal::serialize(max_scrollback)` in the crate returns bytes that, written to a new `Terminal` of the same size, give the same screen. It is the same idea as xterm.js's `SerializeAddon`: a server can keep a headless `Terminal`, and a client that connects later gets the state instead of a replay of the old output (a replay answers old queries such as DECRQM a second time, and the answers reach the shell as input).
+
+```rust
+let bytes = term.serialize(5000); // the newest 5000 scrollback rows
+let mut other = coneko_term::Terminal::new(rows, cols);
+other.write(&bytes);
+assert!(other.take_output().is_empty()); // the bytes contain no queries
+```
+
+Included: the visible screen and the newest `max_scrollback` rows of the main screen (characters, SGR attributes, wrapped lines); whether the alternate screen is shown (the main screen is saved too); the cursor (position, pending wrap, shape, blinking, visibility), the DECSC-saved cursor, the scroll region and the tab stops; the kitty keyboard flag stacks of both screens; DEC modes (mouse reporting, bracketed paste, focus reports, DECCKM, DECOM, auto-wrap and the others), IRM and LNM; foreground, background, cursor and palette colors that differ from the `Theme` (both terminals must use the same theme).
+
+Not included: kitty graphics images and their placements, character sets (G0 to G3), modes saved with `CSI ? s`, extra cursors, the color stack, colors only OSC 21 changes, the title, and the half-finished state of notifications, clipboard, drag and drop and file transfer. The wrapped flag of the last scrollback row is not kept, and OSC 66 text taller than one row is not written inside the scrollback. The npm package does not expose this yet.
+
 ## Drawing
 
 ```ts
