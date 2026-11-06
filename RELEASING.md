@@ -31,6 +31,7 @@ GitHub Actions の「リリース」（[`release.yml`](.github/workflows/release
 
 CI（`check.yml`）の `publish-dry-run` ジョブは、PR ごとに `cargo publish --dry-run` と `npm publish --dry-run` を回す。
 リリースを起動する前に、受け取れる形かどうかが分かる。
+いまの版は公開済みなので、試す前に CI の中だけで仮の版（`0.0.0-ci`）に替える（コミットしない）。
 
 手元で確かめるときは、次を使う。
 

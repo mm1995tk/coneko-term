@@ -45,9 +45,22 @@ jobs:
       - uses: cachix/install-nix-action@v31.11.3
       - name: 版がそろっている
         run: nix develop -c sh scripts/check-release-version.sh
+      # 今の版は公開済みなので、そのまま試すと必ず落ちる。公開済みの版とぶつからない仮の版に替えて試す。
+      # 替えるのは CI の作業ツリーの中だけで、コミットしない（版を上げるのは release.yml）。
+      # Cargo.lock も替えないと cargo publish --locked が落ちる。scripts/bump-version.sh と同じ箇所を替える。
+      # 版を替えて作業ツリーが汚れるので cargo は --allow-dirty、仮の版は prerelease なので npm は --tag が要る
+      - name: 試す版を仮の版にする
+        env:
+          DRY_RUN_VERSION: 0.0.0-ci
+        run: |
+          current=$(sed -n '/^\[workspace\.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p;}' Cargo.toml)
+          sed -i "/^\[workspace\.package\]/,/^\[/s/^version = \"$current\"$/version = \"$DRY_RUN_VERSION\"/" Cargo.toml
+          sed -i "/^name = \"coneko-term\"$/,/^version/s/^version = \"$current\"$/version = \"$DRY_RUN_VERSION\"/; /^name = \"coneko-term-wasm\"$/,/^version/s/^version = \"$current\"$/version = \"$DRY_RUN_VERSION\"/" Cargo.lock
+          nix develop -c npm version "$DRY_RUN_VERSION" --no-git-tag-version --ignore-scripts
+          git diff --stat
       - name: cargo publish --dry-run
-        run: nix develop -c cargo publish -p coneko-term --locked --dry-run
+        run: nix develop -c cargo publish -p coneko-term --locked --allow-dirty --dry-run
       - name: npm publish --dry-run
         run: |
           nix build .#npm --out-link npm-package
-          nix develop -c npm publish ./npm-package/*.tgz --access public --dry-run
+          nix develop -c npm publish ./npm-package/*.tgz --access public --tag ci --dry-run
