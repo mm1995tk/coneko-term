@@ -122,18 +122,10 @@ impl Terminal {
 }
 
 /// 出力と、いま書き手に効いている属性。
+#[derive(Default)]
 struct Out {
     buf: String,
     pen: Attrs,
-}
-
-impl Default for Out {
-    fn default() -> Self {
-        Out {
-            buf: String::new(),
-            pen: Attrs::default(),
-        }
-    }
 }
 
 impl Out {
@@ -446,9 +438,8 @@ fn is_plain_blank(c: &Cell) -> bool {
 
 /// 折り返しの続きとして、字を書けるセルか。
 fn starts_text(c: &Cell) -> bool {
-    match &c.content {
-        Content::Char(_) | Content::Cluster(_) => true,
-        Content::Sized { dx: 0, dy: 0, .. } => true,
-        _ => false,
-    }
+    matches!(
+        &c.content,
+        Content::Char(_) | Content::Cluster(_) | Content::Sized { dx: 0, dy: 0, .. }
+    )
 }
