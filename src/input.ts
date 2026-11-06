@@ -217,7 +217,7 @@ export class KeyHandler {
   // 字を打つキーの押すを keypress か input で送ったキー。フラグ 8 が無いと、押すは字のまま送るので
   // `reported` に入らない。kitty は、この場合も離すを `CSI` の形で送る
   private readonly textPressed = new Set<string>();
-  // 直近の keydown のキー（keypress・input の字を、どのキーが打ったか結びつける）。押すを送らない keydown では null
+  // 直近の keydown のキー（keypress・input の字を、どのキーが打ったか結びつける）。変換のキーと、macOS の Cmd を押したキーでは null
   private lastDown: string | null = null;
 
   constructor(
@@ -285,13 +285,7 @@ export class KeyHandler {
 
     // 大文字は keypress で処理する（CapsLock のとき小文字が打てない macOS の IME への対策）。
     // kitty の `CSI` の形で送るキーは keypress を通らないので、ここで送る
-    if (
-      result.key === ev.key &&
-      !ev.ctrlKey &&
-      !ev.altKey &&
-      !ev.metaKey &&
-      ev.key.length === 1
-    ) {
+    if (result.key === ev.key && hasNoCommandModifier(ev) && ev.key.length === 1) {
       const c = ev.key.charCodeAt(0);
       if (c >= 65 && c <= 90) return true;
     }
@@ -309,27 +303,22 @@ export class KeyHandler {
       this.textarea.value = "";
     }
 
-    // アプリケーションカーソルキーの `ESC O A` などもここに入れる
-    if (
-      flags & KITTY_REPORT_EVENT_TYPES &&
-      (result.key.startsWith("\x1b[") || result.key.startsWith("\x1bO"))
-    ) {
-      this.reported.add(keyId(ev));
-    }
-    // keydown が字そのものを送る場合（小文字など）。Ctrl・Alt を押したものは字のキーではない
-    if (
-      !ev.ctrlKey &&
-      !ev.altKey &&
-      !ev.metaKey &&
-      result.key.length === 1 &&
-      result.key >= " " &&
-      result.key !== "\x7f"
-    ) {
-      this.textPressed.add(keyId(ev));
-    }
+    this.rememberPress(ev, result.key, flags);
     h.send(result.key);
     this.cancel(ev);
     return false;
+  }
+
+  /** 押すを送るキーを覚える（離すを送るため）。 */
+  private rememberPress(ev: KeyDownLike, key: string, flags: number): void {
+    // アプリケーションカーソルキーの `ESC O A` などもここに入れる
+    if (flags & KITTY_REPORT_EVENT_TYPES && (key.startsWith("\x1b[") || key.startsWith("\x1bO"))) {
+      this.reported.add(keyId(ev));
+    }
+    // keydown が字そのものを送る場合（小文字など）。Ctrl・Alt を押したものは字のキーではない
+    if (hasNoCommandModifier(ev) && key.length === 1 && key >= " " && key !== "\x7f") {
+      this.textPressed.add(keyId(ev));
+    }
   }
 
   /** 押したままフォーカスを失うと keyup が来ないので、`textarea` の blur で呼ぶ。 */
@@ -414,6 +403,11 @@ export class KeyHandler {
     }
     return false;
   }
+}
+
+/** Ctrl・Alt・Cmd のどれも押していない。 */
+function hasNoCommandModifier(ev: KeyEventLike): boolean {
+  return !ev.ctrlKey && !ev.altKey && !ev.metaKey;
 }
 
 /** 押したキーと離したキーを結びつける印。 */
