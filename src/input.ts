@@ -5,6 +5,7 @@
 
 import {
   evaluateKeyboardEvent,
+  KITTY_REPORT_ALL_KEYS,
   KITTY_REPORT_EVENT_TYPES,
   type KeyEventLike,
 } from "./keyboard.js";
@@ -213,6 +214,11 @@ export class KeyHandler {
   // keydown で `CSI` の形で送ったキー。離すを送るのは、これに入っているキーだけ。
   // 変換の確定の Enter のように、押したのを送っていないキーの離すだけを送ってしまわないため
   private readonly reported = new Set<string>();
+  // 字を打つキーの押すを keypress か input で送ったキー。フラグ 8 が無いと、押すは字のまま送るので
+  // `reported` に入らない。kitty は、この場合も離すを `CSI` の形で送る
+  private readonly textPressed = new Set<string>();
+  // 直近の keydown のキー（keypress・input の字を、どのキーが打ったか結びつける）。変換のキーと、macOS の Cmd を押したキーでは null
+  private lastDown: string | null = null;
 
   constructor(
     private readonly host: KeyHandlerHost,
@@ -239,6 +245,7 @@ export class KeyHandler {
 
   keyDown(ev: KeyDownLike): boolean | undefined {
     this.keyDownSeen = true;
+    this.lastDown = null;
     const custom = this.host.customKeyHandler();
     if (custom && custom(ev as unknown as KeyboardEvent) === false) return false;
     const h = this.host;
@@ -251,6 +258,7 @@ export class KeyHandler {
     }
     // Cmd を押したキーは送らない（アプリのショートカットに任せる）。変換の確定のあとで判断する
     if (h.isMac && ev.metaKey) return true;
+    this.lastDown = keyId(ev);
 
     if (!ignoreComposition && (ev.key === "Dead" || ev.key === "AltGraph")) {
       this.unprocessedDeadKey = true;
@@ -277,13 +285,7 @@ export class KeyHandler {
 
     // 大文字は keypress で処理する（CapsLock のとき小文字が打てない macOS の IME への対策）。
     // kitty の `CSI` の形で送るキーは keypress を通らないので、ここで送る
-    if (
-      result.key === ev.key &&
-      !ev.ctrlKey &&
-      !ev.altKey &&
-      !ev.metaKey &&
-      ev.key.length === 1
-    ) {
+    if (result.key === ev.key && hasNoCommandModifier(ev) && ev.key.length === 1) {
       const c = ev.key.charCodeAt(0);
       if (c >= 65 && c <= 90) return true;
     }
@@ -301,21 +303,28 @@ export class KeyHandler {
       this.textarea.value = "";
     }
 
-    // アプリケーションカーソルキーの `ESC O A` などもここに入れる
-    if (
-      flags & KITTY_REPORT_EVENT_TYPES &&
-      (result.key.startsWith("\x1b[") || result.key.startsWith("\x1bO"))
-    ) {
-      this.reported.add(keyId(ev));
-    }
+    this.rememberPress(ev, result.key, flags);
     h.send(result.key);
     this.cancel(ev);
     return false;
   }
 
+  /** 押すを送るキーを覚える（離すを送るため）。 */
+  private rememberPress(ev: KeyDownLike, key: string, flags: number): void {
+    // アプリケーションカーソルキーの `ESC O A` などもここに入れる
+    if (flags & KITTY_REPORT_EVENT_TYPES && (key.startsWith("\x1b[") || key.startsWith("\x1bO"))) {
+      this.reported.add(keyId(ev));
+    }
+    // keydown が字そのものを送る場合（小文字など）。Ctrl・Alt を押したものは字のキーではない
+    if (hasNoCommandModifier(ev) && key.length === 1 && key >= " " && key !== "\x7f") {
+      this.textPressed.add(keyId(ev));
+    }
+  }
+
   /** 押したままフォーカスを失うと keyup が来ないので、`textarea` の blur で呼ぶ。 */
   reset(): void {
     this.reported.clear();
+    this.textPressed.clear();
   }
 
   keyUp(ev: KeyDownLike): void {
@@ -323,8 +332,11 @@ export class KeyHandler {
     const custom = this.host.customKeyHandler();
     if (custom && custom(ev as unknown as KeyboardEvent) === false) return;
     this.keyPressHandled = false;
-    // 離す（kitty のフラグ 2）。押したのを `CSI` の形で送ったキーだけ
-    if (!this.reported.delete(keyId(ev))) return;
+    // 離す（kitty のフラグ 2）。押したのを `CSI` の形か、字として（keypress・input で）送ったキーだけ
+    const id = keyId(ev);
+    const wasReported = this.reported.delete(id);
+    const wasText = this.textPressed.delete(id);
+    if (!wasReported && !wasText) return;
     const h = this.host;
     const flags = h.keyboardFlags();
     if (!(flags & KITTY_REPORT_EVENT_TYPES)) return;
@@ -335,7 +347,10 @@ export class KeyHandler {
       h.applicationCursorKeys(),
       h.isMac,
       h.macOptionIsMeta,
-      flags,
+      // 字のキーの離すは、フラグ 8 が無くても `CSI <code>;<mods>:3u`（kitty と同じ）。
+      // evaluateKeyboardEvent は字のキーをフラグ 8 のときだけ `CSI` にするので、離すに限って足す。
+      // Enter・Tab・Backspace は textPressed に入らず、CSI の形の離すは reported のキーだけ
+      wasText ? flags | KITTY_REPORT_ALL_KEYS : flags,
       3,
     );
     if (result.key) h.send(result.key);
@@ -360,6 +375,7 @@ export class KeyHandler {
       return false;
     }
     this.host.send(String.fromCharCode(key));
+    if (this.lastDown) this.textPressed.add(this.lastDown);
     this.keyPressHandled = true;
     this.unprocessedDeadKey = false;
     return true;
@@ -381,11 +397,17 @@ export class KeyHandler {
       if (this.keyPressHandled) return false;
       this.unprocessedDeadKey = false;
       this.host.send(ev.data);
+      if (this.keyDownSeen && this.lastDown) this.textPressed.add(this.lastDown);
       this.cancel(ev);
       return true;
     }
     return false;
   }
+}
+
+/** Ctrl・Alt・Cmd のどれも押していない。 */
+function hasNoCommandModifier(ev: KeyEventLike): boolean {
+  return !ev.ctrlKey && !ev.altKey && !ev.metaKey;
 }
 
 /** 押したキーと離したキーを結びつける印。 */
