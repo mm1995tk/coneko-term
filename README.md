@@ -54,6 +54,8 @@ term.fit(); // cols and rows from the size of `pane` (minus the scrollbar width,
 term.onCellSizeChange(() => term.fit()); // fonts loaded, devicePixelRatio changed
 ```
 
+The scrollbar is 14 CSS pixels wide by default. Pass `scrollbarWidth` to `new Terminal({ ... })` to change it (for example `scrollbarWidth: 8`); `fit()` subtracts that width. `scrollbarWidth: 0` shows no scrollbar and subtracts nothing. A negative or non-numeric value falls back to 14.
+
 Drawing uses Canvas 2D with the browser's fonts (fallback fonts work for CJK), is crisp at any `devicePixelRatio`, and is batched with `requestAnimationFrame`: only changed rows are redrawn. `viewportY`, `scrollLines(n)`, `scrollToTop()`, `scrollToBottom()`, `scrollToLine(n)` and `onScroll` move the viewport into the scrollback; at the bottom it follows new output. Try it with `npm run build && node demo/serve.mjs` (open `/demo/`).
 
 ## Mouse and selection

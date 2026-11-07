@@ -54,6 +54,8 @@ term.fit(); // `pane` の大きさから列と行の数を出す（xterm.js の 
 term.onCellSizeChange(() => term.fit()); // フォントを読み終えた、devicePixelRatio が変わった
 ```
 
+スクロールバーの幅は既定で 14 CSS ピクセルです。`new Terminal({ ... })` に `scrollbarWidth` を渡すと変えられます（例: `scrollbarWidth: 8`）。`fit()` はその幅を引きます。`scrollbarWidth: 0` ならスクロールバーを出さず、何も引きません。負の数や数でない値は 14 に戻ります。
+
 描画は Canvas 2D で、字はブラウザーのフォントで描きます（日本語は fallback で描けます）。`devicePixelRatio` が高くてもにじまず、`requestAnimationFrame` でまとめて、変わった行だけを描き直します。`viewportY`、`scrollLines(n)`、`scrollToTop()`、`scrollToBottom()`、`scrollToLine(n)`、`onScroll` でスクロールバックを見る位置を動かせます。一番下を見ているときは新しい出力に付いていきます。`npm run build && node demo/serve.mjs` のあと `/demo/` を開くと試せます。
 
 ## マウスと選択

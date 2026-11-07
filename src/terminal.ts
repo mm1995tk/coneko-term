@@ -17,7 +17,7 @@ import {
   CanvasRenderer,
   Palette,
   Scrollbar,
-  SCROLLBAR_WIDTH,
+  resolveScrollbarWidth,
   proposeDimensions,
   type CellSize,
 } from "./renderer.js";
@@ -167,6 +167,11 @@ export interface TerminalOptions {
   cursorBlink?: boolean;
   /** スクロールバックの行数。既定は 1000。 */
   scrollback?: number;
+  /**
+   * スクロールバーの幅（CSS ピクセル）。既定は `SCROLLBAR_WIDTH`（14）。
+   * 0 を渡すとスクロールバーを出さず、`fit()` も幅を引かない。負の数や数でない値は既定に戻す。
+   */
+  scrollbarWidth?: number;
   /** テーマ。 */
   theme?: Theme;
   /** ダブルクリックで単語を選ぶときの区切りの字。既定は xterm.js と同じ（空白と ``()[]{}',"`` ）。 */
@@ -1847,8 +1852,13 @@ export class Terminal {
       height,
       cellWidth: cell.width,
       cellHeight: cell.height,
-      scrollbarWidth: this.options.scrollback === 0 ? 0 : SCROLLBAR_WIDTH,
+      scrollbarWidth: this.scrollbarWidth,
     });
+  }
+
+  /** 使うスクロールバーの幅（CSS ピクセル）。 */
+  private get scrollbarWidth(): number {
+    return resolveScrollbarWidth(this.options);
   }
 
   /** フォーカスがあるか（`setFocused` か、要素のフォーカスで決まる）。 */
@@ -1893,6 +1903,7 @@ export class Terminal {
     this.syncPointerShape();
 
     this.scrollbar = new Scrollbar(el, {
+      width: this.scrollbarWidth,
       total: () => this.scrollbackLength + this.rows,
       rows: () => this.rows,
       viewportY: () => this.viewportY,

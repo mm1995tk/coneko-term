@@ -70,6 +70,7 @@ export {
   Palette,
   SCROLLBAR_WIDTH,
   proposeDimensions,
+  resolveScrollbarWidth,
   type CellSize,
   type FitInput,
   type RenderEnv,
