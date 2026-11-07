@@ -937,6 +937,8 @@ export class Scrollbar {
   constructor(
     host: HTMLElement,
     private api: {
+      /** 幅（CSS ピクセル）。0 なら出さない。 */
+      width: number;
       /** 全部の行の数（スクロールバック + 画面）。 */
       total(): number;
       /** 画面の行の数。 */
@@ -954,7 +956,7 @@ export class Scrollbar {
       position: "absolute",
       top: "0",
       right: "0",
-      width: `${SCROLLBAR_WIDTH}px`,
+      width: `${api.width}px`,
       display: "none",
       userSelect: "none",
     });
@@ -1032,7 +1034,7 @@ export class Scrollbar {
     const total = this.api.total();
     const rows = this.api.rows();
     const scrollable = total - rows;
-    if (!enabled || scrollable <= 0 || heightPx <= 0) {
+    if (!enabled || this.api.width <= 0 || scrollable <= 0 || heightPx <= 0) {
       this.track.style.display = "none";
       return;
     }

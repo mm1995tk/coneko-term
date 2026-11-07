@@ -10,6 +10,7 @@ import {
   SCROLLBAR_WIDTH,
   Terminal,
 } from "../dist/index.js";
+import { Scrollbar } from "../dist/renderer.js";
 
 before(async () => {
   await init(
@@ -491,4 +492,48 @@ test("renderer: extra cursors use the extra color and follow the main shape", as
     "bar",
   );
   t.dispose();
+});
+
+// ---- scrollbar width
+
+function fakeElement(): any {
+  const el: any = {
+    style: {},
+    className: "",
+    children: [] as unknown[],
+    appendChild(c: unknown) {
+      el.children.push(c);
+    },
+    addEventListener() {},
+    removeEventListener() {},
+    remove() {},
+  };
+  return el;
+}
+
+function scrollbarWith(width: number) {
+  const host: any = fakeElement();
+  host.ownerDocument = { createElement: () => fakeElement() };
+  const bar = new Scrollbar(host, {
+    width,
+    total: () => 100,
+    rows: () => 10,
+    viewportY: () => 0,
+    scrollToLine() {},
+    scrollLines() {},
+  });
+  return bar;
+}
+
+test("scrollbar: drawn with the width it is given", () => {
+  const bar = scrollbarWith(6);
+  assert.equal(bar.track.style.width, "6px");
+  bar.update(200, true);
+  assert.equal(bar.track.style.display, "block");
+});
+
+test("scrollbar: width 0 hides it", () => {
+  const bar = scrollbarWith(0);
+  bar.update(200, true);
+  assert.equal(bar.track.style.display, "none");
 });
