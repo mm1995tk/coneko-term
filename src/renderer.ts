@@ -15,8 +15,23 @@ import {
   type ImageSource,
 } from "./images.js";
 
-/** スクロールバーの幅（CSS ピクセル）。xterm.js 6.0.0 と同じ。 */
+/** スクロールバーの幅の既定（CSS ピクセル）。xterm.js 6.0.0 と同じ。`TerminalOptions.scrollbarWidth` で変えられる。 */
 export const SCROLLBAR_WIDTH = 14;
+
+/**
+ * 設定から使うスクロールバーの幅（CSS ピクセル）を決める。
+ * 未指定・負の数・数でない値は既定（`SCROLLBAR_WIDTH`）、`scrollback` が 0 のときは 0。
+ */
+export function resolveScrollbarWidth(options: {
+  scrollback?: number;
+  scrollbarWidth?: unknown;
+}): number {
+  if (options.scrollback === 0) return 0;
+  const w = options.scrollbarWidth;
+  return typeof w === "number" && Number.isFinite(w) && w >= 0
+    ? w
+    : SCROLLBAR_WIDTH;
+}
 
 /** カーソルが点滅する間隔（ミリ秒）。xterm.js 6.0.0 と同じ。 */
 const BLINK_MS = 600;

@@ -17,7 +17,7 @@ import {
   CanvasRenderer,
   Palette,
   Scrollbar,
-  SCROLLBAR_WIDTH,
+  resolveScrollbarWidth,
   proposeDimensions,
   type CellSize,
 } from "./renderer.js";
@@ -1852,16 +1852,13 @@ export class Terminal {
       height,
       cellWidth: cell.width,
       cellHeight: cell.height,
-      scrollbarWidth: this.options.scrollback === 0 ? 0 : this.scrollbarWidth,
+      scrollbarWidth: this.scrollbarWidth,
     });
   }
 
   /** 使うスクロールバーの幅（CSS ピクセル）。 */
   private get scrollbarWidth(): number {
-    const w = this.options.scrollbarWidth;
-    return typeof w === "number" && Number.isFinite(w) && w >= 0
-      ? w
-      : SCROLLBAR_WIDTH;
+    return resolveScrollbarWidth(this.options);
   }
 
   /** フォーカスがあるか（`setFocused` か、要素のフォーカスで決まる）。 */

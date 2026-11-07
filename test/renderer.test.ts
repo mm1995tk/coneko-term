@@ -7,6 +7,7 @@ import {
   init,
   Palette,
   proposeDimensions,
+  resolveScrollbarWidth,
   SCROLLBAR_WIDTH,
   Terminal,
 } from "../dist/index.js";
@@ -496,6 +497,8 @@ test("renderer: extra cursors use the extra color and follow the main shape", as
 
 // ---- scrollbar width
 
+
+// Scrollbar が使う DOM の部分だけの偽物。
 function fakeElement(): any {
   const el: any = {
     style: {},
@@ -536,4 +539,27 @@ test("scrollbar: width 0 hides it", () => {
   const bar = scrollbarWith(0);
   bar.update(200, true);
   assert.equal(bar.track.style.display, "none");
+});
+
+test("scrollbar width: defaults, 0, invalid values and scrollback 0", () => {
+  assert.equal(resolveScrollbarWidth({}), SCROLLBAR_WIDTH);
+  assert.equal(resolveScrollbarWidth({ scrollbarWidth: 8 }), 8);
+  assert.equal(resolveScrollbarWidth({ scrollbarWidth: 0 }), 0);
+  for (const bad of [-1, Number.NaN, Infinity, "8"]) {
+    assert.equal(resolveScrollbarWidth({ scrollbarWidth: bad }), SCROLLBAR_WIDTH);
+  }
+  assert.equal(resolveScrollbarWidth({ scrollback: 0, scrollbarWidth: 8 }), 0);
+});
+
+test("fit: subtracts the chosen scrollbar width", () => {
+  const base = { width: 814, height: 480, cellWidth: 9, cellHeight: 20 };
+  assert.deepEqual(
+    proposeDimensions({ ...base, scrollbarWidth: resolveScrollbarWidth({ scrollbarWidth: 4 }) }),
+    // (814 - 4) / 9 = 90
+    { cols: 90, rows: 24 },
+  );
+  assert.deepEqual(
+    proposeDimensions({ ...base, scrollbarWidth: resolveScrollbarWidth({}) }),
+    { cols: 88, rows: 24 },
+  );
 });
