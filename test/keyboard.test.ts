@@ -4,6 +4,7 @@ import { before, test } from "node:test";
 import {
   bracketTextForPaste,
   CompositionHelper,
+  type CompositionAnchor,
   evaluateKeyboardEvent,
   init,
   KeyHandler,
@@ -209,7 +210,7 @@ test("Terminal.paste returns to the bottom when scrolled back", async () => {
 
 // ---- KeyHandler と CompositionHelper（DOM の代わりに偽物を使う）
 
-function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number } = {}) {
+function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number; anchor?: () => CompositionAnchor | undefined } = {}) {
   const sent: string[] = [];
   const pages: number[] = [];
   const timers: (() => void)[] = [];
@@ -231,7 +232,7 @@ function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMe
     textarea,
     view,
     (d) => sent.push(d),
-    () => ({ left: 16, top: 40, cellWidth: 9, cellHeight: 20 }),
+    opts.anchor ?? (() => ({ left: 16, top: 40, cellWidth: 9, cellHeight: 20 })),
     () => ({ family: "monospace", size: 15 }),
     (f) => timers.push(f),
   );
@@ -846,30 +847,16 @@ test("変換していないときも、textarea はカーソルの位置に置�
 });
 
 test("カーソルが見えない（アンカーが無い）ときは、textarea を最後の位置のまま動かさない", () => {
-  let anchor: { left: number; top: number; cellWidth: number; cellHeight: number } | undefined = {
+  let anchor: CompositionAnchor | undefined = {
     left: 16,
     top: 40,
     cellWidth: 9,
     cellHeight: 20,
   };
-  const style = {} as Record<string, string>;
-  const c = new CompositionHelper(
-    { value: "", style: style as never },
-    {
-      textContent: "",
-      style: {} as never,
-      getBoundingClientRect: () => ({ width: 30, height: 20 }),
-      show() {},
-      hide() {},
-    },
-    () => {},
-    () => anchor,
-    () => ({ family: "monospace", size: 15 }),
-    () => {},
-  );
-  c.updateCompositionElements(true);
+  const h = makeHandler({ anchor: () => anchor });
+  h.composition.updateCompositionElements(true);
   anchor = undefined;
-  c.updateCompositionElements(true);
-  assert.equal(style["left"], "16px");
-  assert.equal(style["top"], "40px");
+  h.composition.updateCompositionElements(true);
+  assert.equal(h.textarea.style["left"], "16px");
+  assert.equal(h.textarea.style["top"], "40px");
 });
