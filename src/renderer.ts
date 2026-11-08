@@ -146,6 +146,8 @@ export interface RenderSource extends Partial<ImageSource> {
   takeDirtyRows(): number[];
   /** 表示位置を考えた、いま見えている `y` 行目の選択範囲 `[開始の列, 終わりの列)`。選択が無ければ `undefined`。 */
   selectionSpan?(y: number): [number, number] | undefined;
+  /** いま見えている `y` 行目の URL の区間 `[開始の列, 終わりの列)`。波線を引く。 */
+  urlSpans?(y: number): [number, number][];
   /** 表示位置を考えた、いま見えている `y` 行目。 */
   readViewportRow(y: number): RowView;
   /** 画像の配置の並び（`WasmTerminal.placements` と同じ）。 */
@@ -584,7 +586,7 @@ export class CanvasRenderer {
     this.fillBackgroundRuns(row.cells, colors, n, top);
     this.drawImages(this.layers.below, y, offset);
     this.fillSelection(y, top);
-    this.drawGlyphsAndLines(row, colors, n, top);
+    this.drawGlyphsAndLines(row, colors, n, top, this.source.urlSpans?.(y));
     ctx.globalAlpha = 1;
     this.drawImages(this.layers.above, y, offset);
 
@@ -740,6 +742,7 @@ export class CanvasRenderer {
     colors: { fg: string; flags: number }[],
     n: number,
     top: number,
+    urls?: [number, number][],
   ): void {
     const ctx = this.ctx;
     const cells = row.cells;
@@ -757,7 +760,9 @@ export class CanvasRenderer {
         this.drawSized(row.sized((mark & 0xffff) - 1), mark >>> 24, x, top, fg);
       }
       const cp = cells[o];
-      const ul = (flags >>> 8) & 7;
+      let ul = (flags >>> 8) & 7;
+      // URL には波線を引く（下線の指定があるセルはそのまま）
+      if (ul === 0 && urls?.some(([a, b]) => x >= a && x < b)) ul = 3;
       const strike = (flags & 64) !== 0;
       const hasText = cp !== 0 && cp !== 0x20;
       if (!hasText && ul === 0 && !strike) continue;

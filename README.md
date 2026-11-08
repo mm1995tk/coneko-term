@@ -56,6 +56,8 @@ term.onCellSizeChange(() => term.fit()); // fonts loaded, devicePixelRatio chang
 
 The scrollbar is 14 CSS pixels wide by default. Pass `scrollbarWidth` to `new Terminal({ ... })` to change it (for example `scrollbarWidth: 8`); `fit()` subtracts that width. `scrollbarWidth: 0` shows no scrollbar and subtracts nothing. A negative or non-numeric value falls back to 14.
 
+URLs on screen: `http://` and `https://` URLs (also ones wrapped over several rows; text up to the first space, non-ASCII character or URL-unsafe symbol, minus trailing `.,;:!?*` and unmatched closing brackets) get an undercurl. Turn it off with `underlineUrls: false` (or `term.underlineUrls = false` later). `term.onUrlClick(({ url, shiftKey, altKey, ctrlKey, metaKey }) => ...)` fires when the left button is pressed and released on the same cell of a URL (not after a drag); opening the URL is up to the listener. With mouse reporting on, hold Shift (the same as selecting). Pass `metaKey: e.metaKey` in `handleMouse` if you call it yourself. `term.getVisibleUrls()` returns the visible URLs as `{ url, segments: [{ row, startCol, endCol }] }` (`endCol` is exclusive; a wrapped URL has one segment per row). OSC 8 hyperlinks are not supported.
+
 Drawing uses Canvas 2D with the browser's fonts (fallback fonts work for CJK), is crisp at any `devicePixelRatio`, and is batched with `requestAnimationFrame`: only changed rows are redrawn. `viewportY`, `scrollLines(n)`, `scrollToTop()`, `scrollToBottom()`, `scrollToLine(n)` and `onScroll` move the viewport into the scrollback; at the bottom it follows new output. Try it with `npm run build && node demo/serve.mjs` (open `/demo/`).
 
 ## Mouse and selection
