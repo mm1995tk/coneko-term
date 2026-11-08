@@ -20,7 +20,7 @@ const MAX_LOGICAL_ROWS = 64;
 
 // `http://` と `https://` で始まり、空白と URL に使わない ASCII の記号、ASCII 以外の字の手前まで。
 // 日本語の文の中に URL が埋まっていても、URL の後ろの字を巻き込まない。
-const URL_RE = /\bhttps?:\/\/[^\s\x00-\x20\x7f-￿<>"'`\\^{}|]+/gi;
+const URL_RE = /\bhttps?:\/\/[^\s\x00-\x20\x7f-\uffff<>"'`\\^{}|]+/gi;
 
 const CLOSERS: Record<string, string> = { ")": "(", "]": "[" };
 
@@ -59,16 +59,17 @@ export function findUrlsAround(
   total: number,
   absRow: number,
 ): FoundUrl[] {
+  // 論理行は 64 行ずつの決まった区切り（通し番号の 64 の倍数）で分ける。どの行から見ても同じ窓になり、
+  // `absRow` の行は必ず窓に入る。区切りをまたぐ URL は切れる。
+  const chunk = Math.floor(absRow / MAX_LOGICAL_ROWS) * MAX_LOGICAL_ROWS;
   let first = absRow;
-  while (first > 0 && absRow - first < MAX_LOGICAL_ROWS && read(first - 1).wrapped) {
-    first--;
-  }
+  while (first > chunk && read(first - 1).wrapped) first--;
   // UTF-16 の 1 単位ごとの位置
   const rowOf: number[] = [];
   const colOf: number[] = [];
   const endOf: number[] = [];
   let text = "";
-  for (let r = first; r < total && r - first < MAX_LOGICAL_ROWS; r++) {
+  for (let r = first; r < total && r < chunk + MAX_LOGICAL_ROWS; r++) {
     const row = read(r);
     for (let x = 0; x < row.length; x++) {
       const o = x * CELL_STRIDE;
