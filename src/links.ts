@@ -19,7 +19,7 @@ export interface FoundUrl {
 const MAX_LOGICAL_ROWS = 64;
 
 /** 論理行の先頭を探して戻る行数の上限。 */
-const SEARCH_BACK = 4096;
+const SEARCH_BACK = 256;
 
 // `http://` と `https://` で始まり、空白と URL に使わない ASCII の記号、ASCII 以外の字の手前まで。
 // 日本語の文の中に URL が埋まっていても、URL の後ろの字を巻き込まない。
