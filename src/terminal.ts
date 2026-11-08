@@ -2235,9 +2235,7 @@ export class Terminal {
 
   /** 画面の `y` 行目（表示位置を考えた、いま見えている行）のセル。 */
   readViewportRow(y: number): RowView {
-    const i = this.viewportY + y;
-    const sb = this.scrollbackLength;
-    return i < sb ? this.readScrollbackRow(i) : this.readRow(i - sb);
+    return this.readAbsRow(this.viewportY + y);
   }
 
   /** 欄の要素。 */
@@ -2592,7 +2590,7 @@ export class Terminal {
       if (ev.button !== 0) return false;
       this.mouseOwner = "select";
       this.urlDown = undefined;
-      const url = this.urlAt(col, row);
+      const url = (ev.clickCount ?? 1) > 1 ? undefined : this.urlAt(col, row);
       if (url !== undefined) {
         this.urlDown = {
           col,

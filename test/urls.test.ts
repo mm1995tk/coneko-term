@@ -88,3 +88,27 @@ test("urls: click reports the URL and modifiers; drag does not", async () => {
   assert.equal(clicks.length, 1);
   t.dispose();
 });
+
+test("urls: a URL deep in a logical line longer than 64 rows is found", async () => {
+  const t = new Terminal({ cols: 10, rows: 80, scrollback: 0 });
+  await write(t, "x".repeat(700) + " https://a.b/c");
+  assert.deepEqual(
+    t.getVisibleUrls().map((u) => u.url),
+    ["https://a.b/c"],
+  );
+  assert.equal(t.urlSpans(70).length, 1);
+  t.dispose();
+});
+
+test("urls: a double click does not fire onUrlClick", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  await write(t, "go https://example.com now");
+  let n = 0;
+  t.onUrlClick(() => n++);
+  for (const clickCount of [1, 2]) {
+    t.handleMouse({ type: "down", button: 0, col: 5, row: 0, clickCount });
+    t.handleMouse({ type: "up", button: 0, col: 5, row: 0 });
+  }
+  assert.equal(n, 1);
+  t.dispose();
+});
