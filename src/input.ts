@@ -168,7 +168,7 @@ export class CompositionHelper {
     ts.left = `${a.left}px`;
     ts.top = `${a.top}px`;
     if (!this.composing) {
-      // 変換していないときは、1 セルの大きさ
+      // xterm.js と同じく 1 セルにする。0x0 だと動かない IME がある
       ts.width = `${Math.max(a.cellWidth, 1)}px`;
       ts.height = `${Math.max(a.cellHeight, 1)}px`;
       ts.lineHeight = `${a.cellHeight}px`;

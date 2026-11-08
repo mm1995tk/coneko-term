@@ -1957,7 +1957,7 @@ export class Terminal {
     this.bindInputEvents(textarea, el, keys, composition);
   }
 
-  /** 変換中の字を出す位置。さかのぼって見ていて、カーソルが見えないときは `undefined`。 */
+  /** `textarea` と変換中の字を置く位置（カーソルのセル）。さかのぼって見ていて、カーソルが見えないときは `undefined`。 */
   private compositionAnchor(): CompositionAnchor | undefined {
     const cell = this.renderer?.cellSize;
     if (!cell || this.viewportOffset !== 0) return undefined;

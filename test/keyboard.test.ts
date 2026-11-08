@@ -844,3 +844,32 @@ test("変換していないときも、textarea はカーソルの位置に置�
   assert.equal(h.textarea.style["width"], "9px");
   assert.equal(h.textarea.style["height"], "20px");
 });
+
+test("カーソルが見えない（アンカーが無い）ときは、textarea を最後の位置のまま動かさない", () => {
+  let anchor: { left: number; top: number; cellWidth: number; cellHeight: number } | undefined = {
+    left: 16,
+    top: 40,
+    cellWidth: 9,
+    cellHeight: 20,
+  };
+  const style = {} as Record<string, string>;
+  const c = new CompositionHelper(
+    { value: "", style: style as never },
+    {
+      textContent: "",
+      style: {} as never,
+      getBoundingClientRect: () => ({ width: 30, height: 20 }),
+      show() {},
+      hide() {},
+    },
+    () => {},
+    () => anchor,
+    () => ({ family: "monospace", size: 15 }),
+    () => {},
+  );
+  c.updateCompositionElements(true);
+  anchor = undefined;
+  c.updateCompositionElements(true);
+  assert.equal(style["left"], "16px");
+  assert.equal(style["top"], "40px");
+});
