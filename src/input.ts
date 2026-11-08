@@ -40,6 +40,7 @@ export interface CompositionViewLike {
 export interface CompositionAnchor {
   left: number;
   top: number;
+  cellWidth: number;
   cellHeight: number;
 }
 
@@ -150,28 +151,42 @@ export class CompositionHelper {
     });
   }
 
-  /** 変換中の字を、カーソルの位置へ動かす。`textarea` も同じ位置に置く（IME の候補の窓が出る場所）。 */
+  /**
+   * `textarea` を、いつもカーソルの位置に置く（macOS の入力の表示（あ / A）や IME の候補の窓が、
+   * カーソルの近くに出る）。変換中は、変換の字もカーソルの位置へ動かす。
+   * カーソルが見えないとき（さかのぼって見ているとき）は、動かさない。
+   */
   updateCompositionElements(dontRecurse = false): void {
-    if (!this.composing) return;
     const a = this.anchor();
-    if (a) {
-      const f = this.font();
-      const vs = this.view.style;
-      vs.left = `${a.left}px`;
-      vs.top = `${a.top}px`;
-      vs.height = `${a.cellHeight}px`;
-      vs.lineHeight = `${a.cellHeight}px`;
-      vs.fontFamily = f.family;
-      vs.fontSize = `${f.size}px`;
-      const b = this.view.getBoundingClientRect();
-      const ts = this.textarea.style;
-      ts.left = `${a.left}px`;
-      ts.top = `${a.top}px`;
-      // 1x1 より小さいと動かない IME がある
-      ts.width = `${Math.max(b.width, 1)}px`;
-      ts.height = `${Math.max(b.height, 1)}px`;
-      ts.lineHeight = `${b.height}px`;
+    if (!a) {
+      if (this.composing && !dontRecurse) {
+        this.schedule(() => this.updateCompositionElements(true));
+      }
+      return;
     }
+    const ts = this.textarea.style;
+    ts.left = `${a.left}px`;
+    ts.top = `${a.top}px`;
+    if (!this.composing) {
+      // 変換していないときは、1 セルの大きさ
+      ts.width = `${Math.max(a.cellWidth, 1)}px`;
+      ts.height = `${Math.max(a.cellHeight, 1)}px`;
+      ts.lineHeight = `${a.cellHeight}px`;
+      return;
+    }
+    const f = this.font();
+    const vs = this.view.style;
+    vs.left = `${a.left}px`;
+    vs.top = `${a.top}px`;
+    vs.height = `${a.cellHeight}px`;
+    vs.lineHeight = `${a.cellHeight}px`;
+    vs.fontFamily = f.family;
+    vs.fontSize = `${f.size}px`;
+    const b = this.view.getBoundingClientRect();
+    // 1x1 より小さいと動かない IME がある
+    ts.width = `${Math.max(b.width, 1)}px`;
+    ts.height = `${Math.max(b.height, 1)}px`;
+    ts.lineHeight = `${b.height}px`;
     if (!dontRecurse) this.schedule(() => this.updateCompositionElements(true));
   }
 }

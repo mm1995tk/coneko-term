@@ -231,7 +231,7 @@ function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMe
     textarea,
     view,
     (d) => sent.push(d),
-    () => ({ left: 16, top: 40, cellHeight: 20 }),
+    () => ({ left: 16, top: 40, cellWidth: 9, cellHeight: 20 }),
     () => ({ family: "monospace", size: 15 }),
     (f) => timers.push(f),
   );
@@ -835,3 +835,12 @@ for (const flags of [F8, F1 | F2 | F4 | F8 | F16]) {
     assert.deepEqual(h.sent, ["かな", `${ESC}[13u`]);
   });
 }
+
+test("変換していないときも、textarea はカーソルの位置に置く（1 セルの大きさ）", () => {
+  const h = makeHandler();
+  h.composition.updateCompositionElements(true);
+  assert.equal(h.textarea.style["left"], "16px");
+  assert.equal(h.textarea.style["top"], "40px");
+  assert.equal(h.textarea.style["width"], "9px");
+  assert.equal(h.textarea.style["height"], "20px");
+});
