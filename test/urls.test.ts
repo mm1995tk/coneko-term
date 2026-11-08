@@ -112,3 +112,13 @@ test("urls: a double click does not fire onUrlClick", async () => {
   assert.equal(n, 1);
   t.dispose();
 });
+
+test("urls: a short wrapped URL across row 63 is not cut", async () => {
+  const t = new Terminal({ cols: 10, rows: 80, scrollback: 0 });
+  await write(t, "\r\n".repeat(63) + "https://example.com/abc");
+  const urls = t.getVisibleUrls();
+  assert.equal(urls.length, 1);
+  assert.equal(urls[0].url, "https://example.com/abc");
+  assert.equal(urls[0].segments.length, 3);
+  t.dispose();
+});

@@ -18,6 +18,9 @@ export interface FoundUrl {
 /** 1 つの論理行（折り返しでつながった行の並び）に使う行数の上限。 */
 const MAX_LOGICAL_ROWS = 64;
 
+/** 論理行の先頭を探して戻る行数の上限。 */
+const SEARCH_BACK = 4096;
+
 // `http://` と `https://` で始まり、空白と URL に使わない ASCII の記号、ASCII 以外の字の手前まで。
 // 日本語の文の中に URL が埋まっていても、URL の後ろの字を巻き込まない。
 const URL_RE = /\bhttps?:\/\/[^\s\x00-\x20\x7f-\uffff<>"'`\\^{}|]+/gi;
@@ -59,9 +62,14 @@ export function findUrlsAround(
   total: number,
   absRow: number,
 ): FoundUrl[] {
-  // 論理行は 64 行ずつの決まった区切り（通し番号の 64 の倍数）で分ける。どの行から見ても同じ窓になり、
-  // `absRow` の行は必ず窓に入る。区切りをまたぐ URL は切れる。
-  const chunk = Math.floor(absRow / MAX_LOGICAL_ROWS) * MAX_LOGICAL_ROWS;
+  // 論理行は、本当の先頭から数えて 64 行ずつの決まった区切りで分ける（どの行から見ても同じ窓になり、
+  // `absRow` の行は必ず窓に入る。64 行以内の論理行は切れない）。先頭を探して戻るのは SEARCH_BACK 行まで。
+  // それより長い論理行だけは、通し番号の 64 の倍数で区切る。
+  let start = absRow;
+  while (start > 0 && absRow - start < SEARCH_BACK && read(start - 1).wrapped) start--;
+  const found0 = start === 0 || !read(start - 1).wrapped;
+  const base = found0 ? start : 0;
+  const chunk = base + Math.floor((absRow - base) / MAX_LOGICAL_ROWS) * MAX_LOGICAL_ROWS;
   let first = absRow;
   while (first > chunk && read(first - 1).wrapped) first--;
   // UTF-16 の 1 単位ごとの位置
