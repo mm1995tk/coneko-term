@@ -1934,7 +1934,7 @@ export class Terminal {
 
   /**
    * 見えない `textarea` を置いて、キー・変換・貼り付け・フォーカスを受ける。
-   * 変換中の字は、カーソルの位置に重ねて見せる。
+   * `textarea` はいつもカーソルの位置に置く。変換中の字は、カーソルの位置に重ねて見せる。
    */
   private setupInput(doc: Document, el: HTMLElement): void {
     const textarea = createInputTextarea(doc);
@@ -1957,7 +1957,7 @@ export class Terminal {
     this.bindInputEvents(textarea, el, keys, composition);
   }
 
-  /** 変換中の字を出す位置。さかのぼって見ていて、カーソルが見えないときは `undefined`。 */
+  /** `textarea` と変換中の字を置く位置（カーソルのセル）。さかのぼって見ていて、カーソルが見えないときは `undefined`。 */
   private compositionAnchor(): CompositionAnchor | undefined {
     const cell = this.renderer?.cellSize;
     if (!cell || this.viewportOffset !== 0) return undefined;
@@ -1965,6 +1965,7 @@ export class Terminal {
     return {
       left: Math.min(c.x, this.cols - 1) * cell.width,
       top: c.y * cell.height,
+      cellWidth: cell.width,
       cellHeight: cell.height,
     };
   }
@@ -2775,7 +2776,7 @@ function createInputTextarea(doc: Document): HTMLTextAreaElement {
   textarea.tabIndex = 0;
   Object.assign(textarea.style, {
     position: "absolute",
-    left: "-9999em",
+    left: "0",
     top: "0",
     width: "0",
     height: "0",

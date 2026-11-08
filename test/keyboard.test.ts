@@ -4,6 +4,7 @@ import { before, test } from "node:test";
 import {
   bracketTextForPaste,
   CompositionHelper,
+  type CompositionAnchor,
   evaluateKeyboardEvent,
   init,
   KeyHandler,
@@ -209,7 +210,7 @@ test("Terminal.paste returns to the bottom when scrolled back", async () => {
 
 // ---- KeyHandler と CompositionHelper（DOM の代わりに偽物を使う）
 
-function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number } = {}) {
+function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMeta?: boolean; app?: boolean; flags?: number; anchor?: () => CompositionAnchor | undefined } = {}) {
   const sent: string[] = [];
   const pages: number[] = [];
   const timers: (() => void)[] = [];
@@ -231,7 +232,7 @@ function makeHandler(opts: { isMac?: boolean; isWindows?: boolean; macOptionIsMe
     textarea,
     view,
     (d) => sent.push(d),
-    () => ({ left: 16, top: 40, cellHeight: 20 }),
+    opts.anchor ?? (() => ({ left: 16, top: 40, cellWidth: 9, cellHeight: 20 })),
     () => ({ family: "monospace", size: 15 }),
     (f) => timers.push(f),
   );
@@ -835,3 +836,27 @@ for (const flags of [F8, F1 | F2 | F4 | F8 | F16]) {
     assert.deepEqual(h.sent, ["かな", `${ESC}[13u`]);
   });
 }
+
+test("変換していないときも、textarea はカーソルの位置に置く（1 セルの大きさ）", () => {
+  const h = makeHandler();
+  h.composition.updateCompositionElements(true);
+  assert.equal(h.textarea.style["left"], "16px");
+  assert.equal(h.textarea.style["top"], "40px");
+  assert.equal(h.textarea.style["width"], "9px");
+  assert.equal(h.textarea.style["height"], "20px");
+});
+
+test("カーソルが見えない（アンカーが無い）ときは、textarea を最後の位置のまま動かさない", () => {
+  let anchor: CompositionAnchor | undefined = {
+    left: 16,
+    top: 40,
+    cellWidth: 9,
+    cellHeight: 20,
+  };
+  const h = makeHandler({ anchor: () => anchor });
+  h.composition.updateCompositionElements(true);
+  anchor = undefined;
+  h.composition.updateCompositionElements(true);
+  assert.equal(h.textarea.style["left"], "16px");
+  assert.equal(h.textarea.style["top"], "40px");
+});
