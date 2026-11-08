@@ -65,6 +65,7 @@ let
         ./src/input.ts
         ./src/keyboard.ts
         ./src/kitty-keyboard.ts
+        ./src/links.ts
         ./src/memory.ts
         ./src/renderer.ts
         ./src/selection.ts

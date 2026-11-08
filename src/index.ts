@@ -61,6 +61,8 @@ export {
   type RowView,
   type SizedInfo,
   type TerminalOptions,
+  type UrlClick,
+  type VisibleUrl,
   type Theme,
 } from "./terminal.js";
 

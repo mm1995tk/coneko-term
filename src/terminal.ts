@@ -1,5 +1,6 @@
 import { WasmTerminal, type WasmEvent } from "./wasm/coneko_term_wasm.js";
 import { getMemory } from "./memory.js";
+import { findUrlsAround, type FoundUrl } from "./links.js";
 import {
   SelectionModel,
   type SelectionHost,
@@ -72,6 +73,25 @@ function programStatusOf(fields: string): ProgramStatusChange {
   return { id, status };
 }
 
+/** URL の上でのクリック。`Terminal.onUrlClick` の聞き手が受け取る。 */
+export interface UrlClick {
+  /** クリックされた URL。 */
+  url: string;
+  /** 押していた修飾キー。 */
+  shiftKey: boolean;
+  altKey: boolean;
+  ctrlKey: boolean;
+  /** cmd（macOS）/ Windows キー。`MouseInput.metaKey` を渡したときだけ立つ。 */
+  metaKey: boolean;
+}
+
+/** いま見えている URL。`Terminal.getVisibleUrls` が返す。 */
+export interface VisibleUrl {
+  url: string;
+  /** 見えている画面での区間。折り返した URL は行ごとに分かれ、画面の外の行は含まない。 */
+  segments: { row: number; startCol: number; endCol: number }[];
+}
+
 /** `Terminal.handleMouse` に渡すポインターのイベント。 */
 export interface MouseInput {
   /** 押した、離した、動かした、窓から出た（`leave`。kitty の拡張）。 */
@@ -92,6 +112,8 @@ export interface MouseInput {
   altKey?: boolean;
   /** Ctrl を押している。 */
   ctrlKey?: boolean;
+  /** cmd（macOS）/ Windows キーを押している。`onUrlClick` に伝わるだけで、PTY への報告には使わない。 */
+  metaKey?: boolean;
   /** 連続して押した回数（DOM の `MouseEvent.detail`）。1 は範囲、2 は単語、3 は行。`down` だけが使う。 */
   clickCount?: number;
 }
@@ -153,6 +175,8 @@ export interface Theme {
 
 /** `Terminal` を作るときの設定。 */
 export interface TerminalOptions {
+  /** 画面の `http://`・`https://` の URL に波線を引くか。既定は true。あとから `underlineUrls` で変えられる。 */
+  underlineUrls?: boolean;
   /** 列の数。既定は 80。 */
   cols?: number;
   /** 行の数。既定は 24。 */
@@ -847,6 +871,10 @@ export class Terminal {
   private cursorTextColor?: string;
   private selection: SelectionModel;
   private selectionListeners = new Set<() => void>();
+  private urlUnderline = true;
+  private urlClickListeners = new Set<(e: UrlClick) => void>();
+  /** 押した位置が URL の上なら、その URL と修飾キー。離したのが同じセルなら、クリックとして知らせる。 */
+  private urlDown?: { col: number; row: number; click: UrlClick };
   private lastSelectionKey = "";
   private lastTrimmed = 0;
   private lastAlt = false;
@@ -891,6 +919,7 @@ export class Terminal {
   constructor(options: TerminalOptions = {}) {
     getMemory();
     this.options = { ...options };
+    this.urlUnderline = options.underlineUrls ?? true;
     const cols = Math.max(1, options.cols ?? 80);
     const rows = Math.max(1, options.rows ?? 24);
     this.wasm = new WasmTerminal(rows, cols, options.scrollback ?? 1000);
@@ -2206,9 +2235,7 @@ export class Terminal {
 
   /** 画面の `y` 行目（表示位置を考えた、いま見えている行）のセル。 */
   readViewportRow(y: number): RowView {
-    const i = this.viewportY + y;
-    const sb = this.scrollbackLength;
-    return i < sb ? this.readScrollbackRow(i) : this.readRow(i - sb);
+    return this.readAbsRow(this.viewportY + y);
   }
 
   /** 欄の要素。 */
@@ -2429,6 +2456,90 @@ export class Terminal {
     return c1 > c0 ? [c0, c1] : undefined;
   }
 
+  // ---- URL
+
+  /** 画面の `http://`・`https://` の URL に波線を引くか。既定は true。 */
+  get underlineUrls(): boolean {
+    return this.urlUnderline;
+  }
+
+  set underlineUrls(on: boolean) {
+    if (this.underlineUrls === on) return;
+    this.urlUnderline = on;
+    this.renderer?.invalidate();
+  }
+
+  private readAbsRow(i: number): RowView {
+    const sb = this.scrollbackLength;
+    return i < sb ? this.readScrollbackRow(i) : this.readRow(i - sb);
+  }
+
+  /** 見えている画面の `y` 行目にかかる URL（区間は通し番号の行で持つ）。 */
+  private urlsOnRow(y: number): FoundUrl[] {
+    const abs = this.viewportY + y;
+    const total = this.scrollbackLength + this.rows;
+    return findUrlsAround((i) => this.readAbsRow(i), total, abs);
+  }
+
+  /** 見えている画面の `(col, row)` にある URL。無ければ `undefined`。 */
+  private urlAt(col: number, row: number): string | undefined {
+    const abs = this.viewportY + row;
+    for (const u of this.urlsOnRow(row)) {
+      for (const s of u.segments) {
+        if (s.row === abs && col >= s.startCol && col < s.endCol) return u.url;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * いま見えている画面の URL と位置の一覧。`http://` と `https://` で始まるものだけ。
+   * 折り返した URL は 1 つにまとめ、行ごとの区間（`segments`）に分ける。
+   */
+  getVisibleUrls(): VisibleUrl[] {
+    const out: VisibleUrl[] = [];
+    const seen = new Set<string>();
+    const base = this.viewportY;
+    for (let y = 0; y < this.rows; y++) {
+      for (const u of this.urlsOnRow(y)) {
+        const segments = u.segments
+          .filter((s) => s.row >= base && s.row < base + this.rows)
+          .map((s) => ({
+            row: s.row - base,
+            startCol: s.startCol,
+            endCol: s.endCol,
+          }));
+        if (segments.length === 0) continue;
+        const key = `${u.segments[0].row}:${u.segments[0].startCol}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ url: u.url, segments });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * URL の上で左ボタンを押して、動かさずに離したときに知らせる。URL と、押していた修飾キーを渡す。
+   * URL を開く処理はしない（聞き手がする）。マウスの報告が有効でも、Shift を押していれば届く。
+   */
+  onUrlClick(listener: (e: UrlClick) => void): Disposable {
+    return addListener(this.urlClickListeners, listener);
+  }
+
+  /** 描画が使う。見えている `y` 行目の URL の区間 `[開始の列, 終わりの列)`。 */
+  urlSpans(y: number): [number, number][] {
+    if (!this.underlineUrls) return [];
+    const abs = this.viewportY + y;
+    const out: [number, number][] = [];
+    for (const u of this.urlsOnRow(y)) {
+      for (const s of u.segments) {
+        if (s.row === abs) out.push([s.startCol, s.endCol]);
+      }
+    }
+    return out;
+  }
+
   // ---- マウス
 
   /** マウスの報告が有効か（アプリが `CSI ? 1000 h` などで頼んだ）。 */
@@ -2478,6 +2589,21 @@ export class Terminal {
       }
       if (ev.button !== 0) return false;
       this.mouseOwner = "select";
+      this.urlDown = undefined;
+      const url = (ev.clickCount ?? 1) > 1 ? undefined : this.urlAt(col, row);
+      if (url !== undefined) {
+        this.urlDown = {
+          col,
+          row,
+          click: {
+            url,
+            shiftKey: shift,
+            altKey: ev.altKey === true,
+            ctrlKey: ev.ctrlKey === true,
+            metaKey: ev.metaKey === true,
+          },
+        };
+      }
       const at = { row: this.viewportY + row, col };
       if (shift && this.selection.range()) {
         this.selection.extendSelection(at);
@@ -2517,6 +2643,17 @@ export class Terminal {
     if (!owner) return false;
     this.mouseOwner = undefined;
     if (owner === "report") flushReport(report(this.reportButton, 1));
+    const down = this.urlDown;
+    this.urlDown = undefined;
+    if (
+      owner === "select" &&
+      down &&
+      down.col === col &&
+      down.row === row &&
+      this.urlAt(col, row) === down.click.url
+    ) {
+      for (const l of [...this.urlClickListeners]) this.guard(() => l(down.click));
+    }
     return true;
   }
 
@@ -2598,6 +2735,7 @@ export class Terminal {
       shiftKey: e.shiftKey,
       altKey: e.altKey,
       ctrlKey: e.ctrlKey,
+      metaKey: e.metaKey,
       clickCount: e.detail,
       outside: y < 0 ? -1 : y >= this.rows * cell.height ? 1 : 0,
     };
@@ -2728,6 +2866,7 @@ export class Terminal {
     this.scrollbar = undefined;
     this.scrollListeners.clear();
     this.selectionListeners.clear();
+    this.urlClickListeners.clear();
     this.cellSizeListeners.clear();
     this.dataListeners.clear();
     this.titleListeners.clear();
