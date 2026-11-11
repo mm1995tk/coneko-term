@@ -2712,7 +2712,8 @@ export class Terminal {
   /**
    * ホイールのイベントを渡す。`open` した要素は、自分で DOM のイベントを受けて、これを呼ぶ。
    *
-   * - マウスの報告が有効なら、ホイールとして報告する（1 回の `wheel` に 1 つ）。
+   * - マウスの報告が有効なら、動かした行の数だけホイールとして報告する（1 行に満たない動きは
+   *   次に回す。Shift つきでも報告する）。
    * - 代替画面でマウスの報告が無効なら、動かした行の数だけ上下の矢印キーを送る
    *   （アプリケーションカーソルキーなら `ESC O A`、そうでなければ `ESC [ A`）。
    * - 通常の画面なら、表示位置を動かす。
@@ -2726,15 +2727,22 @@ export class Terminal {
     if (this.core.mouse_reporting()) {
       const col = clamp(Math.trunc(ev.col ?? 0), 0, this.cols - 1);
       const row = clamp(Math.trunc(ev.row ?? 0), 0, this.rows - 1);
-      const sent = this.core.report_mouse(
-        up ? 6 : 7,
-        0,
-        col,
-        row,
-        Math.max(0, Math.floor(ev.x ?? 0)),
-        Math.max(0, Math.floor(ev.y ?? 0)),
-        (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
-      );
+      // 動いた量から行の数を求め、その数だけ報告する（1 行に満たなければ報告しない）。
+      // Shift つきでも報告するので、Shift は行の数に影響させない。
+      const n = Math.abs(this.wheelLines(ev, true));
+      let sent = false;
+      for (let i = 0; i < n; i++) {
+        sent =
+          this.core.report_mouse(
+            up ? 6 : 7,
+            0,
+            col,
+            row,
+            Math.max(0, Math.floor(ev.x ?? 0)),
+            Math.max(0, Math.floor(ev.y ?? 0)),
+            (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
+          ) || sent;
+      }
       if (sent) this.flush();
       return true;
     }
@@ -2751,9 +2759,12 @@ export class Terminal {
     return true;
   }
 
-  /** ホイールが動かす行の数（上が負）。Shift つきは 0。xterm.js の `getLinesScrolled` と同じ式。 */
-  private wheelLines(ev: WheelInput): number {
-    if (ev.shiftKey) return 0;
+  /**
+   * ホイールが動かす行の数（上が負）。Shift つきは 0（`keepShift` のときは Shift を見ない）。
+   * xterm.js の `getLinesScrolled` と同じ式。
+   */
+  private wheelLines(ev: WheelInput, keepShift = false): number {
+    if (ev.shiftKey && !keepShift) return 0;
     let amount = ev.deltaY;
     if (ev.deltaMode === 0) {
       // ピクセル: 行の高さで割り、端数は次に回す
