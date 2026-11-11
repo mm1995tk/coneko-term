@@ -163,6 +163,8 @@ export class CompositionHelper {
   nudge(): void {
     this.nudgeOffset = this.nudgeOffset === 0 ? 0.01 : 0;
     this.updateCompositionElements(true);
+    // 変換中に選択範囲を動かすと、変換中の字が確定や取り消しになるブラウザーがある
+    if (this.composing) return;
     const n = this.textarea.value.length;
     this.textarea.setSelectionRange?.(n, n);
   }

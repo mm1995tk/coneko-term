@@ -894,3 +894,15 @@ test("HostMoveWatcher は、位置が変わったときだけ知らせる（最�
   w.check();
   assert.equal(moved, 2);
 });
+
+test("変換中の nudge は、textarea の選択範囲を触らない", () => {
+  const h = makeHandler();
+  let called = 0;
+  (h.textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = () => {
+    called++;
+  };
+  h.composition.compositionstart();
+  h.composition.nudge();
+  assert.equal(called, 0);
+  assert.notEqual(h.textarea.style["left"], "16px");
+});
