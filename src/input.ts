@@ -222,6 +222,10 @@ export class HostMoveWatcher {
     private readonly onMoved: () => void,
   ) {}
 
+  /**
+   * 置いた要素の今の位置を読み、前回の `check` から変わっていれば `onMoved` を呼ぶ。
+   * 最初の呼び出しでは位置を覚えるだけで、知らせない（作ったときに一度呼んでおくと、その後の動きを見逃さない）。
+   */
   check(): void {
     const p = this.position();
     const last = this.last;
