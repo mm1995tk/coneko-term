@@ -213,6 +213,11 @@ impl Screen {
         self.buf_mut().mark_input();
     }
 
+    /// カーソルのある行に、プロンプトの始まり（OSC 133 の `A`）の印をつける。
+    pub fn mark_prompt_start(&mut self) {
+        self.buf_mut().mark_prompt_start();
+    }
+
     /// 字を 1 つ、カーソルの位置に書く。結合文字は直前の字につく。制御文字は無視する。
     pub fn print(&mut self, c: char) {
         let Some(width) = c.width() else { return };
