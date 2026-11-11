@@ -729,7 +729,7 @@ export interface RowView {
   readonly cells: Uint32Array;
   /** 次の行へ折り返されているか。 */
   readonly wrapped: boolean;
-  /** シェルが入力を受けている行（OSC 133 の `A` から `C` まで。プロンプトと打っている途中のコマンド）か。シェルが OSC 133 を送らなければ、いつも false。 */
+  /** シェルが入力を受けている行（OSC 133 の `A`・`B` から `C`・`D` まで。プロンプトと打っている途中のコマンド）か。シェルが OSC 133 を送らなければ、いつも false。 */
   readonly input: boolean;
   /** `CLUSTER_FLAG` つきの字の番号から、書記素を引く。 */
   cluster(index: number): string;

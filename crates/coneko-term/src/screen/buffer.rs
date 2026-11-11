@@ -15,7 +15,7 @@ mod reflow;
 pub struct Line {
     pub(crate) cells: Vec<Cell>,
     pub(crate) wrapped: bool,
-    /// シェルが入力を受けている行（OSC 133 の `A` から `C` まで、つまりプロンプトと打っている途中のコマンド）。
+    /// シェルが入力を受けている行（OSC 133 の `A`・`B` から `C`・`D` まで、つまりプロンプトと打っている途中のコマンド）。
     pub(crate) input: bool,
     pub(crate) dirty: bool,
     /// この行に左上のセルがある画像の配置。
