@@ -148,6 +148,7 @@ fn rewrap_group(
     tracked: &mut [Tracked],
 ) {
     let last_wrapped = group[group.len() - 1].wrapped;
+    let input = group.iter().any(|l| l.input);
     let out_start = out.len();
     let last = group.len() - 1;
     let single = group.len() == 1;
@@ -214,6 +215,7 @@ fn rewrap_group(
         out.push_back(Line {
             cells: row,
             wrapped: if r + 1 < nrows { true } else { last_wrapped },
+            input,
             dirty: true,
             placements: std::mem::take(&mut moved[r]),
             sized: false,

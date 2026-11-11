@@ -208,6 +208,11 @@ impl Screen {
 
     // ---- 書く ----
 
+    /// カーソルのある行に、シェルが入力を受けている行の印をつける。
+    pub fn mark_input(&mut self) {
+        self.buf_mut().mark_input();
+    }
+
     /// 字を 1 つ、カーソルの位置に書く。結合文字は直前の字につく。制御文字は無視する。
     pub fn print(&mut self, c: char) {
         let Some(width) = c.width() else { return };

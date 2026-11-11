@@ -276,3 +276,35 @@ fn csi_22_j_still_removes_extra_cursors() {
     w(&mut t, "\x1b[22J");
     assert!(t.screen().extra_cursors.is_empty());
 }
+
+#[test]
+fn osc_133_marks_the_lines_the_shell_takes_input_on() {
+    let mut t = term(5, 10);
+    w(
+        &mut t,
+        "\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+    );
+    let s = t.screen();
+    assert!(s.row(0).is_input());
+    assert!(!s.row(1).is_input());
+    assert!(s.row(2).is_input());
+    assert!(!s.row(3).is_input());
+    // 消した行の印は消える
+    w(&mut t, "\x1b[2K");
+    assert!(!t.screen().row(2).is_input());
+}
+
+#[test]
+fn no_osc_133_means_no_input_lines() {
+    let mut t = term(3, 10);
+    w(&mut t, "$ ls\r\n");
+    assert!(!t.screen().row(0).is_input());
+}
+
+#[test]
+fn osc_133_is_tracked_when_the_host_registers_it() {
+    let mut t = term(3, 10);
+    t.register_osc(133);
+    w(&mut t, "\x1b]133;A\x07$");
+    assert!(t.screen().row(0).is_input());
+}

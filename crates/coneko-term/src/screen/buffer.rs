@@ -15,6 +15,8 @@ mod reflow;
 pub struct Line {
     pub(crate) cells: Vec<Cell>,
     pub(crate) wrapped: bool,
+    /// シェルが入力を受けている行（OSC 133 の `A`・`B` から `C`・`D` まで、つまりプロンプトと打っている途中のコマンド）。
+    pub(crate) input: bool,
     pub(crate) dirty: bool,
     /// この行に左上のセルがある画像の配置。
     pub(crate) placements: Vec<Placement>,
@@ -27,6 +29,7 @@ impl Line {
         Line {
             cells: vec![Cell::blank(attrs); cols],
             wrapped: false,
+            input: false,
             dirty: true,
             placements: Vec::new(),
             sized: false,
@@ -46,6 +49,12 @@ impl Line {
     /// この行が、次の行へ折り返している（次の行に続く）か。
     pub fn is_wrapped(&self) -> bool {
         self.wrapped
+    }
+
+    /// シェルが入力を受けている行（プロンプトと、打っている途中のコマンド）か。
+    /// シェルが OSC 133 を送らなければ、いつも偽。
+    pub fn is_input(&self) -> bool {
+        self.input
     }
 
     /// 前に描いてから変わったか。
@@ -340,6 +349,12 @@ impl Buffer {
         self.line_mut(y).wrapped = true;
         self.cursor.x = 0;
         self.index(pen);
+    }
+
+    /// カーソルのある行に、シェルが入力を受けている行の印をつける。
+    pub fn mark_input(&mut self) {
+        let y = self.cursor.y;
+        self.line_mut(y).input = true;
     }
 
     /// 結合文字をつける先のセルの x。
@@ -718,6 +733,7 @@ impl Buffer {
         }
         if x0 == 0 && x1 == line.cells.len() {
             line.wrapped = false;
+            line.input = false;
         }
     }
 
@@ -765,6 +781,7 @@ impl Buffer {
                 };
             }
             line.wrapped = false;
+            line.input = false;
         }
         self.repair_sized(0, self.rows - 1);
     }
