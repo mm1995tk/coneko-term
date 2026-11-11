@@ -69,7 +69,6 @@ export {
 export {
   browserEnv,
   CanvasRenderer,
-  cellWidthFor,
   Palette,
   SCROLLBAR_WIDTH,
   proposeDimensions,

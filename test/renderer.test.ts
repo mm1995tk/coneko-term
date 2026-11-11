@@ -4,7 +4,6 @@ import { before, test } from "node:test";
 import {
   CanvasRenderer,
   CELL_STRIDE,
-  cellWidthFor,
   init,
   Palette,
   proposeDimensions,
@@ -12,7 +11,7 @@ import {
   SCROLLBAR_WIDTH,
   Terminal,
 } from "../dist/index.js";
-import { Scrollbar } from "../dist/renderer.js";
+import { cellWidthFor, Scrollbar } from "../dist/renderer.js";
 
 before(async () => {
   await init(
