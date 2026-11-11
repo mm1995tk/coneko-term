@@ -2729,7 +2729,7 @@ export class Terminal {
       const row = clamp(Math.trunc(ev.row ?? 0), 0, this.rows - 1);
       // 動いた量から行の数を求め、その数だけ報告する（1 行に満たなければ報告しない）。
       // Shift つきでも報告するので、Shift は行の数に影響させない。
-      const n = Math.abs(this.wheelLines(ev, true));
+      const n = Math.abs(this.wheelLines(ev));
       let sent = false;
       for (let i = 0; i < n; i++) {
         sent =
@@ -2746,7 +2746,7 @@ export class Terminal {
       if (sent) this.flush();
       return true;
     }
-    const lines = this.wheelLines(ev);
+    const lines = ev.shiftKey ? 0 : this.wheelLines(ev);
     if (this.core.is_alt_screen()) {
       if (lines === 0) return false;
       const key = up ? "A" : "B";
@@ -2760,11 +2760,10 @@ export class Terminal {
   }
 
   /**
-   * ホイールが動かす行の数（上が負）。Shift つきは 0（`keepShift` のときは Shift を見ない）。
+   * ホイールが動かす行の数（上が負）。Shift は見ない（呼ぶ側が決める）。
    * xterm.js の `getLinesScrolled` と同じ式。
    */
-  private wheelLines(ev: WheelInput, keepShift = false): number {
-    if (ev.shiftKey && !keepShift) return 0;
+  private wheelLines(ev: WheelInput): number {
     let amount = ev.deltaY;
     if (ev.deltaMode === 0) {
       // ピクセル: 行の高さで割り、端数は次に回す
