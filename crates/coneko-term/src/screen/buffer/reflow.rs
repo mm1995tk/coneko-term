@@ -123,14 +123,7 @@ impl Buffer {
         }
 
         if let Some(s) = redraw {
-            let at = out.len();
-            for _ in s..n {
-                out.push_back(Line::blank(cols, Default::default()));
-            }
-            // 消した範囲にある位置は、始まりからの段目をそのまま残す
-            for t in tracked.iter_mut().filter(|t| t.abs >= s) {
-                t.result = Some((at + t.abs - s, t.x.min(cols - 1), false));
-            }
+            blank_for_redraw(&mut out, s, n, cols, &mut tracked);
         }
 
         // 行が足りなければ下に空行を足す
@@ -163,6 +156,24 @@ impl Buffer {
             s.x = x;
             s.pending_wrap = pending;
         }
+    }
+}
+
+/// プロンプトから下（元の `from..n` 行ぶん）を空行にして `out` の末尾に足す。`tracked` のうちその範囲にあるものは、
+/// 始まりからの段目をそのまま残して新しい位置を決める。
+fn blank_for_redraw(
+    out: &mut VecDeque<Line>,
+    from: usize,
+    n: usize,
+    cols: usize,
+    tracked: &mut [Tracked],
+) {
+    let at = out.len();
+    for _ in from..n {
+        out.push_back(Line::blank(cols, Default::default()));
+    }
+    for t in tracked.iter_mut().filter(|t| t.abs >= from) {
+        t.result = Some((at + t.abs - from, t.x.min(cols - 1), false));
     }
 }
 
