@@ -1152,7 +1152,11 @@ impl State {
     fn track_shell_input(&mut self, data: &[u8]) {
         if let Some(rest) = data.strip_prefix(b"133;") {
             match rest.first() {
-                Some(b'A' | b'B') => self.shell_input = true,
+                Some(b'A') => {
+                    self.shell_input = true;
+                    self.screen.mark_prompt_start();
+                }
+                Some(b'B') => self.shell_input = true,
                 Some(b'C' | b'D') => self.shell_input = false,
                 _ => {}
             }

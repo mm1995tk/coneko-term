@@ -308,3 +308,140 @@ fn osc_133_is_tracked_when_the_host_registers_it() {
     w(&mut t, "\x1b]133;A\x07$");
     assert!(t.screen().row(0).is_input());
 }
+
+// ---- 幅が変わったときの、シェルのプロンプトの扱い ----
+
+/// スクロールバックと画面を、折り返しでつながった行を 1 本にして並べる（末尾の空行は除く）。
+fn logical_lines(t: &Terminal) -> Vec<String> {
+    let s = t.screen();
+    let rows: Vec<&crate::screen::Line> = (0..s.scrollback_len())
+        .map(|i| s.scrollback_row(i))
+        .chain((0..s.rows()).map(|y| s.row(y)))
+        .collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for l in rows {
+        let text: String = l
+            .cells()
+            .iter()
+            .map(|c| if c.is_empty() { " ".into() } else { c.text() })
+            .collect();
+        cur.push_str(if l.is_wrapped() {
+            &text
+        } else {
+            text.trim_end()
+        });
+        if !l.is_wrapped() {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+const PROMPT1_LEN: usize = 120;
+
+fn prompt1() -> String {
+    format!("~/work/{}", "d".repeat(PROMPT1_LEN - 7))
+}
+
+fn ls_lines() -> Vec<String> {
+    (0..5)
+        .map(|i| format!("ls{i}:{}", "x".repeat(130)))
+        .collect()
+}
+
+/// `ls` の長い行 5 本のあとに、2 行のプロンプト（1 行目は 100 列より長い）を書いた端末。
+/// `marks` が真なら、OSC 133 の `A`・`B` を付ける。
+fn shell_term(marks: bool) -> Terminal {
+    let mut t = term(24, 100);
+    for l in ls_lines() {
+        w(&mut t, &format!("{l}\r\n"));
+    }
+    w(&mut t, &prompt(marks));
+    t
+}
+
+fn prompt(marks: bool) -> String {
+    let (a, b) = if marks {
+        ("\x1b]133;A\x07", "\x1b]133;B\x07")
+    } else {
+        ("", "")
+    };
+    format!("{a}{}\r\n% {b}", prompt1())
+}
+
+/// zsh が SIGWINCH で描き直す出力。`up` は、シェルが覚えている、プロンプトの先頭へ戻る段数。
+fn zsh_redraw(up: usize, marks: bool) -> String {
+    format!("\r{}\x1b[0m\x1b[J{}", "\x1b[A".repeat(up), prompt(marks))
+}
+
+fn expected_after_redraw() -> Vec<String> {
+    let mut v = ls_lines();
+    v.push(prompt1());
+    v.push("%".to_string());
+    v
+}
+
+#[test]
+fn prompt_is_redrawn_by_the_shell_instead_of_reflowed() {
+    let mut t = shell_term(true);
+    t.resize(24, 60);
+    // 組み直さず、プロンプトの始まりから下は空。上の `ls` は組み直される
+    assert_eq!(logical_lines(&t), ls_lines());
+    // カーソルは、始まりから同じ段目（2 段目）に残る
+    let c = t.screen().cursor();
+    assert_eq!(c.y, 5 * 3 + 2);
+    // シェルが描き直すと、プロンプトの 1 行目は 1 回だけ出る
+    w(&mut t, &zsh_redraw(2, true));
+    assert_eq!(logical_lines(&t), expected_after_redraw());
+    assert_eq!(t.screen().scrollback_len(), 0);
+}
+
+#[test]
+fn prompt_does_not_pile_up_when_narrowed_step_by_step() {
+    let mut t = shell_term(true);
+    let mut width = 100;
+    while width > 60 {
+        let up = PROMPT1_LEN.div_ceil(width);
+        width -= 3;
+        t.resize(24, width);
+        w(&mut t, &zsh_redraw(up, true));
+        assert_eq!(logical_lines(&t), expected_after_redraw(), "{width} 列");
+    }
+}
+
+#[test]
+fn only_the_lines_from_the_prompt_start_are_cleared() {
+    let mut t = term(8, 20);
+    w(&mut t, "out\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+    t.resize(8, 10);
+    assert_eq!(logical_lines(&t), ["out"]);
+    assert_eq!(t.screen().cursor().y, 1);
+}
+
+#[test]
+fn cursor_outside_the_prompt_reflows_as_before() {
+    let mut t = term(8, 20);
+    w(&mut t, "\x1b]133;A\x07$ ls\r\n\x1b]133;C\x07");
+    w(&mut t, &"y".repeat(30));
+    w(&mut t, "\r\n\x1b]133;D;0\x07");
+    t.resize(8, 10);
+    assert_eq!(logical_lines(&t), ["$ ls", &"y".repeat(30)]);
+}
+
+#[test]
+fn shell_without_osc_133_is_reflowed_as_before() {
+    let mut t = shell_term(false);
+    t.resize(24, 60);
+    // プロンプトも組み直される
+    let mut want = ls_lines();
+    want.push(prompt1());
+    want.push("%".to_string());
+    assert_eq!(logical_lines(&t), want);
+    let c = t.screen().cursor();
+    assert_eq!(c.y, 5 * 3 + 2);
+    assert_eq!(c.x, 2);
+}

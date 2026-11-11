@@ -67,6 +67,17 @@ fn locate(
     }
 }
 
+/// カーソル（バッファ全体での行番号 `cursor`）が入力の行にあるとき、その行から上へ数えて
+/// 最初の、プロンプトの始まりの行番号。シェルに描き直させる範囲の先頭になる。
+/// 見える範囲の外にある、折り返した行の途中から始まる、といったときは `None`（普通に組み直す）。
+fn prompt_start(lines: &[Line], view_start: usize, cursor: usize) -> Option<usize> {
+    if !lines[cursor].input {
+        return None;
+    }
+    let s = (view_start..=cursor).rev().find(|&y| lines[y].prompt)?;
+    (s == 0 || !lines[s - 1].wrapped).then_some(s)
+}
+
 impl Buffer {
     /// 列の数を `cols` にして、折り返しでつながった行を 1 本に戻してから折り直す
     /// （スクロールバックも）。行の数は変えない。カーソルと保存したカーソルは、
@@ -93,16 +104,33 @@ impl Buffer {
             });
         }
 
+        // カーソルがプロンプトか入力の行にあるときは、プロンプトの始まりから下を組み直さず、
+        // 空にしてシェルに描き直させる。シェルは幅が変わると、始まりまで上へ戻って `\e[J` で消し、
+        // プロンプトを書き直す。上へ戻る段数は端末が組み直したことを知らずに決まっているので、
+        // 組み直すと増えた行が切れ端として上に残る。カーソルは始まりから同じ段目に置く。
+        let redraw = prompt_start(&old, view_start, tracked[0].abs);
+
         let mut out: VecDeque<Line> = VecDeque::with_capacity(n);
         let mut old = old;
         let mut i = 0;
-        while i < n {
+        while i < redraw.unwrap_or(n) {
             let mut j = i;
             while j + 1 < n && old[j].wrapped {
                 j += 1;
             }
             rewrap_group(&mut old[i..=j], i, cols, &mut out, &mut tracked);
             i = j + 1;
+        }
+
+        if let Some(s) = redraw {
+            let at = out.len();
+            for _ in s..n {
+                out.push_back(Line::blank(cols, Default::default()));
+            }
+            // 消した範囲にある位置は、始まりからの段目をそのまま残す
+            for t in tracked.iter_mut().filter(|t| t.abs >= s) {
+                t.result = Some((at + t.abs - s, t.x.min(cols - 1), false));
+            }
         }
 
         // 行が足りなければ下に空行を足す
@@ -149,6 +177,7 @@ fn rewrap_group(
 ) {
     let last_wrapped = group[group.len() - 1].wrapped;
     let input = group.iter().any(|l| l.input);
+    let prompt = group.iter().any(|l| l.prompt);
     let out_start = out.len();
     let last = group.len() - 1;
     let single = group.len() == 1;
@@ -216,6 +245,7 @@ fn rewrap_group(
             cells: row,
             wrapped: if r + 1 < nrows { true } else { last_wrapped },
             input,
+            prompt: prompt && r == 0,
             dirty: true,
             placements: std::mem::take(&mut moved[r]),
             sized: false,

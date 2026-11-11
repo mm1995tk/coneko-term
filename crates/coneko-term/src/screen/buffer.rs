@@ -17,6 +17,8 @@ pub struct Line {
     pub(crate) wrapped: bool,
     /// シェルが入力を受けている行（OSC 133 の `A`・`B` から `C`・`D` まで、つまりプロンプトと打っている途中のコマンド）。
     pub(crate) input: bool,
+    /// プロンプトの始まり（OSC 133 の `A`）の行。幅が変わったとき、ここから下はシェルが描き直す。
+    pub(crate) prompt: bool,
     pub(crate) dirty: bool,
     /// この行に左上のセルがある画像の配置。
     pub(crate) placements: Vec<Placement>,
@@ -30,6 +32,7 @@ impl Line {
             cells: vec![Cell::blank(attrs); cols],
             wrapped: false,
             input: false,
+            prompt: false,
             dirty: true,
             placements: Vec::new(),
             sized: false,
@@ -355,6 +358,12 @@ impl Buffer {
     pub fn mark_input(&mut self) {
         let y = self.cursor.y;
         self.line_mut(y).input = true;
+    }
+
+    /// カーソルのある行に、プロンプトの始まりの印をつける。
+    pub fn mark_prompt_start(&mut self) {
+        let y = self.cursor.y;
+        self.line_mut(y).prompt = true;
     }
 
     /// 結合文字をつける先のセルの x。
@@ -734,6 +743,7 @@ impl Buffer {
         if x0 == 0 && x1 == line.cells.len() {
             line.wrapped = false;
             line.input = false;
+            line.prompt = false;
         }
     }
 
@@ -782,6 +792,7 @@ impl Buffer {
             }
             line.wrapped = false;
             line.input = false;
+            line.prompt = false;
         }
         self.repair_sized(0, self.rows - 1);
     }
