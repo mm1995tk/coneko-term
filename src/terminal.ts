@@ -918,6 +918,7 @@ export class Terminal {
   private textarea?: HTMLTextAreaElement;
   private composition?: CompositionHelper;
   private hostMove?: HostMoveWatcher;
+  private hostMoveScheduled = false;
   private customKeyHandler?: (ev: KeyboardEvent) => boolean;
   private decoder = new TextDecoder();
   private encoder = new TextEncoder();
@@ -2225,13 +2226,28 @@ export class Terminal {
     this.viewOffset = Math.min(this.viewOffset, len);
   }
 
+  /** 画面の更新のたびにレイアウトを確定させないよう、置いた要素の位置を見るのは描画のフレームに 1 回にする。 */
+  private scheduleHostMoveCheck(): void {
+    if (this.hostMoveScheduled) return;
+    const raf = this.textarea?.ownerDocument.defaultView?.requestAnimationFrame;
+    if (!raf) {
+      this.hostMove?.check();
+      return;
+    }
+    this.hostMoveScheduled = true;
+    raf.call(this.textarea!.ownerDocument.defaultView, () => {
+      this.hostMoveScheduled = false;
+      this.hostMove?.check();
+    });
+  }
+
   /** 描画とスクロールバーに、画面が変わったことを知らせる。 */
   private afterChange(): void {
     this.syncPointerShape();
     const r = this.renderer;
     if (!r) return;
     r.touch();
-    this.hostMove?.check();
+    this.scheduleHostMoveCheck();
     this.composition?.updateCompositionElements(true);
     const cell = r.cellSize;
     this.scrollbar?.update(
