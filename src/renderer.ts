@@ -266,8 +266,8 @@ export class CanvasRenderer {
     private options: RenderOptions,
     private env: RenderEnv = browserEnv,
   ) {
-    // alpha: false にすると、macOS の WebKit は字を線を太らせて描く。背景は行ごとに
-    // 不透明に塗るので、透明を許す canvas でも見た目は変わらず、字が細く描かれる。
+    // alpha: false の canvas は、macOS の WebKit で字が太く描かれる（見立て。実機では未確認）。背景は行ごとに
+    // 不透明に塗るので、透明を許す canvas でも背景の見た目は変わらない。
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("coneko-term: canvas 2d context is unavailable");
     this.ctx = ctx;
