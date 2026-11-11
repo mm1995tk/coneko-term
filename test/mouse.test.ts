@@ -152,9 +152,37 @@ test("wheel: reported as a wheel event when the app listens", async () => {
   const t = new Terminal({ cols: 20, rows: 5 });
   const box = collect(t);
   await write(t, "\x1b[?1000h\x1b[?1006h");
-  assert.equal(t.handleWheel({ deltaY: -100, col: 3, row: 2 }), true);
-  assert.equal(t.handleWheel({ deltaY: 100, col: 3, row: 2 }), true);
+  assert.equal(t.handleWheel({ deltaY: -1, deltaMode: 1, col: 3, row: 2 }), true);
+  assert.equal(t.handleWheel({ deltaY: 1, deltaMode: 1, col: 3, row: 2 }), true);
   assert.deepEqual(box.out, ["\x1b[<64;4;3M", "\x1b[<65;4;3M"]);
+  t.dispose();
+});
+
+test("wheel: reports once per line, and small pixel deltas add up", async () => {
+  // 描画が無いので、行の高さは 1 ピクセルとして数える
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  // 1 行に満たない間は報告しない
+  for (let i = 0; i < 3; i++) {
+    assert.equal(t.handleWheel({ deltaY: 0.3, deltaMode: 0, col: 0, row: 0 }), true);
+  }
+  assert.deepEqual(box.out, []);
+  // 合計が 1 行に届いたら 1 つ。端数（0.2）は次に回る
+  t.handleWheel({ deltaY: 0.3, deltaMode: 0, col: 0, row: 0 });
+  assert.deepEqual(box.out, ["\x1b[<65;1;1M"]);
+  box.out.length = 0;
+  // 行単位: 3 行で 3 つ
+  t.handleWheel({ deltaY: -3, deltaMode: 1, col: 0, row: 0 });
+  assert.equal(box.out.join(""), "\x1b[<64;1;1M".repeat(3));
+  box.out.length = 0;
+  // ページ単位: 画面の行数（5）だけ
+  t.handleWheel({ deltaY: 1, deltaMode: 2, col: 0, row: 0 });
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(5));
+  box.out.length = 0;
+  // Shift つきでも報告する
+  t.handleWheel({ deltaY: 2, deltaMode: 1, col: 0, row: 0, shiftKey: true });
+  assert.equal(box.out.join(""), "\x1b[<69;1;1M".repeat(2));
   t.dispose();
 });
 
@@ -200,7 +228,7 @@ test("wheel: on the alternate screen, mouse reporting wins over arrow keys", asy
   const t = new Terminal({ cols: 10, rows: 3 });
   const box = collect(t);
   await write(t, "\x1b[?1049h\x1b[?1000h\x1b[?1006h");
-  t.handleWheel({ deltaY: -2, deltaMode: 1 });
+  t.handleWheel({ deltaY: -1, deltaMode: 1 });
   assert.deepEqual(box.out, ["\x1b[<64;1;1M"]);
   t.dispose();
 });
