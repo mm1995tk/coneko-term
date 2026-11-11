@@ -878,7 +878,7 @@ test("nudge は、textarea の置き場所をずらした値で置き直し、�
   assert.equal(h.textarea.style["left"], "16px");
 });
 
-test("HostMoveWatcher は、位置が変わったときだけ知らせる（最初と、大きさだけの変化では知らせない）", () => {
+test("HostMoveWatcher は、位置が変わったときだけ知らせる（最初の呼び出しと、同じ位置のままでは知らせない）", () => {
   let pos = { left: 10, top: 20 };
   let moved = 0;
   const w = new HostMoveWatcher(() => pos, () => moved++);
