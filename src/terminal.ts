@@ -8,6 +8,7 @@ import {
 } from "./selection.js";
 import {
   CompositionHelper,
+  HostMoveWatcher,
   KeyHandler,
   detectPlatform,
   type CompositionAnchor,
@@ -916,6 +917,7 @@ export class Terminal {
   private cleanups: (() => void)[] = [];
   private textarea?: HTMLTextAreaElement;
   private composition?: CompositionHelper;
+  private hostMove?: HostMoveWatcher;
   private customKeyHandler?: (ev: KeyboardEvent) => boolean;
   private decoder = new TextDecoder();
   private encoder = new TextEncoder();
@@ -1986,6 +1988,15 @@ export class Terminal {
     );
     this.composition = composition;
     this.textarea = textarea;
+    // 置いた要素が動いたら、macOS の入力の表示（あ / A）の位置を求め直させる
+    this.hostMove = new HostMoveWatcher(
+      () => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top };
+      },
+      () => composition.nudge(),
+    );
+    this.hostMove.check();
     const keys = this.createKeyHandler(textarea, composition);
     this.bindInputEvents(textarea, el, keys, composition);
   }
@@ -2044,6 +2055,7 @@ export class Terminal {
       this.cleanups.push(() => target.removeEventListener(type, h, capture));
     };
     on<KeyboardEvent>(textarea, "keydown", (e) => {
+      this.hostMove?.check();
       // 修飾キーだけでは、利用者が操作したとは数えない
       if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
         this.core.program_status_key_pressed();
@@ -2051,7 +2063,10 @@ export class Terminal {
       }
       void keys.keyDown(e);
     }, true);
-    on<KeyboardEvent>(textarea, "keyup", (e) => keys.keyUp(e), true);
+    on<KeyboardEvent>(textarea, "keyup", (e) => {
+      this.hostMove?.check();
+      keys.keyUp(e);
+    }, true);
     on<KeyboardEvent>(textarea, "keypress", (e) => void keys.keyPress(e), true);
     on<InputEvent>(textarea, "input", (e) => void keys.input(e), true);
     on<CompositionEvent>(textarea, "compositionstart", () =>
@@ -2071,7 +2086,10 @@ export class Terminal {
     };
     on<ClipboardEvent>(textarea, "paste", onPaste);
     on<ClipboardEvent>(el, "paste", onPaste);
-    on<FocusEvent>(textarea, "focus", () => this.setFocused(true));
+    on<FocusEvent>(textarea, "focus", () => {
+      this.hostMove?.check();
+      this.setFocused(true);
+    });
     on<FocusEvent>(textarea, "blur", () => {
       keys.reset();
       textarea.value = "";
@@ -2213,6 +2231,7 @@ export class Terminal {
     const r = this.renderer;
     if (!r) return;
     r.touch();
+    this.hostMove?.check();
     this.composition?.updateCompositionElements(true);
     const cell = r.cellSize;
     this.scrollbar?.update(
@@ -2932,6 +2951,7 @@ export class Terminal {
     this.element = undefined;
     this.textarea = undefined;
     this.composition = undefined;
+    this.hostMove = undefined;
     this.host = undefined;
     this.renderer = undefined;
     this.scrollbar = undefined;

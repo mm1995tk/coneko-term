@@ -4,6 +4,7 @@ import { before, test } from "node:test";
 import {
   bracketTextForPaste,
   CompositionHelper,
+  HostMoveWatcher,
   type CompositionAnchor,
   evaluateKeyboardEvent,
   init,
@@ -859,4 +860,37 @@ test("カーソルが見えない（アンカーが無い）ときは、textarea
   h.composition.updateCompositionElements(true);
   assert.equal(h.textarea.style["left"], "16px");
   assert.equal(h.textarea.style["top"], "40px");
+});
+
+test("nudge は、textarea の置き場所をずらした値で置き直し、カーソルを値の終わりに置く", () => {
+  const h = makeHandler();
+  let range: number[] | undefined;
+  (h.textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = (a, b) => {
+    range = [a, b];
+  };
+  h.textarea.value = "ab";
+  h.composition.updateCompositionElements(true);
+  assert.equal(h.textarea.style["left"], "16px");
+  h.composition.nudge();
+  assert.notEqual(h.textarea.style["left"], "16px");
+  assert.deepEqual(range, [2, 2]);
+  h.composition.nudge();
+  assert.equal(h.textarea.style["left"], "16px");
+});
+
+test("HostMoveWatcher は、位置が変わったときだけ知らせる（最初と、大きさだけの変化では知らせない）", () => {
+  let pos = { left: 10, top: 20 };
+  let moved = 0;
+  const w = new HostMoveWatcher(() => pos, () => moved++);
+  w.check();
+  w.check();
+  assert.equal(moved, 0);
+  pos = { left: 30, top: 20 };
+  w.check();
+  assert.equal(moved, 1);
+  w.check();
+  assert.equal(moved, 1);
+  pos = { left: 30, top: 25 };
+  w.check();
+  assert.equal(moved, 2);
 });

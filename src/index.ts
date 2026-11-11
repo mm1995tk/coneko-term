@@ -117,6 +117,7 @@ export {
 
 export {
   CompositionHelper,
+  HostMoveWatcher,
   KeyHandler,
   type CompositionAnchor,
   type CompositionViewLike,
