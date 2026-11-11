@@ -2718,7 +2718,7 @@ export class Terminal {
    *   （アプリケーションカーソルキーなら `ESC O A`、そうでなければ `ESC [ A`）。
    * - 通常の画面なら、表示位置を動かす。
    *
-   * 縦に回さないとき（`deltaY` が 0 か Shift つき）は何もしない。ブラウザーの既定の動きを
+   * 縦に回さないとき（`deltaY` が 0、または報告が無効で Shift つき）は何もしない。ブラウザーの既定の動きを
    * 止めてよいときは `true`。
    */
   handleWheel(ev: WheelInput): boolean {
@@ -2727,21 +2727,14 @@ export class Terminal {
     if (this.core.mouse_reporting()) {
       const col = clamp(Math.trunc(ev.col ?? 0), 0, this.cols - 1);
       const row = clamp(Math.trunc(ev.row ?? 0), 0, this.rows - 1);
-      // 動いた量から行の数を求め、その数だけ報告する（1 行に満たなければ報告しない）。
       // Shift つきでも報告するので、Shift は行の数に影響させない。
       const n = Math.abs(this.wheelLines(ev));
+      const x = Math.max(0, Math.floor(ev.x ?? 0));
+      const y = Math.max(0, Math.floor(ev.y ?? 0));
+      const mods = (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0);
       let sent = false;
       for (let i = 0; i < n; i++) {
-        sent =
-          this.core.report_mouse(
-            up ? 6 : 7,
-            0,
-            col,
-            row,
-            Math.max(0, Math.floor(ev.x ?? 0)),
-            Math.max(0, Math.floor(ev.y ?? 0)),
-            (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0),
-          ) || sent;
+        sent = this.core.report_mouse(up ? 6 : 7, 0, col, row, x, y, mods) || sent;
       }
       if (sent) this.flush();
       return true;
