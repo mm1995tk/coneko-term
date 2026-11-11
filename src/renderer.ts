@@ -68,6 +68,15 @@ export function proposeDimensions(
   };
 }
 
+/**
+ * セルの幅（デバイスピクセル）。字の幅の実測値を切り上げる。丸めると、たとえば
+ * 13.2px が 13px になって字が詰まる。実測できないとき（0 や NaN）は文字の大きさの 0.6 倍。
+ */
+export function cellWidthFor(measured: number, fontSize: number): number {
+  const w = Math.ceil(measured - 1e-6) || Math.round(fontSize * 0.6);
+  return Math.max(1, w);
+}
+
 /** 256 色のうち、16 から 255 の色（6x6x6 の立方体と 24 段階の灰色）。 */
 function extendedPaletteColor(index: number): string {
   let r: number, g: number, b: number;
@@ -257,7 +266,9 @@ export class CanvasRenderer {
     private options: RenderOptions,
     private env: RenderEnv = browserEnv,
   ) {
-    const ctx = canvas.getContext("2d", { alpha: false });
+    // alpha: false にすると、macOS の WebKit は字を線を太らせて描く。背景は行ごとに
+    // 不透明に塗るので、透明を許す canvas でも見た目は変わらず、字が細く描かれる。
+    const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("coneko-term: canvas 2d context is unavailable");
     this.ctx = ctx;
     this.measure();
@@ -302,7 +313,7 @@ export class CanvasRenderer {
     ctx.textBaseline = "alphabetic";
     const sample = ctx.measureText("W".repeat(32));
     const m = ctx.measureText("Mg");
-    const width = Math.max(1, Math.round(sample.width / 32) || Math.round(size * 0.6));
+    const width = cellWidthFor(sample.width / 32, size);
     const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? size * 0.8;
     const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? size * 0.2;
     const charH = Math.max(1, Math.ceil(ascent + descent));

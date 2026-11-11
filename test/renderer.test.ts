@@ -4,6 +4,7 @@ import { before, test } from "node:test";
 import {
   CanvasRenderer,
   CELL_STRIDE,
+  cellWidthFor,
   init,
   Palette,
   proposeDimensions,
@@ -562,4 +563,17 @@ test("fit: subtracts the chosen scrollbar width", () => {
     proposeDimensions({ ...base, scrollbarWidth: resolveScrollbarWidth({}) }),
     { cols: 88, rows: 24 },
   );
+});
+
+test("cell width: rounds the measured glyph width up, so letters do not crowd", () => {
+  assert.equal(cellWidthFor(13.2, 22), 14);
+  assert.equal(cellWidthFor(13, 22), 13);
+  assert.equal(cellWidthFor(13.0000001, 22), 13);
+  assert.equal(cellWidthFor(0.3, 1), 1);
+});
+
+test("cell width: falls back to 0.6 em when the width cannot be measured", () => {
+  assert.equal(cellWidthFor(0, 20), 12);
+  assert.equal(cellWidthFor(NaN, 20), 12);
+  assert.equal(cellWidthFor(0, 0), 1);
 });
