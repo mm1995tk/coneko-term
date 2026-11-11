@@ -357,6 +357,8 @@ fn ls_lines() -> Vec<String> {
 /// `marks` が真なら、OSC 133 の `A`・`B` を付ける。
 fn shell_term(marks: bool) -> Terminal {
     let mut t = term(24, 100);
+    // 前のコマンドの出力の始まり。シェルが `C` を出すと分かってから、プロンプトの始まりの印をつける
+    w(&mut t, "\x1b]133;C\x07");
     for l in ls_lines() {
         w(&mut t, &format!("{l}\r\n"));
     }
@@ -416,7 +418,10 @@ fn prompt_does_not_pile_up_when_narrowed_step_by_step() {
 #[test]
 fn only_the_lines_from_the_prompt_start_are_cleared() {
     let mut t = term(8, 20);
-    w(&mut t, "out\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+    w(
+        &mut t,
+        "\x1b]133;C\x07out\r\n\x1b]133;A\x07$ \x1b]133;B\x07",
+    );
     t.resize(8, 10);
     assert_eq!(logical_lines(&t), ["out"]);
     assert_eq!(t.screen().cursor().y, 1);
@@ -444,4 +449,24 @@ fn shell_without_osc_133_is_reflowed_as_before() {
     let c = t.screen().cursor();
     assert_eq!(c.y, 5 * 3 + 2);
     assert_eq!(c.x, 2);
+}
+
+#[test]
+fn shell_that_never_sends_osc_133_c_is_reflowed_as_before() {
+    // `A` だけのシェルは、実行中のコマンドの出力の行にも入力の印がつくので、空にすると出力が消える
+    let mut t = term(8, 20);
+    w(&mut t, "\x1b]133;A\x07$ make\r\n");
+    w(&mut t, "line1\r\nline2\r\nline3");
+    t.resize(8, 10);
+    assert_eq!(logical_lines(&t), ["$ make", "line1", "line2", "line3"]);
+}
+
+#[test]
+fn alt_screen_does_not_change_the_primary_prompt_rule() {
+    // 全画面のプログラムを動かしている間も、主画面のプロンプトは空にされる（シェルが描き直す前提）
+    let mut t = shell_term(true);
+    w(&mut t, "\x1b[?1049h");
+    t.resize(24, 60);
+    w(&mut t, "\x1b[?1049l");
+    assert_eq!(logical_lines(&t), ls_lines());
 }
