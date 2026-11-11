@@ -257,6 +257,8 @@ struct State {
     gl: usize,
     saved_charsets: Option<([Charset; 4], usize)>,
     last_char: Option<char>,
+    /// シェルが入力を受けている間（OSC 133 の `A` から `C` または `D` まで）。この間に書いた行に印をつける。
+    shell_input: bool,
     /// DECSACE。真なら矩形の領域（`CSI 2 * x`）、偽なら行の流れに沿った範囲（既定）。
     rect_extent: bool,
     modes: Modes,
@@ -309,6 +311,7 @@ impl Terminal {
                 gl: 0,
                 saved_charsets: None,
                 last_char: None,
+                shell_input: false,
                 rect_extent: false,
                 modes: Modes::default(),
                 keyboard_flags: Default::default(),
@@ -966,6 +969,9 @@ impl State {
 
     fn put(&mut self, c: char) {
         self.screen.print(c);
+        if self.shell_input {
+            self.screen.mark_input();
+        }
         self.last_char = Some(c);
     }
 
@@ -1141,11 +1147,24 @@ impl State {
         }
     }
 
+    /// OSC 133 を見て、シェルが入力を受けている間かどうかを覚える。呼ぶ側が 133 を拾う（`register_osc`）
+    /// ときも、ここは見る。`A`・`B` で始まり、`C`・`D` で終わる。
+    fn track_shell_input(&mut self, data: &[u8]) {
+        if let Some(rest) = data.strip_prefix(b"133;") {
+            match rest.first() {
+                Some(b'A' | b'B') => self.shell_input = true,
+                Some(b'C' | b'D') => self.shell_input = false,
+                _ => {}
+            }
+        }
+    }
+
     fn full_reset(&mut self) {
         self.screen.reset();
         self.charsets = [Charset::Ascii; 4];
         self.gl = 0;
         self.saved_charsets = None;
+        self.shell_input = false;
         self.last_char = None;
         self.rect_extent = false;
         self.modes = Modes::default();
@@ -1556,6 +1575,7 @@ impl State {
     }
 
     fn osc(&mut self, data: &[u8], bell: bool) {
+        self.track_shell_input(data);
         let end = data.iter().position(|&b| b == b';').unwrap_or(data.len());
         if let Some(ident) = std::str::from_utf8(&data[..end])
             .ok()

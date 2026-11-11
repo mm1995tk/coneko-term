@@ -608,6 +608,7 @@ pub struct WasmTerminal {
     sized: Vec<std::sync::Arc<coneko_term::screen::SizedBlock>>,
     events: std::collections::VecDeque<Event>,
     last_wrapped: bool,
+    last_input: bool,
     clipboard_reply_items: Vec<ClipboardItem>,
 }
 
@@ -624,6 +625,7 @@ impl WasmTerminal {
             sized: Vec::new(),
             events: Default::default(),
             last_wrapped: false,
+            last_input: false,
             clipboard_reply_items: Vec::new(),
         }
     }
@@ -1359,6 +1361,11 @@ impl WasmTerminal {
         self.last_wrapped
     }
 
+    /// 直前の `read_*` で書き出した行が、シェルが入力を受けている行（プロンプトと打っている途中のコマンド）か。
+    pub fn row_input(&self) -> bool {
+        self.last_input
+    }
+
     /// セルのバッファーの位置（WASM のメモリの中の byte offset）。
     pub fn cells_ptr(&self) -> *const u32 {
         self.cells.as_ptr()
@@ -1582,6 +1589,7 @@ impl WasmTerminal {
         self.clusters.clear();
         self.sized.clear();
         self.last_wrapped = line.is_some_and(|l| l.is_wrapped());
+        self.last_input = line.is_some_and(|l| l.is_input());
         let Some(line) = line else { return 0 };
         for cell in line.cells() {
             self.push_cell(cell);

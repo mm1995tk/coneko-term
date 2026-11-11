@@ -729,6 +729,8 @@ export interface RowView {
   readonly cells: Uint32Array;
   /** 次の行へ折り返されているか。 */
   readonly wrapped: boolean;
+  /** シェルが入力を受けている行（OSC 133 の `A` から `C` まで。プロンプトと打っている途中のコマンド）か。シェルが OSC 133 を送らなければ、いつも false。 */
+  readonly input: boolean;
   /** `CLUSTER_FLAG` つきの字の番号から、書記素を引く。 */
   cluster(index: number): string;
   /**
@@ -875,6 +877,8 @@ export class Terminal {
   private urlClickListeners = new Set<(e: UrlClick) => void>();
   /** 押した位置が URL の上なら、その URL と修飾キー。離したのが同じセルなら、クリックとして知らせる。 */
   private urlDown?: { col: number; row: number; click: UrlClick };
+  /** マウスが最後にいた位置と、そのときの cmd・Shift。cmd を押して URL の上にいる間、ポインターを指の形にするのに使う。 */
+  private hoverAt?: { col: number; row: number; meta: boolean; shift: boolean };
   private lastSelectionKey = "";
   private lastTrimmed = 0;
   private lastAlt = false;
@@ -2226,10 +2230,23 @@ export class Terminal {
     return this.core.pointer_shape() ?? undefined;
   }
 
+  /**
+   * cmd（macOS）/ Windows キーを押しながら、クリックで開ける URL の上にマウスがあるか。
+   * 真の間、`open` した要素の `cursor` は `pointer`（指の形）になる（OSC 22 で決めた形より優先）。
+   * `handleMouse` に渡した最後の位置と修飾キー（`open` した要素なら、キーの押し離しも）で決まる。
+   * マウスの報告が有効なときは、クリックが URL にならない（Shift を押したときだけ URL になる）ので、同じ条件にする。
+   */
+  get hoveringUrl(): boolean {
+    const h = this.hoverAt;
+    if (!h || !h.meta || this.mouseOwner) return false;
+    if (this.core.mouse_reporting() && !h.shift) return false;
+    return this.urlAt(h.col, h.row) !== undefined;
+  }
+
   private syncPointerShape(): void {
     const el = this.element;
     if (!el || this.disposed) return;
-    const shape = this.pointerShape ?? "";
+    const shape = this.hoveringUrl ? "pointer" : (this.pointerShape ?? "");
     if (el.style.cursor !== shape) el.style.cursor = shape;
   }
 
@@ -2341,6 +2358,7 @@ export class Terminal {
   private view(length: number): RowView {
     const core = this.core;
     const wrapped = core.row_wrapped();
+    const input = core.row_input();
     const cells = new Uint32Array(
       getMemory().buffer,
       core.cells_ptr() as unknown as number,
@@ -2350,6 +2368,7 @@ export class Terminal {
       length,
       cells,
       wrapped,
+      input,
       cluster: (i) => core.cluster(i),
       sized: (i) => {
         const [cols, scale, numerator, denominator, vertical, horizontal] =
@@ -2478,7 +2497,23 @@ export class Terminal {
   private urlsOnRow(y: number): FoundUrl[] {
     const abs = this.viewportY + y;
     const total = this.scrollbackLength + this.rows;
-    return findUrlsAround((i) => this.readAbsRow(i), total, abs);
+    const found = findUrlsAround((i) => this.readAbsRow(i), total, abs);
+    // シェルが入力を受けている行（プロンプトと打っている途中のコマンド）の区間は URL に数えない
+    const inputRows = new Map<number, boolean>();
+    const onInput = (row: number): boolean => {
+      let v = inputRows.get(row);
+      if (v === undefined) {
+        v = this.readAbsRow(row).input;
+        inputRows.set(row, v);
+      }
+      return v;
+    };
+    const out: FoundUrl[] = [];
+    for (const u of found) {
+      const segments = u.segments.filter((s) => !onInput(s.row));
+      if (segments.length > 0) out.push({ ...u, segments });
+    }
+    return out;
   }
 
   /** 見えている画面の `(col, row)` にある URL。無ければ `undefined`。 */
@@ -2561,6 +2596,23 @@ export class Terminal {
    */
   handleMouse(ev: MouseInput): boolean {
     if (this.disposed) return false;
+    this.hoverAt =
+      ev.type === "leave"
+        ? undefined
+        : {
+            col: clamp(Math.trunc(ev.col), 0, this.cols - 1),
+            row: clamp(Math.trunc(ev.row), 0, this.rows - 1),
+            meta: ev.metaKey === true,
+            shift: ev.shiftKey === true,
+          };
+    try {
+      return this.dispatchMouse(ev);
+    } finally {
+      this.syncPointerShape();
+    }
+  }
+
+  private dispatchMouse(ev: MouseInput): boolean {
     const col = clamp(Math.trunc(ev.col), 0, this.cols - 1);
     const row = clamp(Math.trunc(ev.row), 0, this.rows - 1);
     const shift = ev.shiftKey === true;
@@ -2768,6 +2820,13 @@ export class Terminal {
     };
   }
 
+  private setHoverModifiers(meta: boolean, shift: boolean): void {
+    const h = this.hoverAt;
+    if (!h || this.disposed || (h.meta === meta && h.shift === shift)) return;
+    this.hoverAt = { ...h, meta, shift };
+    this.syncPointerShape();
+  }
+
   /** 押す・動かす・離すを受ける。戻り値は後始末。 */
   private bindPointer(canvas: HTMLCanvasElement): () => void {
     const doc = canvas.ownerDocument;
@@ -2802,8 +2861,17 @@ export class Terminal {
       this.handleMouse(this.pointerInput(canvas, e, "leave"));
     };
     canvas.addEventListener("mouseleave", onLeave);
+    // マウスを動かさずに cmd を押したり離したりしても、ポインターの形を変える
+    const onKey = (e: KeyboardEvent) => this.setHoverModifiers(e.metaKey, e.shiftKey);
+    const onBlur = () => this.setHoverModifiers(false, false);
+    doc.addEventListener("keydown", onKey);
+    doc.addEventListener("keyup", onKey);
+    doc.defaultView?.addEventListener("blur", onBlur);
     return () => {
       auto.stop();
+      doc.removeEventListener("keydown", onKey);
+      doc.removeEventListener("keyup", onKey);
+      doc.defaultView?.removeEventListener("blur", onBlur);
       canvas.removeEventListener("mousedown", onDown);
       canvas.removeEventListener("mousemove", onHover);
       canvas.removeEventListener("mouseleave", onLeave);

@@ -122,3 +122,88 @@ test("urls: a short wrapped URL across row 63 is not cut", async () => {
   assert.equal(urls[0].segments.length, 3);
   t.dispose();
 });
+
+const PROMPT = "\x1b]133;A\x07$ \x1b]133;B\x07";
+const OUTPUT = "\x1b]133;C\x07";
+
+test("urls: no underline on the prompt line, still one on output lines", async () => {
+  const t = new Terminal({ cols: 60, rows: 6 });
+  await write(t, PROMPT + "echo https://typed.example\r\n" + OUTPUT);
+  await write(t, "https://out.example\r\n\x1b]133;D;0\x07" + PROMPT);
+  await write(t, "curl https://typing.example");
+  assert.deepEqual(t.urlSpans(0), []);
+  assert.deepEqual(t.urlSpans(1), [[0, 19]]);
+  assert.deepEqual(t.urlSpans(2), []);
+  assert.deepEqual(
+    t.getVisibleUrls().map((u) => u.url),
+    ["https://out.example"],
+  );
+  // 打っている途中の URL は、クリックでも開かない
+  const clicks: UrlClick[] = [];
+  t.onUrlClick((e) => clicks.push(e));
+  t.handleMouse({ type: "down", button: 0, col: 12, row: 2 });
+  t.handleMouse({ type: "up", button: 0, col: 12, row: 2 });
+  assert.equal(clicks.length, 0);
+  t.dispose();
+});
+
+test("urls: a multi-line command and a wrapped prompt line have no underline", async () => {
+  const t = new Terminal({ cols: 10, rows: 6 });
+  await write(t, PROMPT + "https://example.com/abc\r\n> https://b.example");
+  assert.equal(t.getVisibleUrls().length, 0);
+  await write(t, "\r\n" + OUTPUT + "https://example.com/x");
+  assert.equal(t.getVisibleUrls().length, 1);
+  t.dispose();
+});
+
+test("urls: the prompt mark is kept when the screen is resized", async () => {
+  const t = new Terminal({ cols: 40, rows: 4 });
+  await write(t, PROMPT + "https://a.example/long/path\r\n" + OUTPUT);
+  t.resize(10, 4);
+  assert.equal(t.getVisibleUrls().length, 0);
+  t.dispose();
+});
+
+test("urls: without OSC 133 marks, every line is underlined as before", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  await write(t, "$ echo https://example.com");
+  assert.equal(t.urlSpans(0).length, 1);
+  t.dispose();
+});
+
+test("urls: the marks are tracked even when the host registers OSC 133", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  t.registerOscHandler(133, () => {});
+  await write(t, PROMPT + "https://example.com");
+  assert.deepEqual(t.urlSpans(0), []);
+  t.dispose();
+});
+
+test("urls: hoveringUrl is true only with cmd held over a URL", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  await write(t, "go https://example.com now");
+  const move = (col: number, extra = {}) =>
+    t.handleMouse({ type: "move", button: 0, col, row: 0, ...extra });
+  move(5);
+  assert.equal(t.hoveringUrl, false);
+  move(5, { metaKey: true });
+  assert.equal(t.hoveringUrl, true);
+  move(0, { metaKey: true });
+  assert.equal(t.hoveringUrl, false);
+  move(5, { metaKey: true });
+  t.handleMouse({ type: "leave", button: 0, col: 5, row: 0 });
+  assert.equal(t.hoveringUrl, false);
+  t.dispose();
+});
+
+test("urls: hoveringUrl needs Shift while the app reports the mouse", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  await write(t, "go https://example.com now\x1b[?1000h");
+  const move = (extra = {}) =>
+    t.handleMouse({ type: "move", button: 0, col: 5, row: 0, metaKey: true, ...extra });
+  move();
+  assert.equal(t.hoveringUrl, false);
+  move({ shiftKey: true });
+  assert.equal(t.hoveringUrl, true);
+  t.dispose();
+});
