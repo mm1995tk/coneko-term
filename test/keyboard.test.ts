@@ -283,6 +283,21 @@ test("KeyHandler sends the key and cancels the event; Shift+PageUp scrolls", () 
   assert.equal(h.sent.length, 2);
 });
 
+test("KeyHandler.keyPress does not cancel Cmd keys (macOS menu shortcuts) but cancels plain letters", () => {
+  const h = makeHandler({ isMac: true });
+  const cmdV = {
+    ...domEvent(86, { key: "v", code: "KeyV", metaKey: true }),
+    charCode: 118,
+  };
+  assert.equal(h.handler.keyPress(cmdV), false);
+  assert.equal(cmdV.prevented, false);
+  assert.deepEqual(h.sent, []);
+  const a = { ...domEvent(97, { key: "a", code: "KeyA" }), charCode: 97 };
+  assert.equal(h.handler.keyPress(a), true);
+  assert.equal(a.prevented, true);
+  assert.deepEqual(h.sent, ["a"]);
+});
+
 test("KeyHandler leaves capital letters to keypress, and Cmd keys to the app", () => {
   const h = makeHandler({ isMac: true });
   h.handler.keyDown(domEvent(65, { key: "A", shiftKey: true }));

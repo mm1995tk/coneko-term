@@ -429,7 +429,8 @@ export class KeyHandler {
     this.keyPressHandled = false;
     const custom = this.host.customKeyHandler();
     if (custom && custom(ev as unknown as KeyboardEvent) === false) return false;
-    this.cancel(ev);
+    // 送らないキー（Cmd を押したキーなど）は止めない。macOS の WKWebView は、keypress が止められると
+    // キーを「ページが処理した」と見なし、メニューのキーの割り当て（Cmd+V の貼り付けなど）に送らない
     let key: number;
     if (ev.charCode) key = ev.charCode;
     else if (ev.which === null || ev.which === undefined) key = ev.keyCode;
@@ -438,6 +439,7 @@ export class KeyHandler {
     if (!key || ((ev.altKey || ev.ctrlKey || ev.metaKey) && !this.isThirdLevelShift(ev))) {
       return false;
     }
+    this.cancel(ev);
     this.host.send(String.fromCharCode(key));
     if (this.lastDown) this.textPressed.add(this.lastDown);
     this.keyPressHandled = true;
