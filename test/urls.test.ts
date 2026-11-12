@@ -45,7 +45,12 @@ test("urls: a wrapped URL is one URL with a segment per row", async () => {
     { row: 1, startCol: 0, endCol: 10 },
     { row: 2, startCol: 0, endCol: 3 },
   ]);
+  // マウスを乗せていなければ波線は無い。どの行に乗せても、URL 全体に出る
+  assert.deepEqual(t.urlSpans(1), []);
+  hover(t, 4, 1);
+  assert.deepEqual(t.urlSpans(0), [[0, 10]]);
   assert.deepEqual(t.urlSpans(1), [[0, 10]]);
+  assert.deepEqual(t.urlSpans(2), [[0, 3]]);
   t.underlineUrls = false;
   assert.deepEqual(t.urlSpans(1), []);
   t.dispose();
@@ -96,6 +101,7 @@ test("urls: a URL deep in a logical line longer than 64 rows is found", async ()
     t.getVisibleUrls().map((u) => u.url),
     ["https://a.b/c"],
   );
+  hover(t, 2, 70);
   assert.equal(t.urlSpans(70).length, 1);
   t.dispose();
 });
@@ -123,6 +129,9 @@ test("urls: a short wrapped URL across row 63 is not cut", async () => {
   t.dispose();
 });
 
+const hover = (t: Terminal, col: number, row: number, extra = {}) =>
+  t.handleMouse({ type: "move", button: 0, col, row, ...extra });
+
 const PROMPT = "\x1b]133;A\x07$ \x1b]133;B\x07";
 const OUTPUT = "\x1b]133;C\x07";
 
@@ -131,9 +140,15 @@ test("urls: no underline on the prompt line, still one on output lines", async (
   await write(t, PROMPT + "echo https://typed.example\r\n" + OUTPUT);
   await write(t, "https://out.example\r\n\x1b]133;D;0\x07" + PROMPT);
   await write(t, "curl https://typing.example");
+  // 乗せても、コマンドの行（打っている途中と、実行し終えたあと）には波線が出ない
+  hover(t, 10, 0);
   assert.deepEqual(t.urlSpans(0), []);
-  assert.deepEqual(t.urlSpans(1), [[0, 19]]);
+  hover(t, 10, 2);
   assert.deepEqual(t.urlSpans(2), []);
+  // 乗せていない出力の行には出ず、乗せると出る
+  assert.deepEqual(t.urlSpans(1), []);
+  hover(t, 3, 1);
+  assert.deepEqual(t.urlSpans(1), [[0, 19]]);
   assert.deepEqual(
     t.getVisibleUrls().map((u) => u.url),
     ["https://out.example"],
@@ -167,6 +182,7 @@ test("urls: the prompt mark is kept when the screen is resized", async () => {
 test("urls: without OSC 133 marks, every line is underlined as before", async () => {
   const t = new Terminal({ cols: 40, rows: 3 });
   await write(t, "$ echo https://example.com");
+  hover(t, 10, 0);
   assert.equal(t.urlSpans(0).length, 1);
   t.dispose();
 });
@@ -175,6 +191,7 @@ test("urls: the marks are tracked even when the host registers OSC 133", async (
   const t = new Terminal({ cols: 40, rows: 3 });
   t.registerOscHandler(133, () => {});
   await write(t, PROMPT + "https://example.com");
+  hover(t, 5, 0);
   assert.deepEqual(t.urlSpans(0), []);
   t.dispose();
 });
@@ -231,5 +248,58 @@ test("urls: incomplete percent-encoding combined with other trimming", async () 
     t.getVisibleUrls().map((u) => u.url),
     ["https://example.com/", "https://example.com/(a%)", "https://example.com/a%20"],
   );
+  t.dispose();
+});
+
+test("urls: the underline follows the mouse and goes away on leave", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  await write(t, "go https://example.com now\r\nhttps://b.example");
+  assert.deepEqual(t.urlSpans(0), []);
+  hover(t, 5, 0);
+  assert.deepEqual(t.urlSpans(0), [[3, 22]]);
+  assert.deepEqual(t.urlSpans(1), []);
+  hover(t, 0, 1);
+  assert.deepEqual(t.urlSpans(0), []);
+  assert.deepEqual(t.urlSpans(1), [[0, 17]]);
+  hover(t, 30, 1);
+  assert.deepEqual(t.urlSpans(1), []);
+  hover(t, 0, 1);
+  t.handleMouse({ type: "leave", button: 0, col: 0, row: 1 });
+  assert.deepEqual(t.urlSpans(1), []);
+  t.dispose();
+});
+
+test("urls: the underline needs no cmd, but cmd decides the pointer", async () => {
+  const t = new Terminal({ cols: 40, rows: 3 });
+  await write(t, "go https://example.com now");
+  hover(t, 5, 0);
+  assert.equal(t.urlSpans(0).length, 1);
+  assert.equal(t.hoveringUrl, false);
+  hover(t, 5, 0, { metaKey: true });
+  assert.equal(t.urlSpans(0).length, 1);
+  assert.equal(t.hoveringUrl, true);
+  t.dispose();
+});
+
+test("urls: the command line is not underlined, not opened, and its output is", async () => {
+  const t = new Terminal({ cols: 60, rows: 5 });
+  await write(
+    t,
+    PROMPT + "printf 'https://example.com/'\r\n" + OUTPUT + "https://example.com/\r\n\x1b]133;D;0\x07" + PROMPT,
+  );
+  const clicks: UrlClick[] = [];
+  t.onUrlClick((e) => clicks.push(e));
+  hover(t, 12, 0, { metaKey: true });
+  assert.deepEqual(t.urlSpans(0), []);
+  assert.equal(t.hoveringUrl, false);
+  t.handleMouse({ type: "down", button: 0, col: 12, row: 0, metaKey: true });
+  t.handleMouse({ type: "up", button: 0, col: 12, row: 0, metaKey: true });
+  assert.equal(clicks.length, 0);
+  hover(t, 3, 1, { metaKey: true });
+  assert.deepEqual(t.urlSpans(1), [[0, 20]]);
+  assert.equal(t.hoveringUrl, true);
+  t.handleMouse({ type: "down", button: 0, col: 3, row: 1, metaKey: true });
+  t.handleMouse({ type: "up", button: 0, col: 3, row: 1, metaKey: true });
+  assert.equal(clicks.length, 1);
   t.dispose();
 });

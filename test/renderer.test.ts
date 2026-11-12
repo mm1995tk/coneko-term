@@ -582,6 +582,8 @@ test("renderer: a wrapped row keeps its own glyphs while URL underlines are on",
   t.underlineUrls = true;
   const { fake, frames } = setup(t);
   await write(t, "docker-com" + "XYZW1234");
+  // マウスを乗せた URL にだけ波線を引く。引くときに行を読み直しても、字は変わらない
+  t.handleMouse({ type: "move", button: 0, col: 3, row: 0 });
   fake.calls.length = 0;
   for (const f of frames.splice(0)) f();
   // 行ごとに、fillText の字を並べる（字を置く y は、行の上端 + アセント 12）
