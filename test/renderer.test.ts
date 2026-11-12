@@ -563,3 +563,22 @@ test("fit: subtracts the chosen scrollbar width", () => {
     { cols: 88, rows: 24 },
   );
 });
+
+test("renderer: a wrapped row keeps its own glyphs while URL underlines are on", async () => {
+  const t = new Terminal({ cols: 10, rows: 4 });
+  t.underlineUrls = true;
+  const { fake, frames } = setup(t);
+  await write(t, "docker-com" + "XYZW1234");
+  fake.calls.length = 0;
+  for (const f of frames.splice(0)) f();
+  // 行ごとに、fillText の字を並べる（字を置く y は、行の上端 + アセント 12）
+  const byRow = new Map<number, string>();
+  for (const c of fake.calls) {
+    if (c[0] !== "fillText") continue;
+    const y = Math.round(((c[3] as number) - 12) / 16);
+    byRow.set(y, (byRow.get(y) ?? "") + (c[1] as string));
+  }
+  assert.equal(byRow.get(0), "docker-com");
+  assert.equal(byRow.get(1), "XYZW1234");
+  t.dispose();
+});
