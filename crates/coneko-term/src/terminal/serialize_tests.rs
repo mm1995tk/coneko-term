@@ -416,3 +416,203 @@ fn shell_output_lines_stay_output_after_a_write_back() {
     w(&mut b, "more\r\n");
     assert!(!b.screen().row(2).is_input());
 }
+
+// ---- 画像 ----
+
+/// 生の RGB の画像（`w` x `h`、画素はすべて `seed`）を送る。`keys` は送る命令のキー（`a=` など）。
+fn rgb(t: &mut Terminal, keys: &str, w_: u32, h: u32, seed: u8) {
+    let data = vec![seed; (w_ * h * 3) as usize];
+    let b64 = super::clipboard::encode_base64(&data);
+    w(
+        t,
+        &format!("\x1b_G{keys},f=24,s={w_},v={h},q=2;{b64}\x1b\\"),
+    );
+}
+
+/// 両方の画面の配置（画面の別、行、配置）。
+fn all_placements(t: &Terminal) -> Vec<(bool, i64, crate::graphics::Placement)> {
+    let (p, a) = t.screen().buffers();
+    let mut out = Vec::new();
+    for (alt, buf) in [(false, p), (true, a)] {
+        let base = buf.scrollback_len() as i64;
+        for (i, line) in buf.lines.iter().enumerate() {
+            for pl in &line.placements {
+                out.push((alt, i as i64 - base, pl.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn same_images(a: &Terminal, b: &Terminal) {
+    let key = |t: &Terminal| {
+        let mut v: Vec<_> = t
+            .images()
+            .map(|i| {
+                (
+                    i.id,
+                    i.number,
+                    i.format as u8,
+                    i.width,
+                    i.height,
+                    i.data.clone(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    assert_eq!(key(a), key(b), "images");
+    assert_eq!(all_placements(a), all_placements(b), "placements");
+    assert_eq!(a.placements(), b.placements(), "placed images");
+}
+
+#[test]
+fn images_in_the_screen_and_the_scrollback_come_back() {
+    let mut t = term();
+    // 1 枚目（ID 7、40x40 で base64 が 1 つの APC に入りきらない）を、折り返した行の 1 行目と 2 行目に置く。
+    rgb(&mut t, "a=t,i=7", 40, 40, 1);
+    w(&mut t, &"a".repeat(30));
+    w(
+        &mut t,
+        "\x1b[1;6H\x1b_Ga=p,i=7,p=1,c=2,r=2,z=-1,x=3,y=4,w=10,h=12,X=2,Y=3,C=1,q=2\x1b\\",
+    );
+    w(&mut t, "\x1b[2;4H\x1b_Ga=p,i=7,p=2,C=1,q=2\x1b\\");
+    // 置いた行を scrollback へ流す。
+    w(&mut t, "\x1b[2;11H");
+    for i in 0..8 {
+        w(&mut t, &format!("\r\nline {i}"));
+    }
+    // 2 枚目は番号（I=）で送り、ターミナルが ID を決める。見えている画面に置く。
+    rgb(&mut t, "a=t,I=3", 2, 2, 2);
+    w(
+        &mut t,
+        "\x1b[3;5H\x1b_Ga=p,I=3,p=5,c=3,r=1,z=4,C=1,q=2\x1b\\",
+    );
+    // 置いていない画像は書き出さない。
+    rgb(&mut t, "a=t,i=9", 2, 2, 3);
+    w(&mut t, "\x1b[5;1Hprompt$ ");
+
+    assert!(t.placements().iter().any(|p| p.row < 0));
+    let auto = t.image_by_number(3).unwrap().id;
+    assert!(auto >= crate::graphics::AUTO_ID_BASE);
+
+    let mut b = replay(&t, 100);
+    assert_eq!(b.images().count(), 2);
+    assert!(b.image(9).is_none());
+    t.state.graphics.remove(9);
+    same_images(&t, &b);
+    assert_eq!(b.image_by_number(3).unwrap().id, auto);
+
+    // 書き戻したあとに続く出力も、同じ画面になる。番号で置き直す、ID で消す、ID を決めさせる。
+    for x in [&mut t, &mut b] {
+        w(
+            x,
+            "ls\r\nout\r\n\x1b_Ga=p,I=3,p=6,C=1,q=2\x1b\\\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\",
+        );
+        rgb(x, "a=T,I=4", 2, 2, 4);
+    }
+    same_images(&t, &b);
+    assert_eq!(t.screen().cursor(), b.screen().cursor());
+}
+
+#[test]
+fn images_on_the_alternate_screen_and_unicode_placeholders() {
+    let mut t = term();
+    rgb(&mut t, "a=t,i=5", 2, 2, 1);
+    w(&mut t, "\x1b[2;2H\x1b_Ga=p,i=5,C=1,q=2\x1b\\");
+    // 仮の配置と、それを引く placeholder の字。
+    rgb(&mut t, "a=t,i=42", 4, 2, 2);
+    w(&mut t, "\x1b_Ga=p,i=42,U=1,c=2,r=1,q=2\x1b\\");
+    w(
+        &mut t,
+        "\x1b[4;1H\x1b[38;5;42m\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}\x1b[m",
+    );
+    // 代替画面にも置く。
+    w(&mut t, "\x1b[?1049h");
+    rgb(&mut t, "a=t,i=6", 2, 2, 3);
+    w(&mut t, "\x1b[3;3H\x1b_Ga=p,i=6,c=4,r=2,C=1,q=2\x1b\\");
+    assert_eq!(t.placements().len(), 1);
+
+    let mut b = replay(&t, 100);
+    same_images(&t, &b);
+    // 代替画面から戻ると、主画面の配置と placeholder の画像が見える。
+    for x in [&mut t, &mut b] {
+        w(x, "\x1b[?1049l");
+    }
+    assert_eq!(t.placements().len(), 2);
+    same_images(&t, &b);
+}
+
+#[test]
+fn image_base64_over_the_limit_drops_the_oldest_rows_first() {
+    let mut t = term();
+    rgb(&mut t, "a=t,i=1", 2, 2, 1);
+    w(&mut t, "\x1b_Ga=p,i=1,C=1,q=2\x1b\\");
+    for i in 0..8 {
+        w(&mut t, &format!("line {i}\r\n"));
+    }
+    rgb(&mut t, "a=t,i=2", 2, 2, 2);
+    w(&mut t, "\x1b_Ga=p,i=2,C=1,q=2\x1b\\");
+    // 画像 1 枚ぶん（12 バイト。base64 で 16 字）しか入らない。見えている画面の画像を残す。
+    let bytes = t.serialize_with_image_base64_limit(100, 16);
+    let mut b = term();
+    b.write(&bytes);
+    assert!(b.take_output().is_empty());
+    assert!(b.image(1).is_none());
+    assert!(b.image(2).is_some());
+    let placed: Vec<u32> = b
+        .placements()
+        .iter()
+        .map(|p| p.placement.image_id)
+        .collect();
+    assert_eq!(placed, vec![2]);
+}
+
+#[test]
+fn images_outside_the_written_scrollback_are_not_sent() {
+    let mut t = term();
+    rgb(&mut t, "a=t,i=1", 2, 2, 1);
+    w(&mut t, "\x1b_Ga=p,i=1,C=1,q=2\x1b\\");
+    for i in 0..20 {
+        w(&mut t, &format!("line {i}\r\n"));
+    }
+    let mut b = term();
+    b.write(&t.serialize(3));
+    assert!(b.take_output().is_empty());
+    assert_eq!(b.images().count(), 0);
+    assert!(b.placements().is_empty());
+}
+
+#[test]
+fn a_screen_without_images_serializes_as_before() {
+    let mut t = term();
+    for i in 0..8 {
+        w(&mut t, &format!("\x1b[3{}mline {i}\x1b[m\r\n", i % 8));
+    }
+    w(&mut t, &"x".repeat(25));
+    let bytes = String::from_utf8(t.serialize(100)).unwrap();
+    assert_eq!(bytes, EXPECTED_WITHOUT_IMAGES);
+    assert!(!bytes.contains("\x1b_G"));
+}
+
+/// 画像を扱う前の書き出しが返していたバイト列。
+const EXPECTED_WITHOUT_IMAGES: &str = "\u{1b}c\u{1b}[0;38;5;0mline 0\u{1b}[0m\r\n\u{1b}[0;38;5;1mline 1\u{1b}[0m\r\n\u{1b}[0;38;5;2mline 2\u{1b}[0m\r\n\u{1b}[0;38;5;3mline 3\u{1b}[0m\u{1b}[6;1H\n\n\n\n\u{1b}[1;1H\u{1b}[0;38;5;4mline 4\u{1b}[2;1H\u{1b}[0;38;5;5mline 5\u{1b}[3;1H\u{1b}[0;38;5;6mline 6\u{1b}[4;1H\u{1b}[0;38;5;7mline 7\u{1b}[5;1H\u{1b}[0mxxxxxxxxxxxxxxxxxxxxxxxxx\u{1b}[6;6H\u{1b}[?1l\u{1b}[?45l\u{1b}[?66l\u{1b}[?1004l\u{1b}[?2004l\u{1b}[?2026l\u{1b}[?5522l\u{1b}[6;6H\u{1b}[2 q";
+
+#[test]
+fn images_sent_without_an_id_come_back() {
+    // ID も番号も付けずに a=T で出した画像（ターミナルが ID を決める）。
+    let mut t = term();
+    rgb(&mut t, "a=T", 2, 2, 1);
+    w(&mut t, "\r\nls\r\n");
+    rgb(&mut t, "a=T", 4, 2, 2);
+    w(&mut t, "\r\n$ ");
+    assert_eq!(t.images().count(), 2);
+    let mut b = replay(&t, 100);
+    same_images(&t, &b);
+    // 書き戻したあとに出す画像も、同じ ID になる。
+    for x in [&mut t, &mut b] {
+        rgb(x, "a=T", 2, 2, 3);
+    }
+    same_images(&t, &b);
+}

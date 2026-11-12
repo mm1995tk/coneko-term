@@ -104,7 +104,10 @@ fn parse_command(keys: &[(u8, &[u8])]) -> Result<Option<Command>, (Reply, Fail)>
         // 知らない動作は捨てる（a=p と a=d は呼ぶ前に分けてある）。
         Some(_) => return Ok(None),
     };
-    if reply.id != 0 && reply.number != 0 {
+    // `i=` と `I=` の両方は誤り。ただし `i=` がターミナルの決める ID の範囲なら受け入れる。
+    // `I=` で送った画像の ID はターミナルが決めるので、書き出した画面（`Terminal::serialize`）を
+    // 書き戻すときに ID と番号の両方を戻すには、この形しかない。
+    if reply.id != 0 && reply.number != 0 && reply.id < super::AUTO_ID_BASE {
         return Err(fail((EINVAL, "cannot specify both i and I")));
     }
     match last(keys, b't') {

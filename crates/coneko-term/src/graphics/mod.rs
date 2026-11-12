@@ -5,7 +5,10 @@
 //! # この段で扱うもの
 //!
 //! - 動作 `a=t`（送るだけ）と `a=q`（問い合わせ）。分割送信（`m=1` / `m=0`）、画像の番号
-//!   （`i=`、`I=`）、返事の抑制（`q=1`、`q=2`）。
+//!   （`i=`、`I=`）、返事の抑制（`q=1`、`q=2`）。`i=` と `I=` の両方は `EINVAL`。ただし `i=` が
+//!   ターミナルの決める ID の範囲（[`AUTO_ID_BASE`] 以上）なら受け入れる（書き出した画面を書き戻す
+//!   ため。[`crate::Terminal::serialize`]）。その範囲の ID を名指しで入れたときは、次に決める ID を
+//!   その先へ進める。
 //! - 送り方（`t=`）は直接（`t=d`、既定）だけ。`t=f`・`t=t`・`t=s` には `EBADF` を返す。
 //!   coneko-term は OS のファイルにも共有メモリにも触らない。
 //! - 置く（`a=T`・`a=p`）と消す（`a=d`）は、次の「置く」「消す」の節。
@@ -199,7 +202,7 @@ pub struct PlacedImage {
 }
 
 /// ターミナルが決める ID はここから。クライアントが選ぶ小さな ID と重ならないようにする。
-const AUTO_ID_BASE: u32 = 0x8000_0000;
+pub const AUTO_ID_BASE: u32 = 0x8000_0000;
 
 impl Default for Graphics {
     fn default() -> Graphics {
@@ -255,6 +258,11 @@ impl Graphics {
         self.virtuals
             .retain(|v| !(v.image_id == p.image_id && v.placement_id == p.placement_id));
         self.virtuals.push(p);
+    }
+
+    /// 仮の配置。足した順。
+    pub(crate) fn virtuals(&self) -> &[Placement] {
+        &self.virtuals
     }
 
     /// 仮の配置があるか。
@@ -337,6 +345,11 @@ impl Graphics {
         self.remove(image.id);
         self.evict_to(self.quota - image.stored_bytes());
         self.bytes += image.stored_bytes();
+        // ターミナルが決める ID の範囲の ID を名指しで入れたとき（書き出した画面を書き戻したとき）は、
+        // 次に決める ID をその先へ進める。書き出した側と、あとで決める ID がなるべく揃う。
+        if image.id >= AUTO_ID_BASE && image.id >= self.next_auto_id {
+            self.next_auto_id = image.id.checked_add(1).unwrap_or(AUTO_ID_BASE);
+        }
         image.serial = self.next_serial;
         self.next_serial += 1;
         self.images.push_back(image);
