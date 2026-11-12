@@ -25,6 +25,8 @@ export interface StyleLike {
 export interface TextareaLike {
   value: string;
   readonly style: StyleLike;
+  /** あれば、カーソルを値の終わりに置き直すのに使う。 */
+  setSelectionRange?(start: number, end: number): void;
 }
 
 /** 変換中の字を見せる要素のうち、ここで使う部分。 */
@@ -53,6 +55,8 @@ export class CompositionHelper {
   private sending = false;
   private position = { start: 0, end: 0 };
   private dataAlreadySent = "";
+  // `textarea` の置き場所を、値を変えて置き直すためのずらし（CSS ピクセル）。目に見えない大きさ
+  private nudgeOffset = 0;
 
   constructor(
     private readonly textarea: TextareaLike,
@@ -152,6 +156,20 @@ export class CompositionHelper {
   }
 
   /**
+   * `textarea` を置いた要素が画面の中で動いたとき、macOS が入力の表示（あ / A）を出す位置を
+   * 求め直すように促す。要素の中での相対位置は変わらないので、そのまま置き直しても `style` の値が
+   * 同じで、何も起きない。そこで、見えないほど小さくずらした値で置き直し、カーソルも値の終わりに置き直す。
+   */
+  nudge(): void {
+    this.nudgeOffset = this.nudgeOffset === 0 ? 0.01 : 0;
+    this.updateCompositionElements(true);
+    // 変換中に選択範囲を動かすと、変換中の字が確定や取り消しになるブラウザーがある
+    if (this.composing) return;
+    const n = this.textarea.value.length;
+    this.textarea.setSelectionRange?.(n, n);
+  }
+
+  /**
    * `textarea` を、いつもカーソルの位置に置く（macOS の入力の表示（あ / A）や IME の候補の窓が、
    * カーソルの近くに出る）。変換中は、変換の字もカーソルの位置へ動かす。
    * カーソルが見えないとき（さかのぼって見ているとき）は、動かさない。
@@ -165,7 +183,7 @@ export class CompositionHelper {
       return;
     }
     const ts = this.textarea.style;
-    ts.left = `${a.left}px`;
+    ts.left = `${a.left + this.nudgeOffset}px`;
     ts.top = `${a.top}px`;
     if (!this.composing) {
       // xterm.js と同じく 1 セルにする。0x0 だと動かない IME がある
@@ -188,6 +206,31 @@ export class CompositionHelper {
     ts.height = `${Math.max(b.height, 1)}px`;
     ts.lineHeight = `${b.height}px`;
     if (!dontRecurse) this.schedule(() => this.updateCompositionElements(true));
+  }
+}
+
+/**
+ * `textarea` を置いた要素の、画面の中の位置が変わったかを見る。変わったら `onMoved` を呼ぶ
+ * （大きさだけの変化は数えない）。動いたことを知らせる決まったイベントが無いので、
+ * キーやフォーカスや画面の更新のたびに `check` を呼ぶ。
+ */
+export class HostMoveWatcher {
+  private last: { left: number; top: number } | undefined;
+
+  constructor(
+    private readonly position: () => { left: number; top: number },
+    private readonly onMoved: () => void,
+  ) {}
+
+  /**
+   * 置いた要素の今の位置を読み、前回の `check` から変わっていれば `onMoved` を呼ぶ。
+   * 最初の呼び出しでは位置を覚えるだけで、知らせない（作ったときに一度呼んでおくと、その後の動きを見逃さない）。
+   */
+  check(): void {
+    const p = this.position();
+    const last = this.last;
+    this.last = { left: p.left, top: p.top };
+    if (last && (last.left !== p.left || last.top !== p.top)) this.onMoved();
   }
 }
 
@@ -386,7 +429,8 @@ export class KeyHandler {
     this.keyPressHandled = false;
     const custom = this.host.customKeyHandler();
     if (custom && custom(ev as unknown as KeyboardEvent) === false) return false;
-    this.cancel(ev);
+    // 送らないキー（Cmd を押したキーなど）は止めない。macOS の WKWebView は、keypress が止められると
+    // キーを「ページが処理した」と見なし、メニューのキーの割り当て（Cmd+V の貼り付けなど）に送らない
     let key: number;
     if (ev.charCode) key = ev.charCode;
     else if (ev.which === null || ev.which === undefined) key = ev.keyCode;
@@ -395,6 +439,7 @@ export class KeyHandler {
     if (!key || ((ev.altKey || ev.ctrlKey || ev.metaKey) && !this.isThirdLevelShift(ev))) {
       return false;
     }
+    this.cancel(ev);
     this.host.send(String.fromCharCode(key));
     if (this.lastDown) this.textPressed.add(this.lastDown);
     this.keyPressHandled = true;

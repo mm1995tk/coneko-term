@@ -8,6 +8,7 @@ import {
 } from "./selection.js";
 import {
   CompositionHelper,
+  HostMoveWatcher,
   KeyHandler,
   detectPlatform,
   type CompositionAnchor,
@@ -716,7 +717,8 @@ export interface ExtraCursorState {
 
 /**
  * 1 行ぶんのセル。`cells` は WASM のメモリの上の見え方で、次に `readRow` などを呼ぶか
- * 書き込みで画面が変わるまでしか使えない。セルの並びは `CELL_STRIDE` 個ずつ:
+ * 書き込みで画面が変わるまでしか使えない。行を読む呼び出しは、`urlSpans` のように
+ * 内部で別の行を読むものも含む（読むたびに同じバッファを上書きする）。セルの並びは `CELL_STRIDE` 個ずつ:
  * 字、幅、前景色、背景色、属性と下線の形、下線の色、複数のセルにまたがる字の印。
  * 複数のセルにまたがる字のセルは、字が 0、幅が 1。印は、下位 16 ビットが `sized` の番号 + 1
  * （0 ならそうではない）、ビット 16 から 23 が四角の左上から右へ何セル目か、ビット 24 から 31 が
@@ -916,6 +918,8 @@ export class Terminal {
   private cleanups: (() => void)[] = [];
   private textarea?: HTMLTextAreaElement;
   private composition?: CompositionHelper;
+  private hostMove?: HostMoveWatcher;
+  private hostMoveScheduled = false;
   private customKeyHandler?: (ev: KeyboardEvent) => boolean;
   private decoder = new TextDecoder();
   private encoder = new TextEncoder();
@@ -1986,6 +1990,15 @@ export class Terminal {
     );
     this.composition = composition;
     this.textarea = textarea;
+    // 置いた要素が動いたら、macOS の入力の表示（あ / A）の位置を求め直させる
+    this.hostMove = new HostMoveWatcher(
+      () => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top };
+      },
+      () => composition.nudge(),
+    );
+    this.hostMove.check();
     const keys = this.createKeyHandler(textarea, composition);
     this.bindInputEvents(textarea, el, keys, composition);
   }
@@ -2044,6 +2057,7 @@ export class Terminal {
       this.cleanups.push(() => target.removeEventListener(type, h, capture));
     };
     on<KeyboardEvent>(textarea, "keydown", (e) => {
+      this.hostMove?.check();
       // 修飾キーだけでは、利用者が操作したとは数えない
       if (!["Shift", "Control", "Alt", "Meta"].includes(e.key)) {
         this.core.program_status_key_pressed();
@@ -2051,7 +2065,10 @@ export class Terminal {
       }
       void keys.keyDown(e);
     }, true);
-    on<KeyboardEvent>(textarea, "keyup", (e) => keys.keyUp(e), true);
+    on<KeyboardEvent>(textarea, "keyup", (e) => {
+      this.hostMove?.check();
+      keys.keyUp(e);
+    }, true);
     on<KeyboardEvent>(textarea, "keypress", (e) => void keys.keyPress(e), true);
     on<InputEvent>(textarea, "input", (e) => void keys.input(e), true);
     on<CompositionEvent>(textarea, "compositionstart", () =>
@@ -2071,7 +2088,10 @@ export class Terminal {
     };
     on<ClipboardEvent>(textarea, "paste", onPaste);
     on<ClipboardEvent>(el, "paste", onPaste);
-    on<FocusEvent>(textarea, "focus", () => this.setFocused(true));
+    on<FocusEvent>(textarea, "focus", () => {
+      this.hostMove?.check();
+      this.setFocused(true);
+    });
     on<FocusEvent>(textarea, "blur", () => {
       keys.reset();
       textarea.value = "";
@@ -2207,12 +2227,28 @@ export class Terminal {
     this.viewOffset = Math.min(this.viewOffset, len);
   }
 
+  /** 画面の更新のたびにレイアウトを確定させないよう、置いた要素の位置を見るのは描画のフレームに 1 回にする。 */
+  private scheduleHostMoveCheck(): void {
+    if (this.hostMoveScheduled) return;
+    const raf = this.textarea?.ownerDocument.defaultView?.requestAnimationFrame;
+    if (!raf) {
+      this.hostMove?.check();
+      return;
+    }
+    this.hostMoveScheduled = true;
+    raf.call(this.textarea!.ownerDocument.defaultView, () => {
+      this.hostMoveScheduled = false;
+      this.hostMove?.check();
+    });
+  }
+
   /** 描画とスクロールバーに、画面が変わったことを知らせる。 */
   private afterChange(): void {
     this.syncPointerShape();
     const r = this.renderer;
     if (!r) return;
     r.touch();
+    this.scheduleHostMoveCheck();
     this.composition?.updateCompositionElements(true);
     const cell = r.cellSize;
     this.scrollbar?.update(
@@ -2932,6 +2968,7 @@ export class Terminal {
     this.element = undefined;
     this.textarea = undefined;
     this.composition = undefined;
+    this.hostMove = undefined;
     this.host = undefined;
     this.renderer = undefined;
     this.scrollbar = undefined;

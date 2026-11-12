@@ -259,6 +259,9 @@ struct State {
     last_char: Option<char>,
     /// シェルが入力を受けている間（OSC 133 の `A` から `C` または `D` まで）。この間に書いた行に印をつける。
     shell_input: bool,
+    /// シェルが OSC 133 の `C` を一度でも出したか。出していないシェル（`A` だけ、`A` と `D` だけ）では、入力の行と出力の行を
+    /// 区別できないので、プロンプトの始まりの印をつけない（幅が変わっても、今まで通り組み直す）。
+    shell_marks_output: bool,
     /// DECSACE。真なら矩形の領域（`CSI 2 * x`）、偽なら行の流れに沿った範囲（既定）。
     rect_extent: bool,
     modes: Modes,
@@ -312,6 +315,7 @@ impl Terminal {
                 saved_charsets: None,
                 last_char: None,
                 shell_input: false,
+                shell_marks_output: false,
                 rect_extent: false,
                 modes: Modes::default(),
                 keyboard_flags: Default::default(),
@@ -1152,8 +1156,18 @@ impl State {
     fn track_shell_input(&mut self, data: &[u8]) {
         if let Some(rest) = data.strip_prefix(b"133;") {
             match rest.first() {
-                Some(b'A' | b'B') => self.shell_input = true,
-                Some(b'C' | b'D') => self.shell_input = false,
+                Some(b'A') => {
+                    self.shell_input = true;
+                    if self.shell_marks_output {
+                        self.screen.mark_prompt_start();
+                    }
+                }
+                Some(b'B') => self.shell_input = true,
+                Some(b'C') => {
+                    self.shell_input = false;
+                    self.shell_marks_output = true;
+                }
+                Some(b'D') => self.shell_input = false,
                 _ => {}
             }
         }
@@ -1165,6 +1179,7 @@ impl State {
         self.gl = 0;
         self.saved_charsets = None;
         self.shell_input = false;
+        self.shell_marks_output = false;
         self.last_char = None;
         self.rect_extent = false;
         self.modes = Modes::default();

@@ -36,6 +36,13 @@ function trimTail(s: string): string {
       s = s.slice(0, -1);
       continue;
     }
+    // 末尾の不完全なパーセントエンコード（`%`、`%` と 16 進数 1 桁）。
+    // zsh が改行で終わらない出力のあとに付ける行末の印 `%` を URL に含めない。
+    const bad = /%[0-9a-fA-F]?$/.exec(s);
+    if (bad) {
+      s = s.slice(0, bad.index);
+      continue;
+    }
     const open = CLOSERS[last];
     if (open !== undefined) {
       let opens = 0;

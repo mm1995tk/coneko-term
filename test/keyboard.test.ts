@@ -4,6 +4,7 @@ import { before, test } from "node:test";
 import {
   bracketTextForPaste,
   CompositionHelper,
+  HostMoveWatcher,
   type CompositionAnchor,
   evaluateKeyboardEvent,
   init,
@@ -280,6 +281,33 @@ test("KeyHandler sends the key and cancels the event; Shift+PageUp scrolls", () 
   h.handler.keyDown(domEvent(33, { shiftKey: true }));
   assert.deepEqual(h.pages, [-1]);
   assert.equal(h.sent.length, 2);
+});
+
+test("KeyHandler.keyPress does not cancel Cmd keys (macOS menu shortcuts) but cancels plain letters", () => {
+  const h = makeHandler({ isMac: true });
+  const cmdV = {
+    ...domEvent(86, { key: "v", code: "KeyV", metaKey: true }),
+    charCode: 118,
+  };
+  assert.equal(h.handler.keyPress(cmdV), false);
+  assert.equal(cmdV.prevented, false);
+  assert.deepEqual(h.sent, []);
+  const a = { ...domEvent(97, { key: "a", code: "KeyA" }), charCode: 97 };
+  assert.equal(h.handler.keyPress(a), true);
+  assert.equal(a.prevented, true);
+  assert.deepEqual(h.sent, ["a"]);
+});
+
+test("KeyHandler.keyPress cancels and sends a third-level shift key (macOS Option+a)", () => {
+  const h = makeHandler({ isMac: true });
+  const opt = {
+    ...domEvent(229, { key: "å", code: "KeyA", altKey: true }),
+    type: "keypress",
+    charCode: 229,
+  };
+  assert.equal(h.handler.keyPress(opt), true);
+  assert.equal(opt.prevented, true);
+  assert.deepEqual(h.sent, ["å"]);
 });
 
 test("KeyHandler leaves capital letters to keypress, and Cmd keys to the app", () => {
@@ -859,4 +887,49 @@ test("カーソルが見えない（アンカーが無い）ときは、textarea
   h.composition.updateCompositionElements(true);
   assert.equal(h.textarea.style["left"], "16px");
   assert.equal(h.textarea.style["top"], "40px");
+});
+
+test("nudge は、textarea の置き場所をずらした値で置き直し、カーソルを値の終わりに置く", () => {
+  const h = makeHandler();
+  let range: number[] | undefined;
+  (h.textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = (a, b) => {
+    range = [a, b];
+  };
+  h.textarea.value = "ab";
+  h.composition.updateCompositionElements(true);
+  assert.equal(h.textarea.style["left"], "16px");
+  h.composition.nudge();
+  assert.notEqual(h.textarea.style["left"], "16px");
+  assert.deepEqual(range, [2, 2]);
+  h.composition.nudge();
+  assert.equal(h.textarea.style["left"], "16px");
+});
+
+test("HostMoveWatcher は、位置が変わったときだけ知らせる（最初の呼び出しと、同じ位置のままでは知らせない）", () => {
+  let pos = { left: 10, top: 20 };
+  let moved = 0;
+  const w = new HostMoveWatcher(() => pos, () => moved++);
+  w.check();
+  w.check();
+  assert.equal(moved, 0);
+  pos = { left: 30, top: 20 };
+  w.check();
+  assert.equal(moved, 1);
+  w.check();
+  assert.equal(moved, 1);
+  pos = { left: 30, top: 25 };
+  w.check();
+  assert.equal(moved, 2);
+});
+
+test("変換中の nudge は、textarea の選択範囲を触らない", () => {
+  const h = makeHandler();
+  let called = 0;
+  (h.textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = () => {
+    called++;
+  };
+  h.composition.compositionstart();
+  h.composition.nudge();
+  assert.equal(called, 0);
+  assert.notEqual(h.textarea.style["left"], "16px");
 });

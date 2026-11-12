@@ -157,7 +157,11 @@ export interface RenderSource extends Partial<ImageSource> {
   selectionSpan?(y: number): [number, number] | undefined;
   /** いま見えている `y` 行目の URL の区間 `[開始の列, 終わりの列)`。波線を引く。 */
   urlSpans?(y: number): [number, number][];
-  /** 表示位置を考えた、いま見えている `y` 行目。 */
+  /**
+   * 表示位置を考えた、いま見えている `y` 行目。返す `RowView` は、次に行を読む呼び出し
+   * （`readViewportRow` のほか、`urlSpans` なども内部で行を読む）までしか正しくない。
+   * 行を取ってから別の呼び出しをはさむ処理は、先にその呼び出しを済ませること。
+   */
   readViewportRow(y: number): RowView;
   /** 画像の配置の並び（`WasmTerminal.placements` と同じ）。 */
   readPlacements?(): ArrayLike<number>;
@@ -559,6 +563,9 @@ export class CanvasRenderer {
     const ctx = this.ctx;
     const { palette } = this.options;
     const src = this.source;
+    // URL を探すと、折り返しでつながった行を読み、`row.cells` が別の行に変わる。
+    // `row` は、行を読む呼び出しをすべて済ませてから取る。
+    const urls = src.urlSpans?.(y);
     const row = src.readViewportRow(y);
     const cellW = this.cellW;
     const cellH = this.cellH;
@@ -597,7 +604,7 @@ export class CanvasRenderer {
     this.fillBackgroundRuns(row.cells, colors, n, top);
     this.drawImages(this.layers.below, y, offset);
     this.fillSelection(y, top);
-    this.drawGlyphsAndLines(row, colors, n, top, this.source.urlSpans?.(y));
+    this.drawGlyphsAndLines(row, colors, n, top, urls);
     ctx.globalAlpha = 1;
     this.drawImages(this.layers.above, y, offset);
 
