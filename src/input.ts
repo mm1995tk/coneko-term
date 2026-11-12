@@ -27,6 +27,8 @@ export interface TextareaLike {
   readonly style: StyleLike;
   /** あれば、カーソルを値の終わりに置き直すのに使う。 */
   setSelectionRange?(start: number, end: number): void;
+  /** あれば、`textarea` にフォーカスがあるかを見るのに使う（無ければ、あるとみなす）。 */
+  readonly ownerDocument?: { readonly activeElement: unknown } | null;
 }
 
 /** 変換中の字を見せる要素のうち、ここで使う部分。 */
@@ -159,12 +161,14 @@ export class CompositionHelper {
    * 適用が変わったときにしかしない。レイアウトで要素が動いただけでは送らず、同じ位置に選択範囲を
    * 置き直しても何もしない。そこで、値の終わりに字を 1 つ足して選択範囲を本当に動かし、すぐ元に戻す。
    * コードから値を変えても `input` イベントは来ないので、PTY には何も送らない。
+   * フォーカスが無いときは何もしない（WebKit は送らず、フォーカスを得たときに自分で送り直す）。
    */
   nudge(): void {
     // 変換中に値や選択範囲を変えると、変換中の字が確定や取り消しになるブラウザーがある
     if (this.composing) return;
     const ta = this.textarea;
     if (!ta.setSelectionRange) return;
+    if (ta.ownerDocument && ta.ownerDocument.activeElement !== ta) return;
     const v = ta.value;
     ta.value = v + " ";
     ta.setSelectionRange(v.length + 1, v.length + 1);

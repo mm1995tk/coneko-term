@@ -971,3 +971,16 @@ test("変換中の nudge は、textarea の値も選択範囲も触らない", (
   assert.deepEqual(log, []);
   assert.deepEqual(h.sent, []);
 });
+
+test("フォーカスの無い textarea では、nudge は値も選択範囲も触らない（フォーカスがあれば動かす）", () => {
+  const h = makeHandler();
+  h.textarea.value = "ab";
+  const doc = { activeElement: null as unknown };
+  Object.defineProperty(h.textarea, "ownerDocument", { value: doc });
+  const log = recordTextarea(h.textarea);
+  h.composition.nudge();
+  assert.deepEqual(log, []);
+  doc.activeElement = h.textarea;
+  h.composition.nudge();
+  assert.deepEqual(log, ['value="ab "', "select=3,3", 'value="ab"', "select=2,2"]);
+});
