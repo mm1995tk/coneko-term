@@ -94,6 +94,27 @@ fn i_and_big_i_together_is_error() {
 }
 
 #[test]
+fn i_and_big_i_together_in_the_terminal_id_range() {
+    let mut t = Terminal::new(5, 20);
+    // ターミナルが決める ID の範囲（2147483648 から）の手前は、今までどおり誤り。
+    apc(&mut t, &format!("f=24,s=1,v=2,i=2147483647,I=1;{RGB_1X2}"));
+    assert!(reply(&mut t).starts_with("\x1b_Gi=2147483647,I=1;EINVAL:"));
+    assert_eq!(t.images().count(), 0);
+    // その範囲なら受け入れ、ID と番号の両方が付く（書き出した画面を書き戻すため）。
+    apc(&mut t, &format!("f=24,s=1,v=2,i=2147483648,I=1;{RGB_1X2}"));
+    assert_eq!(reply(&mut t), ok("i=2147483648,I=1"));
+    let image = t.image(2147483648).unwrap();
+    assert_eq!(image.number, Some(1));
+    assert_eq!(t.image_by_number(1).unwrap().id, 2147483648);
+    // 次にターミナルが決める ID は、名指しで入れた ID の次になる。
+    apc(&mut t, &format!("a=T,f=24,s=1,v=2,C=1;{RGB_1X2}"));
+    assert_eq!(reply(&mut t), "");
+    let mut ids: Vec<u32> = t.images().map(|i| i.id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, vec![2147483648, 2147483649]);
+}
+
+#[test]
 fn quiet_levels() {
     let mut t = Terminal::new(5, 20);
     apc(&mut t, &format!("f=24,s=1,v=2,i=1,q=1;{RGB_1X2}"));
