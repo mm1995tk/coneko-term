@@ -401,3 +401,18 @@ fn a_terminal_without_shell_marks_serializes_without_them() {
     w(&mut t, "plain\r\ntext");
     assert!(!String::from_utf8_lossy(&t.serialize(10)).contains("133"));
 }
+
+#[test]
+fn shell_output_lines_stay_output_after_a_write_back() {
+    let mut t = term();
+    w(
+        &mut t,
+        "\x1b]133;A\x07$ \x1b]133;B\x07echo hi\r\n\x1b]133;C\x07hi\r\n",
+    );
+    let mut b = replay(&t, 100);
+    assert!(b.screen().row(0).is_input());
+    assert!(!b.screen().row(1).is_input());
+    // 出力の途中で書き戻しても、続けて書いた行は出力の行のまま
+    w(&mut b, "more\r\n");
+    assert!(!b.screen().row(2).is_input());
+}
