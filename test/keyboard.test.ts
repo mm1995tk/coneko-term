@@ -889,22 +889,6 @@ test("カーソルが見えない（アンカーが無い）ときは、textarea
   assert.equal(h.textarea.style["top"], "40px");
 });
 
-test("nudge は、textarea の置き場所をずらした値で置き直し、カーソルを値の終わりに置く", () => {
-  const h = makeHandler();
-  let range: number[] | undefined;
-  (h.textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = (a, b) => {
-    range = [a, b];
-  };
-  h.textarea.value = "ab";
-  h.composition.updateCompositionElements(true);
-  assert.equal(h.textarea.style["left"], "16px");
-  h.composition.nudge();
-  assert.notEqual(h.textarea.style["left"], "16px");
-  assert.deepEqual(range, [2, 2]);
-  h.composition.nudge();
-  assert.equal(h.textarea.style["left"], "16px");
-});
-
 test("HostMoveWatcher は、位置が変わったときだけ知らせる（最初の呼び出しと、同じ位置のままでは知らせない）", () => {
   let pos = { left: 10, top: 20 };
   let moved = 0;
@@ -922,14 +906,81 @@ test("HostMoveWatcher は、位置が変わったときだけ知らせる（最�
   assert.equal(moved, 2);
 });
 
-test("変換中の nudge は、textarea の選択範囲を触らない", () => {
-  const h = makeHandler();
-  let called = 0;
-  (h.textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = () => {
-    called++;
+/** 値と選択範囲の変化を、順に記録する `textarea` にする（WebKit が選択範囲の変化として見る操作）。 */
+function recordTextarea(textarea: { value: string }): string[] {
+  const log: string[] = [];
+  let value = textarea.value;
+  Object.defineProperty(textarea, "value", {
+    get: () => value,
+    set: (v: string) => {
+      value = v;
+      log.push(`value=${JSON.stringify(v)}`);
+    },
+  });
+  (textarea as { setSelectionRange?: (a: number, b: number) => void }).setSelectionRange = (a, b) => {
+    log.push(`select=${a},${b}`);
   };
+  return log;
+}
+
+test("nudge は、値の終わりに字を 1 つ足して選択範囲を動かし、すぐ元の値と位置に戻す（WebKit に選択範囲の矩形を送り直させる）", () => {
+  const h = makeHandler();
+  h.textarea.value = "ab";
+  const log = recordTextarea(h.textarea);
+  h.composition.updateCompositionElements(true);
+  h.composition.nudge();
+  assert.deepEqual(log, ['value="ab "', "select=3,3", 'value="ab"', "select=2,2"]);
+  assert.equal(h.textarea.value, "ab");
+  // 置き場所はずらさない（カーソルのセルのまま）
+  assert.equal(h.textarea.style["left"], "16px");
+  assert.equal(h.textarea.style["top"], "40px");
+});
+
+test("nudge は、PTY に何も送らない（値が空でも、続けて呼んでも）", () => {
+  const h = makeHandler();
+  recordTextarea(h.textarea);
+  h.composition.nudge();
+  h.textarea.value = "x";
+  h.composition.nudge();
+  h.composition.nudge();
+  h.run();
+  assert.deepEqual(h.sent, []);
+  assert.equal(h.textarea.value, "x");
+});
+
+test("nudge のあとの変換は、確定した字だけを送る（足した字が混ざらない）", () => {
+  const h = makeHandler();
+  h.textarea.value = "ab";
+  recordTextarea(h.textarea);
+  h.composition.nudge();
+  h.composition.compositionstart();
+  h.textarea.value = "ab日本";
+  h.composition.compositionupdate("日本");
+  h.run();
+  h.composition.compositionend();
+  h.run();
+  assert.deepEqual(h.sent, ["日本"]);
+});
+
+test("変換中の nudge は、textarea の値も選択範囲も触らない", () => {
+  const h = makeHandler();
+  h.textarea.value = "か";
+  const log = recordTextarea(h.textarea);
   h.composition.compositionstart();
   h.composition.nudge();
-  assert.equal(called, 0);
-  assert.notEqual(h.textarea.style["left"], "16px");
+  assert.deepEqual(log, []);
+  assert.deepEqual(h.sent, []);
+});
+
+test("フォーカスの無い textarea では、nudge は値も選択範囲も触らない（フォーカスがあれば動かす）", () => {
+  const h = makeHandler();
+  h.textarea.value = "ab";
+  const doc = { activeElement: null as unknown };
+  Object.defineProperty(h.textarea, "ownerDocument", { value: doc });
+  const log = recordTextarea(h.textarea);
+  h.composition.nudge();
+  assert.deepEqual(log, []);
+  doc.activeElement = h.textarea;
+  h.composition.nudge();
+  assert.deepEqual(log, ['value="ab "', "select=3,3", 'value="ab"', "select=2,2"]);
 });
