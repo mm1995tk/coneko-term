@@ -15,6 +15,9 @@
 //! - 文字・背景・カーソルの色とパレットのうち、[`Theme`](super::Theme) の色から変わっているもの。
 //!   書く側と書かれる側のテーマが同じであることを前提にする。
 //!
+//! - シェルが入力を受けている行の印（OSC 133 の `B` と `D` にして書く。`C` は、一度でも出していたときだけ）。
+//!   書かれる側がこの印を戻すので、書き直したあとも、コマンドの行は出力の行と見分けられる。
+//!
 //! 書き出さないもの: kitty graphics の画像とその配置、文字集合（G0〜G3）、`CSI ? s` で保存した
 //! モード、追加のカーソル、色の積み重ね、選択範囲の色など OSC 21 だけで変わる色、
 //! 通知・クリップボード・drag and drop・file transfer の途中の状態、題名、プログラムの状態の記録。
@@ -45,6 +48,10 @@ impl Terminal {
 
         // 書かれる側を初期状態に戻す。
         out.raw("\x1bc");
+        if st.shell_marks_output {
+            // 出力の始まりを出すシェルだと覚えさせる（A のプロンプトの印を、幅が変わったときの組み直しに使うため）
+            out.raw("\x1b]133;C\x07");
+        }
 
         // 主画面。
         out.buffer(primary, max_scrollback, true);
@@ -56,6 +63,7 @@ impl Terminal {
             out.keyboard_stack(st.keyboard_flags[1].entries());
         }
 
+        out.input_state(st.shell_input);
         out.colors(&st.colors, &st.theme);
 
         // モード。字を書き終えてから立てる（自動折り返しや挿入モードが書き出しを邪魔しない）。
@@ -126,9 +134,23 @@ impl Terminal {
 struct Out {
     buf: String,
     pen: Attrs,
+    /// 書き手が、シェルの入力を受けている間（OSC 133 の `B` のあと）にいるか。
+    shell_input: bool,
 }
 
 impl Out {
+    /// 次に書く字が、シェルの入力の行になるかどうかを、書かれる側に伝える。
+    fn input_state(&mut self, on: bool) {
+        if self.shell_input != on {
+            self.shell_input = on;
+            self.raw(if on {
+                "\x1b]133;B\x07"
+            } else {
+                "\x1b]133;D\x07"
+            });
+        }
+    }
+
     fn raw(&mut self, s: &str) {
         self.buf.push_str(s);
     }
@@ -327,6 +349,7 @@ impl Out {
                     self.raw("\r\n");
                 }
             }
+            self.input_state(line.is_input());
             let cx = self.row(line.cells(), absolute);
             carry = false;
             let Some(next) = lines.get(i + 1) else { break };
