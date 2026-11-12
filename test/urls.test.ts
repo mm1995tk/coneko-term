@@ -207,3 +207,16 @@ test("urls: hoveringUrl needs Shift while the app reports the mouse", async () =
   assert.equal(t.hoveringUrl, true);
   t.dispose();
 });
+
+test("urls: drops an incomplete percent-encoding at the end", async () => {
+  const t = new Terminal({ cols: 60, rows: 10 });
+  await write(
+    t,
+    "https://example.com/%\r\nhttps://example.com/%2\r\nhttps://example.com/a%20b\r\n",
+  );
+  assert.deepEqual(
+    t.getVisibleUrls().map((u) => u.url),
+    ["https://example.com/", "https://example.com/", "https://example.com/a%20b"],
+  );
+  t.dispose();
+});
