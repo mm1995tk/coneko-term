@@ -2252,6 +2252,8 @@ export class Terminal {
   /** 描画とスクロールバーに、画面が変わったことを知らせる。 */
   private afterChange(): void {
     this.syncPointerShape();
+    // マウスを動かさなくても、スクロールや書き込みでマウスの下の URL は変わる
+    this.syncHoverUnderline();
     const r = this.renderer;
     if (!r) return;
     r.touch();

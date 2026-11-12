@@ -597,3 +597,43 @@ test("renderer: a wrapped row keeps its own glyphs while URL underlines are on",
   assert.equal(byRow.get(1), "XYZW1234");
   t.dispose();
 });
+
+function spyRows(r: CanvasRenderer): number[][] {
+  const calls: number[][] = [];
+  const orig = r.invalidateRows.bind(r);
+  r.invalidateRows = (ys: Iterable<number>) => {
+    const a = [...ys];
+    calls.push(a);
+    orig(a);
+  };
+  return calls;
+}
+
+test("renderer: scrolling under a still mouse, then leaving, redraws the row that was underlined", async () => {
+  const t = new Terminal({ cols: 30, rows: 2 });
+  const { r } = setup(t);
+  await write(t, "https://a.example\r\nhttps://b.example\r\nhttps://c.example");
+  t.handleMouse({ type: "move", button: 0, col: 3, row: 0 });
+  assert.equal(t.urlSpans(0).length, 1);
+  t.scrollLines(-1); // 1 行上へ。マウスの下に別の URL が来る
+  assert.equal(t.urlSpans(0).length, 1);
+  const calls = spyRows(r);
+  t.handleMouse({ type: "leave", button: 0, col: 3, row: 0 });
+  assert.ok(calls.flat().includes(0), "row 0 is redrawn after the mouse leaves");
+  assert.equal(t.urlSpans(0).length, 0);
+  t.dispose();
+});
+
+test("renderer: a URL written under a still mouse is redrawn after the mouse leaves", async () => {
+  const t = new Terminal({ cols: 30, rows: 3 });
+  const { r } = setup(t);
+  await write(t, "\r\n\r\n");
+  t.handleMouse({ type: "move", button: 0, col: 3, row: 0 });
+  await write(t, "\x1b[1;1Hhttps://new.example");
+  assert.equal(t.urlSpans(0).length, 1);
+  const calls = spyRows(r);
+  t.handleMouse({ type: "leave", button: 0, col: 3, row: 0 });
+  assert.ok(calls.flat().includes(0), "row 0 is redrawn after the mouse leaves");
+  assert.equal(t.urlSpans(0).length, 0);
+  t.dispose();
+});
