@@ -220,3 +220,16 @@ test("urls: drops an incomplete percent-encoding at the end", async () => {
   );
   t.dispose();
 });
+
+test("urls: incomplete percent-encoding combined with other trimming", async () => {
+  const t = new Terminal({ cols: 60, rows: 10 });
+  await write(
+    t,
+    "https://example.com/%.\r\nhttps://example.com/(a%)\r\nhttps://example.com/a%20%\r\n",
+  );
+  assert.deepEqual(
+    t.getVisibleUrls().map((u) => u.url),
+    ["https://example.com/", "https://example.com/(a%)", "https://example.com/a%20"],
+  );
+  t.dispose();
+});
