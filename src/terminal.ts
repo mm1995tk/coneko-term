@@ -176,7 +176,10 @@ export interface Theme {
 
 /** `Terminal` を作るときの設定。 */
 export interface TerminalOptions {
-  /** 画面の `http://`・`https://` の URL に波線を引くか。既定は true。あとから `underlineUrls` で変えられる。 */
+  /**
+   * 画面の `http://`・`https://` の URL に、マウスを乗せている間だけ波線を引くか。既定は true。
+   * false なら引かない。あとから `underlineUrls` で変えられる。
+   */
   underlineUrls?: boolean;
   /** 列の数。既定は 80。 */
   cols?: number;
@@ -876,6 +879,10 @@ export class Terminal {
   private selection: SelectionModel;
   private selectionListeners = new Set<() => void>();
   private urlUnderline = true;
+  /** いま波線を引いている URL の目印。変わったら描き直す。 */
+  private hoverUnderlineKey?: string;
+  /** 同じ URL がかかる行（通し番号）。 */
+  private hoverUnderlineRows: number[] = [];
   private urlClickListeners = new Set<(e: UrlClick) => void>();
   /** 押した位置が URL の上なら、その URL と修飾キー。離したのが同じセルなら、クリックとして知らせる。 */
   private urlDown?: { col: number; row: number; click: UrlClick };
@@ -2245,6 +2252,8 @@ export class Terminal {
   /** 描画とスクロールバーに、画面が変わったことを知らせる。 */
   private afterChange(): void {
     this.syncPointerShape();
+    // マウスを動かさなくても、スクロールや書き込みでマウスの下の URL は変わる
+    this.syncHoverUnderline();
     const r = this.renderer;
     if (!r) return;
     r.touch();
@@ -2277,6 +2286,26 @@ export class Terminal {
     if (!h || !h.meta || this.mouseOwner) return false;
     if (this.core.mouse_reporting() && !h.shift) return false;
     return this.urlAt(h.col, h.row) !== undefined;
+  }
+
+  /** 波線を引く URL が変わったら、描き直す。 */
+  private syncHoverUnderline(): void {
+    if (this.disposed) return;
+    const u = this.underlineUrls ? this.hoveredUrl() : undefined;
+    const s = u?.segments[0];
+    const key = u && s ? `${s.row}:${s.startCol}:${u.url}` : undefined;
+    if (key === this.hoverUnderlineKey) return;
+    const rows = u ? u.segments.map((g) => g.row) : [];
+    const before = this.hoverUnderlineRows;
+    this.hoverUnderlineKey = key;
+    this.hoverUnderlineRows = rows;
+    // 前の URL と新しい URL がかかる行だけを描き直す
+    const ys = new Set<number>();
+    for (const r of [...before, ...rows]) {
+      const y = r - this.viewportY;
+      if (y >= 0 && y < this.rows) ys.add(y);
+    }
+    this.renderer?.invalidateRows(ys);
   }
 
   private syncPointerShape(): void {
@@ -2513,7 +2542,10 @@ export class Terminal {
 
   // ---- URL
 
-  /** 画面の `http://`・`https://` の URL に波線を引くか。既定は true。 */
+  /**
+   * マウスを乗せている URL に波線を引くか。既定は true。マウスを乗せていない URL と、
+   * シェルが入力を受けている行（プロンプトとコマンド）の URL には、いつも引かない。
+   */
   get underlineUrls(): boolean {
     return this.urlUnderline;
   }
@@ -2553,14 +2585,29 @@ export class Terminal {
   }
 
   /** 見えている画面の `(col, row)` にある URL。無ければ `undefined`。 */
-  private urlAt(col: number, row: number): string | undefined {
+  private foundUrlAt(col: number, row: number): FoundUrl | undefined {
     const abs = this.viewportY + row;
     for (const u of this.urlsOnRow(row)) {
       for (const s of u.segments) {
-        if (s.row === abs && col >= s.startCol && col < s.endCol) return u.url;
+        if (s.row === abs && col >= s.startCol && col < s.endCol) return u;
       }
     }
     return undefined;
+  }
+
+  private urlAt(col: number, row: number): string | undefined {
+    return this.foundUrlAt(col, row)?.url;
+  }
+
+  /**
+   * マウスを乗せている URL（波線を引く URL）。クリックが URL にならないとき
+   * （マウスの報告が有効で Shift を押していない、ボタンを押して選択などをしている最中）は無い。
+   */
+  private hoveredUrl(): FoundUrl | undefined {
+    const h = this.hoverAt;
+    if (!h || this.mouseOwner) return undefined;
+    if (this.core.mouse_reporting() && !h.shift) return undefined;
+    return this.foundUrlAt(h.col, h.row);
   }
 
   /**
@@ -2598,15 +2645,18 @@ export class Terminal {
     return addListener(this.urlClickListeners, listener);
   }
 
-  /** 描画が使う。見えている `y` 行目の URL の区間 `[開始の列, 終わりの列)`。 */
+  /**
+   * 描画が使う。見えている `y` 行目の波線の区間 `[開始の列, 終わりの列)`。
+   * マウスを乗せている URL だけ（折り返した URL は、どの行に乗せても全体）。
+   */
   urlSpans(y: number): [number, number][] {
-    if (!this.underlineUrls) return [];
+    if (!this.underlineUrls || !this.hoverAt) return [];
+    const u = this.hoveredUrl();
+    if (!u) return [];
     const abs = this.viewportY + y;
     const out: [number, number][] = [];
-    for (const u of this.urlsOnRow(y)) {
-      for (const s of u.segments) {
-        if (s.row === abs) out.push([s.startCol, s.endCol]);
-      }
+    for (const s of u.segments) {
+      if (s.row === abs) out.push([s.startCol, s.endCol]);
     }
     return out;
   }
@@ -2645,6 +2695,7 @@ export class Terminal {
       return this.dispatchMouse(ev);
     } finally {
       this.syncPointerShape();
+      this.syncHoverUnderline();
     }
   }
 
@@ -2864,6 +2915,7 @@ export class Terminal {
     if (!h || this.disposed || (h.meta === meta && h.shift === shift)) return;
     this.hoverAt = { ...h, meta, shift };
     this.syncPointerShape();
+    this.syncHoverUnderline();
   }
 
   /** 押す・動かす・離すを受ける。戻り値は後始末。 */
