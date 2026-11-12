@@ -1071,3 +1071,45 @@ fn resending_the_image_drops_its_animation() {
     anim_root(&mut t, 1);
     assert_eq!(t.image(1).unwrap().animation.frame_count(), 1);
 }
+
+#[test]
+fn transmit_and_place_without_id_keeps_earlier_images() {
+    let mut t = Terminal::new(10, 20);
+    send_big(&mut t, "a=T,C=1");
+    send_big(&mut t, "a=T,C=1");
+    // i も I も無いので返事は無い
+    assert_eq!(reply(&mut t), "");
+    assert_eq!(t.images().count(), 2);
+    assert_eq!(t.placements().len(), 2);
+}
+
+#[test]
+fn transmit_and_place_with_only_number_keeps_earlier_images() {
+    let mut t = Terminal::new(10, 20);
+    send_big(&mut t, "a=T,I=5,C=1");
+    let first = reply(&mut t);
+    send_big(&mut t, "a=T,I=5,C=1");
+    let second = reply(&mut t);
+    assert_eq!(t.images().count(), 2);
+    assert_eq!(t.placements().len(), 2);
+    // 返事は自動の番号と I= を返す。2 枚目は 1 枚目と別の番号になる
+    let assigned = |r: &str| -> u32 {
+        let body = r.strip_prefix("\x1b_Gi=").unwrap();
+        let (id, rest) = body.split_once(',').unwrap();
+        assert_eq!(rest, "I=5;OK\x1b\\");
+        id.parse().unwrap()
+    };
+    let (id1, id2) = (assigned(&first), assigned(&second));
+    assert_ne!(id1, id2);
+    // あとの a=p,I=5 は最後に送った 2 枚目の画像に当たる
+    apc(&mut t, "a=p,I=5,C=1");
+    assert_eq!(t.placements().len(), 3);
+    assert!(t.placements().iter().any(|p| p.placement.image_id == id2));
+    assert_eq!(
+        t.placements()
+            .iter()
+            .filter(|p| p.placement.image_id == id1)
+            .count(),
+        1
+    );
+}
