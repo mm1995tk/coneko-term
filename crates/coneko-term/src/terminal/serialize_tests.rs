@@ -554,8 +554,8 @@ fn image_data_over_the_limit_drops_the_oldest_rows_first() {
     }
     rgb(&mut t, "a=t,i=2", 2, 2, 2);
     w(&mut t, "\x1b_Ga=p,i=2,C=1,q=2\x1b\\");
-    // 画像 1 枚ぶん（12 バイト）しか入らない。見えている画面の画像を残す。
-    let bytes = t.serialize_with_limit(100, 12);
+    // 画像 1 枚ぶん（12 バイト。base64 で 16 字）しか入らない。見えている画面の画像を残す。
+    let bytes = t.serialize_with_limit(100, 16);
     let mut b = term();
     b.write(&bytes);
     assert!(b.take_output().is_empty());
