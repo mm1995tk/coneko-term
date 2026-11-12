@@ -1997,10 +1997,11 @@ export class Terminal {
     );
     this.composition = composition;
     this.textarea = textarea;
-    // 置いた要素が動いたら、macOS の入力の表示（あ / A）の位置を求め直させる
+    // `textarea` が画面の中で動いたら（置いた要素ごと動いたときも、カーソルのセルへ動かしたときも）、
+    // macOS の入力の表示（あ / A）の位置を求め直させる
     this.hostMove = new HostMoveWatcher(
       () => {
-        const r = el.getBoundingClientRect();
+        const r = textarea.getBoundingClientRect();
         return { left: r.left, top: r.top };
       },
       () => composition.nudge(),
@@ -2234,7 +2235,7 @@ export class Terminal {
     this.viewOffset = Math.min(this.viewOffset, len);
   }
 
-  /** 画面の更新のたびにレイアウトを確定させないよう、置いた要素の位置を見るのは描画のフレームに 1 回にする。 */
+  /** 画面の更新のたびにレイアウトを確定させないよう、`textarea` の位置を見るのは描画のフレームに 1 回にする。 */
   private scheduleHostMoveCheck(): void {
     if (this.hostMoveScheduled) return;
     const raf = this.textarea?.ownerDocument.defaultView?.requestAnimationFrame;

@@ -55,8 +55,6 @@ export class CompositionHelper {
   private sending = false;
   private position = { start: 0, end: 0 };
   private dataAlreadySent = "";
-  // `textarea` の置き場所を、値を変えて置き直すためのずらし（CSS ピクセル）。目に見えない大きさ
-  private nudgeOffset = 0;
 
   constructor(
     private readonly textarea: TextareaLike,
@@ -156,17 +154,22 @@ export class CompositionHelper {
   }
 
   /**
-   * `textarea` を置いた要素が画面の中で動いたとき、macOS が入力の表示（あ / A）を出す位置を
-   * 求め直すように促す。要素の中での相対位置は変わらないので、そのまま置き直しても `style` の値が
-   * 同じで、何も起きない。そこで、見えないほど小さくずらした値で置き直し、カーソルも値の終わりに置き直す。
+   * `textarea` が画面の中で動いたとき、macOS が入力の表示（あ / A）を出す位置を求め直すように促す。
+   * WebKit（WKWebView）は、選択範囲の矩形を UI プロセスへ送り直すのを、選択範囲・値・スタイルの
+   * 適用が変わったときにしかしない。レイアウトで要素が動いただけでは送らず、同じ位置に選択範囲を
+   * 置き直しても何もしない。そこで、値の終わりに字を 1 つ足して選択範囲を本当に動かし、すぐ元に戻す。
+   * コードから値を変えても `input` イベントは来ないので、PTY には何も送らない。
    */
   nudge(): void {
-    this.nudgeOffset = this.nudgeOffset === 0 ? 0.01 : 0;
-    this.updateCompositionElements(true);
-    // 変換中に選択範囲を動かすと、変換中の字が確定や取り消しになるブラウザーがある
+    // 変換中に値や選択範囲を変えると、変換中の字が確定や取り消しになるブラウザーがある
     if (this.composing) return;
-    const n = this.textarea.value.length;
-    this.textarea.setSelectionRange?.(n, n);
+    const ta = this.textarea;
+    if (!ta.setSelectionRange) return;
+    const v = ta.value;
+    ta.value = v + " ";
+    ta.setSelectionRange(v.length + 1, v.length + 1);
+    ta.value = v;
+    ta.setSelectionRange(v.length, v.length);
   }
 
   /**
@@ -183,7 +186,7 @@ export class CompositionHelper {
       return;
     }
     const ts = this.textarea.style;
-    ts.left = `${a.left + this.nudgeOffset}px`;
+    ts.left = `${a.left}px`;
     ts.top = `${a.top}px`;
     if (!this.composing) {
       // xterm.js と同じく 1 セルにする。0x0 だと動かない IME がある
@@ -210,8 +213,9 @@ export class CompositionHelper {
 }
 
 /**
- * `textarea` を置いた要素の、画面の中の位置が変わったかを見る。変わったら `onMoved` を呼ぶ
- * （大きさだけの変化は数えない）。動いたことを知らせる決まったイベントが無いので、
+ * `textarea` の、画面の中の位置が変わったかを見る。変わったら `onMoved` を呼ぶ
+ * （大きさだけの変化は数えない）。置いた要素ごと動いたときも、カーソルのセルへ `textarea` を
+ * 動かしたときも数える。動いたことを知らせる決まったイベントが無いので、
  * キーやフォーカスや画面の更新のたびに `check` を呼ぶ。
  */
 export class HostMoveWatcher {
@@ -223,7 +227,7 @@ export class HostMoveWatcher {
   ) {}
 
   /**
-   * 置いた要素の今の位置を読み、前回の `check` から変わっていれば `onMoved` を呼ぶ。
+   * `textarea` の今の位置を読み、前回の `check` から変わっていれば `onMoved` を呼ぶ。
    * 最初の呼び出しでは位置を覚えるだけで、知らせない（作ったときに一度呼んでおくと、その後の動きを見逃さない）。
    */
   check(): void {
