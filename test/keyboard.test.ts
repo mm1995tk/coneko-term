@@ -298,6 +298,18 @@ test("KeyHandler.keyPress does not cancel Cmd keys (macOS menu shortcuts) but ca
   assert.deepEqual(h.sent, ["a"]);
 });
 
+test("KeyHandler.keyPress cancels and sends a third-level shift key (macOS Option+a)", () => {
+  const h = makeHandler({ isMac: true });
+  const opt = {
+    ...domEvent(229, { key: "å", code: "KeyA", altKey: true }),
+    type: "keypress",
+    charCode: 229,
+  };
+  assert.equal(h.handler.keyPress(opt), true);
+  assert.equal(opt.prevented, true);
+  assert.deepEqual(h.sent, ["å"]);
+});
+
 test("KeyHandler leaves capital letters to keypress, and Cmd keys to the app", () => {
   const h = makeHandler({ isMac: true });
   h.handler.keyDown(domEvent(65, { key: "A", shiftKey: true }));
