@@ -18,20 +18,57 @@
 //! - シェルが入力を受けている行の印（OSC 133 の `B` と `D` にして書く。`C` は、一度でも出していたときだけ）。
 //!   書かれる側がこの印を戻すので、書き直したあとも、コマンドの行は出力の行と見分けられる。
 //!
-//! 書き出さないもの: kitty graphics の画像とその配置、文字集合（G0〜G3）、`CSI ? s` で保存した
+//! - kitty graphics の画像と配置（下の「画像」の節）。
+//!
+//! 書き出さないもの: 文字集合（G0〜G3）、`CSI ? s` で保存した
 //! モード、追加のカーソル、色の積み重ね、選択範囲の色など OSC 21 だけで変わる色、
 //! 通知・クリップボード・drag and drop・file transfer の途中の状態、題名、プログラムの状態の記録。
 //! 複数の行にまたがる文字（OSC 66 で `s` が 2 以上）は、scrollback の中では書かない。
+//!
+//! # 画像
+//!
+//! kitty graphics の画像を `a=t`（`i=` で ID を名指し、`I=` の番号があれば番号も、`q=2` で返事なし）
+//! で送り直し、配置を `a=p`（`C=1` でカーソルを動かさない）で置き直す。画像が 1 つも無ければ何も
+//! 書かない（バイト列は画像を扱う前と同じ）。
+//!
+//! - 送る画像は、書き出す配置（見えている画面、書き出す範囲の scrollback、代替画面、`U=1` の仮の
+//!   配置）が使っているものだけ。配置の無い画像は送らない（見えないうえ、上限まで溜まると数百 MB に
+//!   なるため）。そのため、送っただけで置いていない画像を、書き戻したあとに `a=p` で置くことはできない。
+//! - 送る画像のデータの合計は [`MAX_IMAGE_BYTES`] まで。超えるときは、見えている画面の下の配置から
+//!   上へ、次に scrollback の新しい行から古い行へと選び、入らない画像（とその配置）は書かない。
+//! - ID と番号は保つ（書き戻したあとに、シェルの側のプログラムが同じ ID・番号で置き直したり
+//!   消したりできるように）。`I=` で送った画像の ID はターミナルが決めた ID なので、`i=` と `I=` を
+//!   両方付けて送る（[`crate::graphics`] はこの組み合わせを、ID がターミナルの決める範囲のときだけ
+//!   受け入れる）。ID が 0 の画像は名指しできないので送らない。
+//! - 配置は、その配置を持つ行を書いたあとに置く（折り返しでつながる行は、つながりを書き終えてから、
+//!   カーソルを上に戻して置く）。行と一緒に scrollback へ押し出されるので、scrollback の中の配置も
+//!   同じ行に戻る。カーソルは、そのあといつもどおり置き直す。
+//! - `c`・`r` を決めずに（画素のまま）置いた配置は、`c`・`r` を書かない。書かれる側のセルの大きさで
+//!   セルの数を決め直す。
+//! - アニメーションは送らない。根のコマ（1 コマ目）だけの止まった画像になる。コマの操作は数も
+//!   大きさもあり、再生の状態も書かれる側では時計がずれるため。
+//! - 書き出す範囲より古い scrollback の行に付いた配置は、下の行まで画像が伸びていても書かない。
+//!   scrollback の中で、画面の行数より長く折り返してつながった行の、上のほう（カーソルを戻して
+//!   届かない行）に付いた配置も書かない。
 //!
 //! 問い合わせ（DA・DSR・DECRQM・`CSI ? u` など、返事を求めるシーケンス）は入れない。
 //! 書き出したバイト列は、先頭の RIS で書かれる側を初期状態に戻してから状態を作るので、
 //! 新しい `Terminal` に書いても [`Terminal::take_output`] は空のまま。
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 
+use super::clipboard::encode_base64;
 use super::{MouseEncoding, MouseProtocol, Terminal};
+use crate::graphics::{Image, ImageFormat, Placement};
 use crate::screen::cell::{AttrFlags, Attrs, Cell, Color, Content, SizedBlock, UnderlineStyle};
 use crate::screen::{Align, Buffer, CursorShape, Line};
+
+/// 書き出す画像のデータ（base64 にする前）の合計の上限（バイト）。
+pub const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// 画像のデータを送るときの、1 つの APC に入れる base64 の字数（kitty の推奨と同じ）。
+const CHUNK: usize = 4096;
 
 impl Terminal {
     /// 画面の状態を、新しい `Terminal`（同じ大きさ）に書けば同じ画面になるバイト列にして返す。
@@ -40,17 +77,42 @@ impl Terminal {
     /// 何を書き何を書かないかは、このモジュールの説明を見ること。
     /// 返すバイト列に問い合わせは入っていない。書いても `take_output` は空のまま。
     pub fn serialize(&self, max_scrollback: usize) -> Vec<u8> {
+        self.serialize_with_limit(max_scrollback, MAX_IMAGE_BYTES)
+    }
+
+    /// [`Terminal::serialize`] の、画像のデータの上限を決められるもの。
+    pub(super) fn serialize_with_limit(
+        &self,
+        max_scrollback: usize,
+        image_limit: usize,
+    ) -> Vec<u8> {
         let st = &self.state;
         let screen = &st.screen;
         let (primary, alt) = screen.buffers();
         let alt_active = screen.is_alt_screen();
-        let mut out = Out::default();
+        let mut out = Out {
+            images: self.images_to_write(max_scrollback, image_limit),
+            ..Out::default()
+        };
 
         // 書かれる側を初期状態に戻す。
         out.raw("\x1bc");
         if st.shell_marks_output {
             // 出力の始まりを出すシェルだと覚えさせる（A のプロンプトの印を、幅が変わったときの組み直しに使うため）
             out.raw("\x1b]133;C\x07");
+        }
+
+        // 画像のデータ（持っている順。書かれる側で、古いものから捨てる順が同じになる）と、仮の配置。
+        // 画面の配置は、行を書くときに置く。
+        for image in st.graphics.iter() {
+            if out.images.contains(&image.id) {
+                out.transmit(image);
+            }
+        }
+        for v in st.graphics.virtuals() {
+            if out.images.contains(&v.image_id) {
+                out.place(v, true);
+            }
         }
 
         // 主画面。
@@ -129,6 +191,56 @@ impl Terminal {
     }
 }
 
+impl Terminal {
+    /// 書き出す画像の ID。書き出す配置が使う画像を、代替画面と主画面の見えている画面の下から上へ、
+    /// 仮の配置、主画面の scrollback の新しい行から古い行へ、の順に選び、データの合計が `limit` を
+    /// 超える画像は飛ばす。
+    fn images_to_write(&self, max_scrollback: usize, limit: usize) -> HashSet<u32> {
+        let st = &self.state;
+        let (primary, alt) = st.screen.buffers();
+        let ids = |lines: &[&Line]| -> Vec<u32> {
+            lines
+                .iter()
+                .rev()
+                .flat_map(|l| l.placements.iter().map(|p| p.image_id))
+                .collect()
+        };
+        let total = primary.scrollback_len();
+        let scrollback: Vec<&Line> = primary
+            .lines
+            .iter()
+            .skip(total - total.min(max_scrollback))
+            .take(total.min(max_scrollback))
+            .collect();
+        let visible: Vec<&Line> = primary.lines.iter().skip(total).collect();
+        let mut wanted: Vec<u32> = Vec::new();
+        if st.screen.is_alt_screen() {
+            wanted.extend(ids(&alt.lines.iter().collect::<Vec<_>>()));
+        }
+        wanted.extend(ids(&visible));
+        wanted.extend(st.graphics.virtuals().iter().map(|v| v.image_id));
+        wanted.extend(ids(&scrollback));
+
+        let mut chosen = HashSet::new();
+        let mut bytes = 0usize;
+        for id in wanted {
+            if id == 0 || chosen.contains(&id) {
+                continue;
+            }
+            let Some(image) = st.graphics.get(id) else {
+                continue;
+            };
+            let n = image.data.len();
+            if bytes + n > limit {
+                continue;
+            }
+            bytes += n;
+            chosen.insert(id);
+        }
+        chosen
+    }
+}
+
 /// 出力と、いま書き手に効いている属性。
 #[derive(Default)]
 struct Out {
@@ -136,9 +248,127 @@ struct Out {
     pen: Attrs,
     /// 書き手が、シェルの入力を受けている間（OSC 133 の `B` のあと）にいるか。
     shell_input: bool,
+    /// 書き出す画像の ID。この画像の配置だけを置く。
+    images: HashSet<u32>,
 }
 
 impl Out {
+    /// 画像のデータを送る（`a=t`。返事はさせない）。
+    fn transmit(&mut self, image: &Image) {
+        let format = match image.format {
+            ImageFormat::Rgb => 24,
+            ImageFormat::Rgba => 32,
+            ImageFormat::Png => 100,
+        };
+        let mut head = format!("a=t,i={},f={format}", image.id);
+        if let Some(n) = image.number {
+            let _ = write!(head, ",I={n}");
+        }
+        if image.compressed {
+            head.push_str(",o=z");
+        }
+        if image.width > 0 {
+            let _ = write!(head, ",s={}", image.width);
+        }
+        if image.height > 0 {
+            let _ = write!(head, ",v={}", image.height);
+        }
+        head.push_str(",q=2");
+        let data = encode_base64(&image.data);
+        let chunks: Vec<&str> = data
+            .as_bytes()
+            .chunks(CHUNK)
+            .map(|c| std::str::from_utf8(c).unwrap_or_default())
+            .collect();
+        for (k, chunk) in chunks.iter().enumerate() {
+            let more = k + 1 < chunks.len();
+            self.buf.push_str("\x1b_G");
+            if k == 0 {
+                self.buf.push_str(&head);
+                if more {
+                    self.buf.push_str(",m=1");
+                }
+            } else {
+                self.buf.push_str(if more { "m=1" } else { "m=0" });
+            }
+            self.buf.push(';');
+            self.buf.push_str(chunk);
+            self.buf.push_str("\x1b\\");
+        }
+    }
+
+    /// 配置を、いまのカーソルの位置に置く（`a=p`。カーソルは動かさず、返事はさせない）。
+    /// `virtual_placement` なら、`U=1` の仮の配置にする。
+    fn place(&mut self, p: &Placement, virtual_placement: bool) {
+        let _ = write!(self.buf, "\x1b_Ga=p,i={}", p.image_id);
+        if p.placement_id != 0 {
+            let _ = write!(self.buf, ",p={}", p.placement_id);
+        }
+        for (key, v) in [
+            ('x', p.src_x),
+            ('y', p.src_y),
+            ('w', p.src_w),
+            ('h', p.src_h),
+            ('X', p.offset_x),
+            ('Y', p.offset_y),
+        ] {
+            if v != 0 {
+                let _ = write!(self.buf, ",{key}={v}");
+            }
+        }
+        // 画素のままの配置は、書かれる側のセルの大きさでセルの数を決め直す。
+        if virtual_placement || !p.native_size {
+            let _ = write!(self.buf, ",c={},r={}", p.cols, p.rows);
+        }
+        if p.z != 0 {
+            let _ = write!(self.buf, ",z={}", p.z);
+        }
+        if virtual_placement {
+            self.buf.push_str(",U=1");
+        }
+        self.buf.push_str(",C=1,q=2\x1b\\");
+    }
+
+    /// 行 `lines` に付いた配置を置く。`absolute` なら行 `j` は画面の `j` 行目。そうでなければ、
+    /// カーソルは最後の行（`last`）にいて、行 `j` はその `last - j` 行上（`rows` 行より上は届かない）。
+    fn line_placements(
+        &mut self,
+        lines: &[&Line],
+        from: usize,
+        last: usize,
+        absolute: bool,
+        rows: usize,
+    ) {
+        for (j, line) in lines.iter().enumerate().take(last + 1).skip(from) {
+            let ps: Vec<&Placement> = line
+                .placements
+                .iter()
+                .filter(|p| self.images.contains(&p.image_id))
+                .collect();
+            if ps.is_empty() {
+                continue;
+            }
+            let up = last - j;
+            if !absolute && up >= rows {
+                continue;
+            }
+            if !absolute && up > 0 {
+                let _ = write!(self.buf, "\x1b[{up}A");
+            }
+            for p in ps {
+                if absolute {
+                    self.cup(p.col, j);
+                } else {
+                    self.cha(p.col);
+                }
+                self.place(p, false);
+            }
+            if !absolute && up > 0 {
+                let _ = write!(self.buf, "\x1b[{up}B");
+            }
+        }
+    }
+
     /// 次に書く字が、シェルの入力の行になるかどうかを、書かれる側に伝える。
     fn input_state(&mut self, on: bool) {
         if self.shell_input != on {
@@ -252,7 +482,7 @@ impl Out {
             let n = total.min(max_scrollback);
             if n > 0 {
                 let lines: Vec<&Line> = (total - n..total).map(|i| &buf.lines[i]).collect();
-                self.rows(&lines, cols, false);
+                self.rows(&lines, cols, rows, false);
                 // 書いた行を、画面の外（scrollback）へ押し出す。
                 self.set_pen(Attrs::default());
                 self.cup(0, rows - 1);
@@ -262,7 +492,7 @@ impl Out {
             }
         }
         let lines: Vec<&Line> = (0..rows).map(|y| buf.line(y)).collect();
-        self.rows(&lines, cols, true);
+        self.rows(&lines, cols, rows, true);
         self.set_pen(Attrs::default());
 
         // タブ位置が初めのままでなければ、置き直す。
@@ -336,12 +566,16 @@ impl Out {
     }
 
     /// 行を上から順に書く。`absolute` が真なら各行の頭へ CUP で行く（見えている画面）。
-    /// 偽なら CR LF でつなぐ（最初の行は、カーソルがいるところから）。
-    fn rows(&mut self, lines: &[&Line], cols: usize, absolute: bool) {
+    /// 偽なら CR LF でつなぐ（最初の行は、カーソルがいるところから。画面は `rows` 行）。
+    /// 行に付いた画像の配置も置く。
+    fn rows(&mut self, lines: &[&Line], cols: usize, rows: usize, absolute: bool) {
         // 前の行が折り返していて、続きの行がその続きから書けるとき、行の頭へ行かずにそのまま書く。
         let mut carry = false;
+        // 折り返しでつながっている行の、最初の行。
+        let mut start = 0;
         for (i, line) in lines.iter().enumerate() {
             if !carry {
+                start = i;
                 if absolute {
                     self.cup(0, i);
                 } else if i > 0 {
@@ -351,23 +585,41 @@ impl Out {
             }
             self.input_state(line.is_input());
             let cx = self.row(line.cells(), absolute);
-            carry = false;
-            let Some(next) = lines.get(i + 1) else { break };
-            if !line.is_wrapped() {
-                continue;
+            carry = self.carry(line, lines.get(i + 1), cx, cols, absolute);
+            if !carry {
+                // 配置を置くとカーソルが動き、折り返し待ちが消えるので、つながりを書き終えてから置く。
+                self.line_placements(lines, start, i, absolute, rows);
             }
-            let first = &next.cells()[0];
-            if cx == cols && starts_text(first, absolute) {
-                carry = true;
-            } else if cx < cols
-                && is_plain_blank(&line.cells()[cols - 1])
-                && first.is_wide()
-                && matches!(first.content, Content::Char(_))
-            {
-                // 全角の字が入りきらずに折り返した行。右端で次の全角の字を書くと、折り返す。
-                self.cha(cols - 1);
-                carry = true;
-            }
+        }
+    }
+
+    /// 書き終えた行 `line`（カーソルは列 `cx`）の次の行 `next` を、行の頭へ行かずにそのまま
+    /// 書けるか。書けるならそのための位置へカーソルを置く。
+    fn carry(
+        &mut self,
+        line: &Line,
+        next: Option<&&Line>,
+        cx: usize,
+        cols: usize,
+        absolute: bool,
+    ) -> bool {
+        let Some(next) = next else { return false };
+        if !line.is_wrapped() {
+            return false;
+        }
+        let first = &next.cells()[0];
+        if cx == cols && starts_text(first, absolute) {
+            true
+        } else if cx < cols
+            && is_plain_blank(&line.cells()[cols - 1])
+            && first.is_wide()
+            && matches!(first.content, Content::Char(_))
+        {
+            // 全角の字が入りきらずに折り返した行。右端で次の全角の字を書くと、折り返す。
+            self.cha(cols - 1);
+            true
+        } else {
+            false
         }
     }
 

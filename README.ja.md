@@ -40,9 +40,9 @@ other.write(&bytes);
 assert!(other.take_output().is_empty()); // 問い合わせは入っていない
 ```
 
-含むもの: 見えている画面と、主画面の scrollback（新しいほうから `max_scrollback` 行。文字・SGR の属性・折り返した行のつながり）、代替画面を出しているか（主画面も一緒に書く）、カーソル（位置・折り返し待ち・形・点滅・表示）、DECSC で保存したカーソル、スクロール範囲、タブ位置、主画面と代替画面それぞれの kitty keyboard のフラグの積み重ね、DEC モード（マウス報告・bracketed paste・フォーカスの報告・DECCKM・DECOM・自動折り返しなど）、IRM、LNM、`Theme` から変わっている文字・背景・カーソルの色とパレット（書く側と書かれる側のテーマは同じにしてください）。
+含むもの: 見えている画面と、主画面の scrollback（新しいほうから `max_scrollback` 行。文字・SGR の属性・折り返した行のつながり）、代替画面を出しているか（主画面も一緒に書く）、カーソル（位置・折り返し待ち・形・点滅・表示）、DECSC で保存したカーソル、スクロール範囲、タブ位置、主画面と代替画面それぞれの kitty keyboard のフラグの積み重ね、DEC モード（マウス報告・bracketed paste・フォーカスの報告・DECCKM・DECOM・自動折り返しなど）、IRM、LNM、`Theme` から変わっている文字・背景・カーソルの色とパレット（書く側と書かれる側のテーマは同じにしてください）、kitty graphics の画像と配置（書き出す scrollback の中のものと、Unicode placeholder の配置を含む）。画像の ID と番号は保ちます。送る画像は、書き出す配置が使っているものだけで、データの合計は 64 MiB まで（見えている画面の配置から、次に scrollback の新しい行から選びます）。アニメーションは 1 コマ目の止まった画像になります。
 
-含まないもの: kitty graphics の画像とその配置、文字集合（G0〜G3）、`CSI ? s` で保存したモード、追加のカーソル、色の積み重ね、OSC 21 だけで変わる色、題名、通知・クリップボード・drag and drop・file transfer の途中の状態。scrollback の最後の行の「折り返している」印は残らず、scrollback の中では 1 行より高い OSC 66 の文字は書きません。npm 版にはまだ出していません。
+含まないもの: 文字集合（G0〜G3）、`CSI ? s` で保存したモード、追加のカーソル、色の積み重ね、OSC 21 だけで変わる色、題名、通知・クリップボード・drag and drop・file transfer の途中の状態。scrollback の最後の行の「折り返している」印は残らず、scrollback の中では 1 行より高い OSC 66 の文字は書きません。npm 版にはまだ出していません。
 
 ## 描画
 
