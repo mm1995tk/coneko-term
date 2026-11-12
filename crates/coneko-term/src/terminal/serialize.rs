@@ -34,7 +34,7 @@
 //! - 送る画像は、書き出す配置（見えている画面、書き出す範囲の scrollback、代替画面、`U=1` の仮の
 //!   配置）が使っているものだけ。配置の無い画像は送らない（見えないうえ、上限まで溜まると数百 MB に
 //!   なるため）。そのため、送っただけで置いていない画像を、書き戻したあとに `a=p` で置くことはできない。
-//! - 送る画像のデータの合計は、base64 にしたあとの字数で [`MAX_IMAGE_BYTES`] まで。超えるときは、
+//! - 送る画像のデータの合計は、base64 にしたあとの字数で [`MAX_IMAGE_BASE64_LEN`] まで。超えるときは、
 //!   代替画面（出ていれば）の配置を下の行から上へ、主画面の見えている画面の配置を下の行から上へ、
 //!   `U=1` の仮の配置、主画面の scrollback の配置を新しい行から古い行へ、の順に選び、入らない画像
 //!   （とその配置）は書かない。
@@ -66,13 +66,13 @@ use crate::graphics::{Image, ImageFormat, Placement};
 use crate::screen::cell::{AttrFlags, Attrs, Cell, Color, Content, SizedBlock, UnderlineStyle};
 use crate::screen::{Align, Buffer, CursorShape, Line};
 
-/// 書き出す画像のデータの合計の上限。base64 にしたあとの字数（書き出しに入る大きさ。元のデータの
+/// 書き出す画像のデータの合計の上限（字）。base64 にしたあとの字数（書き出しに入る大きさ。元のデータの
 /// 約 4/3 倍）で数える。
 ///
 /// 32 MiB にするのは、kisui-terminal がこの書き出しをさらに base64 にして JSON で窓へ送るため。
 /// つなぎ直すたびに窓へ流れる量を 50 MiB 前後に抑える。kisui-terminal がターミナルに出す画像は
 /// 1 枚 16 MiB まで（base64 で約 21 MiB）なので、その 1 枚は必ず入る。
-pub const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_IMAGE_BASE64_LEN: usize = 32 * 1024 * 1024;
 
 /// 画像のデータを送るときの、1 つの APC に入れる base64 の字数（kitty の推奨と同じ）。
 const CHUNK: usize = 4096;
@@ -84,21 +84,21 @@ impl Terminal {
     /// 何を書き何を書かないかは、このモジュールの説明を見ること。
     /// 返すバイト列に問い合わせは入っていない。書いても `take_output` は空のまま。
     pub fn serialize(&self, max_scrollback: usize) -> Vec<u8> {
-        self.serialize_with_limit(max_scrollback, MAX_IMAGE_BYTES)
+        self.serialize_with_image_base64_limit(max_scrollback, MAX_IMAGE_BASE64_LEN)
     }
 
-    /// [`Terminal::serialize`] の、画像のデータの上限を決められるもの。
-    pub(super) fn serialize_with_limit(
+    /// [`Terminal::serialize`] の、画像のデータの上限（base64 にしたあとの字数）を決められるもの。
+    pub(super) fn serialize_with_image_base64_limit(
         &self,
         max_scrollback: usize,
-        image_limit: usize,
+        image_base64_limit: usize,
     ) -> Vec<u8> {
         let st = &self.state;
         let screen = &st.screen;
         let (primary, alt) = screen.buffers();
         let alt_active = screen.is_alt_screen();
         let mut out = Out {
-            images: self.images_to_write(max_scrollback, image_limit),
+            images: self.images_to_write(max_scrollback, image_base64_limit),
             ..Out::default()
         };
 
@@ -201,8 +201,8 @@ impl Terminal {
 impl Terminal {
     /// 書き出す画像の ID。書き出す配置が使う画像を、代替画面と主画面の見えている画面の下から上へ、
     /// 仮の配置、主画面の scrollback の新しい行から古い行へ、の順に選び、データの合計（base64 にしたあとの
-    /// 字数）が `limit` を超える画像は飛ばす。
-    fn images_to_write(&self, max_scrollback: usize, limit: usize) -> HashSet<u32> {
+    /// 字数）が `base64_limit` を超える画像は飛ばす。
+    fn images_to_write(&self, max_scrollback: usize, base64_limit: usize) -> HashSet<u32> {
         let st = &self.state;
         let (primary, alt) = st.screen.buffers();
         let ids = |lines: &[&Line]| -> Vec<u32> {
@@ -229,7 +229,7 @@ impl Terminal {
         wanted.extend(ids(&scrollback));
 
         let mut chosen = HashSet::new();
-        let mut bytes = 0usize;
+        let mut base64_len = 0usize;
         for id in wanted {
             if id == 0 || chosen.contains(&id) {
                 continue;
@@ -239,10 +239,10 @@ impl Terminal {
             };
             // base64 にしたあとの字数。
             let n = image.data.len().div_ceil(3) * 4;
-            if bytes + n > limit {
+            if base64_len + n > base64_limit {
                 continue;
             }
-            bytes += n;
+            base64_len += n;
             chosen.insert(id);
         }
         chosen
