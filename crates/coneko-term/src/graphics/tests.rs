@@ -1071,3 +1071,23 @@ fn resending_the_image_drops_its_animation() {
     anim_root(&mut t, 1);
     assert_eq!(t.image(1).unwrap().animation.frame_count(), 1);
 }
+
+#[test]
+fn transmit_and_place_without_id_keeps_earlier_images() {
+    let mut t = Terminal::new(10, 20);
+    send_big(&mut t, "a=T,C=1");
+    send_big(&mut t, "a=T,C=1");
+    // i も I も無いので返事は無い
+    assert_eq!(reply(&mut t), "");
+    assert_eq!(t.images().count(), 2);
+    assert_eq!(t.placements().len(), 2);
+}
+
+#[test]
+fn transmit_and_place_with_only_number_keeps_earlier_images() {
+    let mut t = Terminal::new(10, 20);
+    send_big(&mut t, "a=T,I=5,C=1");
+    send_big(&mut t, "a=T,I=5,C=1");
+    assert_eq!(t.images().count(), 2);
+    assert_eq!(t.placements().len(), 2);
+}

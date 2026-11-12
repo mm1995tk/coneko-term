@@ -354,11 +354,13 @@ impl Graphics {
         }
         let place = cmd.action == Action::TransmitPlace;
         let place_keys = cmd.place;
-        let assigned = if cmd.id == 0 && cmd.action == Action::Transmit {
-            self.fresh_id()
-        } else {
-            cmd.id
-        };
+        // `i=` が無ければ、送るだけの a=t も、送って置く a=T も、新しい名前の無い画像にする。
+        let assigned =
+            if cmd.id == 0 && matches!(cmd.action, Action::Transmit | Action::TransmitPlace) {
+                self.fresh_id()
+            } else {
+                cmd.id
+            };
         match self.build(cmd, assigned, b64) {
             Ok(image) => {
                 if let Some(image) = image {
