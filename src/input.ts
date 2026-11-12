@@ -25,7 +25,7 @@ export interface StyleLike {
 export interface TextareaLike {
   value: string;
   readonly style: StyleLike;
-  /** あれば、選択範囲を動かすのに使う（`nudge` で動かして戻すのと、カーソルを値の終わりに置き直すの）。 */
+  /** あれば、`nudge` で選択範囲を動かすのに使う（値の終わりの後ろへ動かし、値の終わりへ戻す）。 */
   setSelectionRange?(start: number, end: number): void;
   /** あれば、`textarea` にフォーカスがあるかを見るのに使う（無ければ、あるとみなす）。 */
   readonly ownerDocument?: { readonly activeElement: unknown } | null;
