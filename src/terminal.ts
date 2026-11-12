@@ -881,6 +881,8 @@ export class Terminal {
   private urlUnderline = true;
   /** いま波線を引いている URL の目印。変わったら描き直す。 */
   private hoverUnderlineKey?: string;
+  /** 同じ URL がかかる行（通し番号）。 */
+  private hoverUnderlineRows: number[] = [];
   private urlClickListeners = new Set<(e: UrlClick) => void>();
   /** 押した位置が URL の上なら、その URL と修飾キー。離したのが同じセルなら、クリックとして知らせる。 */
   private urlDown?: { col: number; row: number; click: UrlClick };
@@ -2291,8 +2293,17 @@ export class Terminal {
     const s = u?.segments[0];
     const key = u && s ? `${s.row}:${s.startCol}:${u.url}` : undefined;
     if (key === this.hoverUnderlineKey) return;
+    const rows = u ? u.segments.map((g) => g.row) : [];
+    const before = this.hoverUnderlineRows;
     this.hoverUnderlineKey = key;
-    this.renderer?.invalidate();
+    this.hoverUnderlineRows = rows;
+    // 前の URL と新しい URL がかかる行だけを描き直す
+    const ys = new Set<number>();
+    for (const r of [...before, ...rows]) {
+      const y = r - this.viewportY;
+      if (y >= 0 && y < this.rows) ys.add(y);
+    }
+    this.renderer?.invalidateRows(ys);
   }
 
   private syncPointerShape(): void {
