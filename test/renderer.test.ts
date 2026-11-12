@@ -575,6 +575,7 @@ test("cell width: falls back to 0.6 em when the width cannot be measured", () =>
   assert.equal(cellWidthFor(0, 20), 12);
   assert.equal(cellWidthFor(NaN, 20), 12);
   assert.equal(cellWidthFor(0, 0), 1);
+});
 
 test("renderer: a wrapped row keeps its own glyphs while URL underlines are on", async () => {
   const t = new Terminal({ cols: 10, rows: 4 });
