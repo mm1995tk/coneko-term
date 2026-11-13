@@ -2849,32 +2849,9 @@ export class Terminal {
     if (this.disposed) return false;
     const dx = ev.deltaX ?? 0;
     if (ev.deltaY === 0 && dx === 0) return false;
-    const now = ev.time ?? performance.now();
-    const g = this.wheelGesture;
-    if (!g || now - g.last >= WHEEL_GESTURE_GAP_MS || now < g.last) {
-      // 一続きの動きの最初。軸を決め直す。軸が変わるときだけ、端数を持ち越さない。
-      const axis = Math.abs(dx) > Math.abs(ev.deltaY) ? "x" : "y";
-      if (axis !== g?.axis) {
-        this.wheelPartial = 0;
-        this.wheelPartialX = 0;
-      }
-      this.wheelGesture = { axis, last: now, otherAxisStreak: 0 };
-    } else {
-      g.last = now;
-      // 反対の軸がはっきり大きいイベントが続けて来たら、軸を切り替える（このイベントから新しい軸）。
-      // 間に 1 つでも違うイベントが入れば数え直す。斜めの動きに混ざる反対の軸は、切り替えない。
-      const cur = g.axis === "x" ? Math.abs(dx) : Math.abs(ev.deltaY);
-      const opp = g.axis === "x" ? Math.abs(ev.deltaY) : Math.abs(dx);
-      g.otherAxisStreak = opp > cur * WHEEL_SWITCH_RATIO ? g.otherAxisStreak + 1 : 0;
-      if (g.otherAxisStreak >= WHEEL_SWITCH_COUNT) {
-        g.axis = g.axis === "x" ? "y" : "x";
-        g.otherAxisStreak = 0;
-        this.wheelPartial = 0;
-        this.wheelPartialX = 0;
-      }
-    }
+    const axis = this.wheelAxis(dx, ev.deltaY, ev.time ?? performance.now());
     const reporting = this.core.mouse_reporting();
-    if (this.wheelGesture!.axis === "x") {
+    if (axis === "x") {
       // 報告が無ければ、横には送る先が無い。ブラウザーの既定に任せる。
       if (!reporting) return false;
       this.reportWheel(ev, dx < 0 ? 8 : 9, this.wheelCols(ev, dx));
@@ -2898,6 +2875,37 @@ export class Terminal {
     if (this.scrollbackLength === 0) return false;
     if (lines !== 0) this.scrollLines(lines);
     return true;
+  }
+
+  /**
+   * このイベントを処理する軸を決める（一続きの動きの最初なら決め直し、続きなら固定か切り替え）。
+   * `wheelGesture` と端数を更新する。
+   */
+  private wheelAxis(dx: number, dy: number, now: number): "x" | "y" {
+    const g = this.wheelGesture;
+    if (!g || now - g.last >= WHEEL_GESTURE_GAP_MS || now < g.last) {
+      // 一続きの動きの最初。軸を決め直す。軸が変わるときだけ、端数を持ち越さない。
+      const axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      if (axis !== g?.axis) {
+        this.wheelPartial = 0;
+        this.wheelPartialX = 0;
+      }
+      this.wheelGesture = { axis, last: now, otherAxisStreak: 0 };
+    } else {
+      g.last = now;
+      // 反対の軸がはっきり大きいイベントが続けて来たら、軸を切り替える（このイベントから新しい軸）。
+      // 間に 1 つでも違うイベントが入れば数え直す。斜めの動きに混ざる反対の軸は、切り替えない。
+      const cur = g.axis === "x" ? Math.abs(dx) : Math.abs(dy);
+      const opp = g.axis === "x" ? Math.abs(dy) : Math.abs(dx);
+      g.otherAxisStreak = opp > cur * WHEEL_SWITCH_RATIO ? g.otherAxisStreak + 1 : 0;
+      if (g.otherAxisStreak >= WHEEL_SWITCH_COUNT) {
+        g.axis = g.axis === "x" ? "y" : "x";
+        g.otherAxisStreak = 0;
+        this.wheelPartial = 0;
+        this.wheelPartialX = 0;
+      }
+    }
+    return this.wheelGesture!.axis;
   }
 
   /** ホイールを、`n` 回（符号は見ない）、`button`（6〜9）として報告する。 */
