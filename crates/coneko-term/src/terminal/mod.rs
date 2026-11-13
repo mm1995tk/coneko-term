@@ -432,13 +432,15 @@ impl Terminal {
     }
 
     /// クリップボードへの書き込み（[`Event::ClipboardWrite`]）に答える。成功なら `Ok(())`
-    /// （`status=DONE`）、書き込みを許さない・できないときはそのエラー。
+    /// （`status=DONE`）、書き込みを許さない・できないときはそのエラー。OSC 52 の書き込み（`id` が
+    /// `osc52:` で始まるもの）には返事が無いので、何も送らない。
     pub fn clipboard_write_reply(&mut self, id: &str, result: Result<(), ClipboardWriteError>) {
         let out = self.state.clipboard.reply_write(id, result);
         self.queue_output(&out);
     }
 
     /// 種類の一覧の頼み（[`ClipboardReadRequest::Types`]）に答える。`mimes` が空なら、データの無い `OK` と `DONE` だけを返す。
+    /// OSC 52 の読み取りには、中身の無い OSC 52 の返事（`OSC 52 ; Pc ;`）を送る。
     pub fn clipboard_read_reply_types(&mut self, id: &str, mimes: &[String]) {
         let out = self.state.clipboard.reply_read_types(id, mimes);
         self.queue_output(&out);
@@ -446,12 +448,15 @@ impl Terminal {
 
     /// データの頼み（[`ClipboardReadRequest::Mimes`]）に答える。`items` は、頼まれた種類のうち
     /// 渡せるもの。空なら、データの無い `OK` と `DONE` だけを返す。場所が無いときは `clipboard_read_reply_error` の `Enosys`。
+    /// OSC 52 の読み取りには、`text/plain` の項目だけを OSC 52 の形（`OSC 52 ; Pc ; base64`）で送る。
+    /// その項目が無ければ中身の無い返事。
     pub fn clipboard_read_reply_data(&mut self, id: &str, items: &[ClipboardItem]) {
         let out = self.state.clipboard.reply_read_data(id, items);
         self.queue_output(&out);
     }
 
     /// 読み取りの頼み（[`Event::ClipboardRead`]）を断る・失敗を知らせる。許さないなら `Eperm`。
+    /// OSC 52 の読み取りには、どのエラーでも中身の無い OSC 52 の返事（`OSC 52 ; Pc ;`）を送る。
     pub fn clipboard_read_reply_error(&mut self, id: &str, error: ClipboardReadError) {
         let out = self.state.clipboard.reply_read_error(id, error);
         self.queue_output(&out);
