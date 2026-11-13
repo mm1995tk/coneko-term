@@ -526,8 +526,10 @@ export function detectMacDesktop(): boolean {
  * macOS のデスクトップでは `opacity: 0` を使わない。WebKit（WKWebView・Safari）は、選択範囲を持つ
  * 要素が透明（親まで掛け合わせた `opacity` が 0.01 未満）か、見える矩形が空（幅か高さが 0）のとき、
  * 入力モードの表示（A / あ）などのカーソルの横の表示を隠す。そこで、字・背景・キャレット・枠を
- * 透明にして見えなくし、大きさは 1px にする。`z-index` が負なので、`textarea` は `.coneko-term`
- * の背景より下に描かれ、変換中の下線なども見えない。
+ * 透明にして見えなくし、大きさは 1px にする。`textarea` は `z-index` が負なので、canvas
+ * （`z-index: auto`）より先に描かれる。canvas は renderer が行ごとに背景の色で塗るので、カーソルの
+ * セルに置いた `textarea` は（変換中の下線なども）canvas の下に隠れる。ホストが `.coneko-term` に
+ * 重なりの基準（stacking context）を作っても、この順は変わらない。
  *
  * それ以外（iOS・iPadOS を含む）は `opacity: 0` のまま。iOS・iPadOS の WebKit は同じ判定で、
  * 隠した入力の要素のキャレットや選択のつまみを出さないようにしている。
