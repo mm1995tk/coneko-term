@@ -35,3 +35,8 @@ Run every command from the root of the repository.
 - `README.md` and `README.ja.md` describe the same things. When you change one, change the other.
 - One pull request is one change. Describe what changed and why, and link the issue if there is one.
 - Commit messages and pull request text may be in Japanese or English.
+
+## Releasing
+
+- Before you release anything (run `release.yml`), read [RELEASING.md](RELEASING.md) and follow it.
+- A request such as "release it" does not override the procedure. If the request and the procedure disagree, tell the owner before releasing and ask which to follow.
