@@ -501,3 +501,61 @@ test("mouse: leaving while a button is held is not reported", async () => {
   assert.deepEqual(box.out, []);
   t.dispose();
 });
+
+// ---- 横のホイールと、一続きの動きの間の軸の固定
+
+test("wheel: horizontal delta is reported as wheel left / right", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  assert.equal(t.handleWheel({ deltaX: -1, deltaY: 0, deltaMode: 1, col: 3, row: 2, time: 0 }), true);
+  assert.equal(t.handleWheel({ deltaX: 2, deltaY: 0, deltaMode: 1, col: 3, row: 2, time: 1000 }), true);
+  assert.equal(box.out.join(""), "\x1b[<66;4;3M" + "\x1b[<67;4;3M".repeat(2));
+  t.dispose();
+});
+
+test("wheel: small horizontal pixel deltas add up by cell width", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  for (let i = 0; i < 3; i++) t.handleWheel({ deltaX: 0.3, deltaY: 0, deltaMode: 0, time: i });
+  assert.deepEqual(box.out, []);
+  t.handleWheel({ deltaX: 0.3, deltaY: 0, deltaMode: 0, time: 3 });
+  assert.deepEqual(box.out, ["\x1b[<67;1;1M"]);
+  t.dispose();
+});
+
+test("wheel: the axis is fixed by the first event until the events stop", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  // 横が大きい動き: 混ざった縦は捨てる
+  t.handleWheel({ deltaX: 3, deltaY: 1, deltaMode: 1, time: 0 });
+  t.handleWheel({ deltaX: 0, deltaY: 2, deltaMode: 1, time: 50 });
+  t.handleWheel({ deltaX: 1, deltaY: 5, deltaMode: 1, time: 100 });
+  assert.equal(box.out.join(""), "\x1b[<67;1;1M".repeat(4));
+  box.out.length = 0;
+  // 149ms 空いただけなら、まだ同じ動き
+  t.handleWheel({ deltaX: 0, deltaY: 3, deltaMode: 1, time: 249 });
+  assert.deepEqual(box.out, []);
+  // 150ms 空いたら終わり。縦がすぐ効き、混ざった横は捨てる
+  t.handleWheel({ deltaX: 1, deltaY: 2, deltaMode: 1, time: 399 });
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(2));
+  box.out.length = 0;
+  // 同じ大きさなら縦
+  t.handleWheel({ deltaX: 2, deltaY: 2, deltaMode: 1, time: 1000 });
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(2));
+  t.dispose();
+});
+
+test("wheel: horizontal delta is ignored when the app does not listen", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  assert.equal(t.handleWheel({ deltaX: 3, deltaY: 0, deltaMode: 1, time: 0 }), false);
+  // 縦が大きい動きの横は捨て、縦は今まで通り
+  await write(t, "\x1b[?1049h");
+  assert.equal(t.handleWheel({ deltaX: 3, deltaY: 1, deltaMode: 1, time: 1000 }), false);
+  assert.equal(t.handleWheel({ deltaX: 1, deltaY: 2, deltaMode: 1, time: 2000 }), true);
+  assert.deepEqual(box.out, ["\x1b[B\x1b[B"]);
+  t.dispose();
+});
