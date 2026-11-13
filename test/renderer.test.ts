@@ -263,6 +263,20 @@ test("renderer: draws once per frame, and only the changed rows afterwards", asy
   t.dispose();
 });
 
+test("renderer: resize redraws everything at once, not at the next frame", async () => {
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { fake, flush } = setup(t);
+  await write(t, "ab");
+  flush();
+  fake.calls.length = 0;
+  t.resize(8, 4);
+  // フレームを回す前に、もう描いている（canvas が空のまま見える間を作らない）
+  const drawn = fake.calls.filter((c) => c[0] === "fillText").map((c) => c[1]);
+  assert.deepEqual(drawn, ["a", "b"]);
+  assert.equal(fake.raw.width, 72);
+  t.dispose();
+});
+
 test("renderer: wide characters and clusters are drawn once, at the head cell", async () => {
   const t = new Terminal({ cols: 10, rows: 2 });
   const { flush } = setup(t);
