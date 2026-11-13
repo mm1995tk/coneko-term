@@ -525,13 +525,14 @@ test("wheel: small horizontal pixel deltas add up by cell width", async () => {
   t.dispose();
 });
 
-test("wheel: the axis is fixed by the first event until the events stop", async () => {
+test("wheel: the axis stays fixed until a 150ms gap (a little of the other axis does not switch it)", async () => {
   const t = new Terminal({ cols: 20, rows: 5 });
   const box = collect(t);
   await write(t, "\x1b[?1000h\x1b[?1006h");
   // 横が大きい動き: 混ざった縦は捨てる
   t.handleWheel({ deltaX: 3, deltaY: 1, deltaMode: 1, time: 0 });
   t.handleWheel({ deltaX: 0, deltaY: 2, deltaMode: 1, time: 50 });
+  // 縦が 2 倍ちょうどなので、切り替えの数に入らない（ここで数え直す）
   t.handleWheel({ deltaX: 1, deltaY: 2, deltaMode: 1, time: 100 });
   assert.equal(box.out.join(""), "\x1b[<67;1;1M".repeat(4));
   box.out.length = 0;
