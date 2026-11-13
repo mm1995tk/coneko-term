@@ -525,14 +525,15 @@ test("wheel: small horizontal pixel deltas add up by cell width", async () => {
   t.dispose();
 });
 
-test("wheel: the axis is fixed by the first event until the events stop", async () => {
+test("wheel: the axis stays fixed until a 150ms gap (a little of the other axis does not switch it)", async () => {
   const t = new Terminal({ cols: 20, rows: 5 });
   const box = collect(t);
   await write(t, "\x1b[?1000h\x1b[?1006h");
   // 横が大きい動き: 混ざった縦は捨てる
   t.handleWheel({ deltaX: 3, deltaY: 1, deltaMode: 1, time: 0 });
   t.handleWheel({ deltaX: 0, deltaY: 2, deltaMode: 1, time: 50 });
-  t.handleWheel({ deltaX: 1, deltaY: 5, deltaMode: 1, time: 100 });
+  // 縦が 2 倍ちょうどなので、切り替えの数に入らない（ここで数え直す）
+  t.handleWheel({ deltaX: 1, deltaY: 2, deltaMode: 1, time: 100 });
   assert.equal(box.out.join(""), "\x1b[<67;1;1M".repeat(4));
   box.out.length = 0;
   // 149ms 空いただけなら、まだ同じ動き
@@ -545,6 +546,54 @@ test("wheel: the axis is fixed by the first event until the events stop", async 
   // 同じ大きさなら縦
   t.handleWheel({ deltaX: 2, deltaY: 2, deltaMode: 1, time: 1000 });
   assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(2));
+  t.dispose();
+});
+
+test("wheel: the axis switches when the other axis stays clearly larger", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  // 横の動き。そのあと間を空けずに縦へ。縦がはっきり大きい（2 倍より大きい）イベントが 3 回続くまで捨てる
+  t.handleWheel({ deltaX: 4, deltaY: 0, deltaMode: 1, time: 0 });
+  t.handleWheel({ deltaX: 1, deltaY: 3, deltaMode: 1, time: 10 });
+  t.handleWheel({ deltaX: 1, deltaY: 3, deltaMode: 1, time: 20 });
+  // 縦は捨てて、横の分（4 + 1 + 1）だけ出る
+  assert.equal(box.out.join(""), "\x1b[<67;1;1M".repeat(6));
+  box.out.length = 0;
+  t.handleWheel({ deltaX: 0, deltaY: 3, deltaMode: 1, time: 30 });
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(3));
+  box.out.length = 0;
+  // 切り替わったあとは、縦の動きの中の横は捨てる。縦から横へも同じ
+  t.handleWheel({ deltaX: 1, deltaY: 3, deltaMode: 1, time: 40 });
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(3));
+  box.out.length = 0;
+  for (let i = 0; i < 3; i++) t.handleWheel({ deltaX: 5, deltaY: 1, deltaMode: 1, time: 50 + i });
+  // 最初の 2 回は横を捨てて縦の分（1 + 1）、3 回目で切り替わって横の 5
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(2) + "\x1b[<67;1;1M".repeat(5));
+  t.dispose();
+});
+
+test("wheel: the axis does not switch for a little of the other axis", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  // 縦の動きに横が混ざる。横が続けて 3 回はっきり大きくならない（2 倍ちょうども数えない）ので、切り替えない
+  t.handleWheel({ deltaX: 0, deltaY: 3, deltaMode: 1, time: 0 });
+  box.out.length = 0;
+  const seq: Array<[number, number]> = [
+    [4, 1],
+    [4, 1],
+    [1, 1],
+    [4, 1],
+    [4, 1],
+    [2, 1],
+    [4, 1],
+    [4, 1],
+    [1, 3],
+  ];
+  seq.forEach(([dx, dy], i) => t.handleWheel({ deltaX: dx, deltaY: dy, deltaMode: 1, time: 10 + i }));
+  const lines = seq.reduce((n, [, dy]) => n + dy, 0);
+  assert.equal(box.out.join(""), "\x1b[<65;1;1M".repeat(lines));
   t.dispose();
 });
 
