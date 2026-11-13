@@ -796,6 +796,10 @@ const ANSI_NAMES = [
 
 /** ホイールのイベントがこれだけ（ミリ秒）空いたら、一続きの動きが終わったとみなす。 */
 const WHEEL_GESTURE_GAP_MS = 150;
+/** 反対の軸の量が今の軸の量のこの倍より大きいイベントを、「反対の軸がはっきり大きい」とみなす。 */
+const WHEEL_SWITCH_RATIO = 2;
+/** 「反対の軸がはっきり大きい」イベントがこの回数続けて来たら、軸を切り替える。 */
+const WHEEL_SWITCH_COUNT = 3;
 const DEFAULT_FONT_FAMILY = "monospace";
 const DEFAULT_FONT_SIZE = 15;
 
@@ -912,7 +916,7 @@ export class Terminal {
   private wheelPartial = 0;
   private wheelPartialX = 0;
   /** 今の一続きの動きが決めた軸と、最後のイベントの時刻。 */
-  private wheelGesture?: { axis: "x" | "y"; last: number };
+  private wheelGesture?: { axis: "x" | "y"; last: number; against: number };
 
   /** `dispose` のあとに触ると、分かりやすい例外にする。 */
   private get core(): WasmTerminal {
@@ -2837,7 +2841,9 @@ export class Terminal {
    * 横の動き（`deltaX`）は、マウスの報告が有効なときだけ、横のホイール（SGR の 66 / 67）として報告する
    * （報告が無効なときは使わない）。一続きの動き（トラックパッドの 1 回の指の動きと、その慣性）の
    * 最初のイベントで `|deltaX|` と `|deltaY|` の大きい方（同じなら縦）を軸に決め、
-   * {@link WHEEL_GESTURE_GAP_MS} 以上イベントが空くまで、反対の軸は捨てる。
+   * {@link WHEEL_GESTURE_GAP_MS} 以上イベントが空くまで、反対の軸は捨てる。ただし、反対の軸の量が今の軸の
+   * {@link WHEEL_SWITCH_RATIO} 倍より大きいイベントが {@link WHEEL_SWITCH_COUNT} 回続けて来たら、軸を切り替える
+   * （横から間を空けず縦へ動かしたとき、固定が外れないままになるのを防ぐ）。
    */
   handleWheel(ev: WheelInput): boolean {
     if (this.disposed) return false;
@@ -2852,9 +2858,20 @@ export class Terminal {
         this.wheelPartial = 0;
         this.wheelPartialX = 0;
       }
-      this.wheelGesture = { axis, last: now };
+      this.wheelGesture = { axis, last: now, against: 0 };
     } else {
       g.last = now;
+      // 反対の軸がはっきり大きいイベントが続けて来たら、軸を切り替える（このイベントから新しい軸）。
+      // 間に 1 つでも違うイベントが入れば数え直す。斜めの動きに混ざる反対の軸は、切り替えない。
+      const cur = g.axis === "x" ? Math.abs(dx) : Math.abs(ev.deltaY);
+      const opp = g.axis === "x" ? Math.abs(ev.deltaY) : Math.abs(dx);
+      g.against = opp > cur * WHEEL_SWITCH_RATIO ? g.against + 1 : 0;
+      if (g.against >= WHEEL_SWITCH_COUNT) {
+        g.axis = g.axis === "x" ? "y" : "x";
+        g.against = 0;
+        this.wheelPartial = 0;
+        this.wheelPartialX = 0;
+      }
     }
     const reporting = this.core.mouse_reporting();
     if (this.wheelGesture!.axis === "x") {
