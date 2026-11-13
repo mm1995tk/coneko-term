@@ -126,6 +126,10 @@ export interface MouseInput {
 export interface WheelInput {
   /** 縦の量（DOM の `WheelEvent.deltaY`）。負が上。 */
   deltaY: number;
+  /** 横の量（DOM の `WheelEvent.deltaX`）。負が左。無ければ 0。マウスの報告が有効なときだけ使う。 */
+  deltaX?: number;
+  /** イベントの時刻（ミリ秒。DOM の `WheelEvent.timeStamp`）。一続きの動きの区切りに使う（無ければ `performance.now()`）。 */
+  time?: number;
   /** 0 がピクセル、1 が行、2 がページ（DOM の `WheelEvent.deltaMode`）。 */
   deltaMode?: number;
   /** 見えている画面の列（0 始まり）。報告が有効なときだけ使う（無ければ 0）。 */
@@ -784,6 +788,8 @@ const ANSI_NAMES = [
   "brightWhite",
 ] as const;
 
+/** ホイールのイベントがこれだけ（ミリ秒）空いたら、一続きの動きが終わったとみなす。 */
+const WHEEL_GESTURE_GAP_MS = 150;
 const DEFAULT_FONT_FAMILY = "monospace";
 const DEFAULT_FONT_SIZE = 15;
 
@@ -898,6 +904,9 @@ export class Terminal {
   private mouseOwner?: "report" | "select";
   private reportButton = 0;
   private wheelPartial = 0;
+  private wheelPartialX = 0;
+  /** 今の一続きの動きが決めた軸と、最後のイベントの時刻。 */
+  private wheelGesture?: { axis: "x" | "y"; last: number };
 
   /** `dispose` のあとに触ると、分かりやすい例外にする。 */
   private get core(): WasmTerminal {
@@ -2816,25 +2825,43 @@ export class Terminal {
    *   （アプリケーションカーソルキーなら `ESC O A`、そうでなければ `ESC [ A`）。
    * - 通常の画面なら、表示位置を動かす。
    *
-   * 縦に回さないとき（`deltaY` が 0、または報告が無効で Shift つき）は何もしない。ブラウザーの既定の動きを
+   * 何もしないのは、報告が無効で軸が横のとき、軸が縦で `deltaY` が 0 のとき、報告が無効で Shift つきの縦のとき。ブラウザーの既定の動きを
    * 止めてよいときは `true`。
+   *
+   * 横の動き（`deltaX`）は、マウスの報告が有効なときだけ、横のホイール（SGR の 66 / 67）として報告する
+   * （報告が無効なときは使わない）。一続きの動き（トラックパッドの 1 回の指の動きと、その慣性）の
+   * 最初のイベントで `|deltaX|` と `|deltaY|` の大きい方（同じなら縦）を軸に決め、
+   * {@link WHEEL_GESTURE_GAP_MS} 以上イベントが空くまで、反対の軸は捨てる。
    */
   handleWheel(ev: WheelInput): boolean {
-    if (this.disposed || ev.deltaY === 0) return false;
-    const up = ev.deltaY < 0;
-    if (this.core.mouse_reporting()) {
-      const col = clamp(Math.trunc(ev.col ?? 0), 0, this.cols - 1);
-      const row = clamp(Math.trunc(ev.row ?? 0), 0, this.rows - 1);
-      // Shift つきでも報告するので、Shift は行の数に影響させない。
-      const n = Math.abs(this.wheelLines(ev));
-      const x = Math.max(0, Math.floor(ev.x ?? 0));
-      const y = Math.max(0, Math.floor(ev.y ?? 0));
-      const mods = (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0);
-      let sent = false;
-      for (let i = 0; i < n; i++) {
-        sent = this.core.report_mouse(up ? 6 : 7, 0, col, row, x, y, mods) || sent;
+    if (this.disposed) return false;
+    const dx = ev.deltaX ?? 0;
+    if (ev.deltaY === 0 && dx === 0) return false;
+    const now = ev.time ?? performance.now();
+    const g = this.wheelGesture;
+    if (!g || now - g.last >= WHEEL_GESTURE_GAP_MS || now < g.last) {
+      // 一続きの動きの最初。軸を決め直す。軸が変わるときだけ、端数を持ち越さない。
+      const axis = Math.abs(dx) > Math.abs(ev.deltaY) ? "x" : "y";
+      if (axis !== g?.axis) {
+        this.wheelPartial = 0;
+        this.wheelPartialX = 0;
       }
-      if (sent) this.flush();
+      this.wheelGesture = { axis, last: now };
+    } else {
+      g.last = now;
+    }
+    const reporting = this.core.mouse_reporting();
+    if (this.wheelGesture!.axis === "x") {
+      // 報告が無ければ、横には送る先が無い。ブラウザーの既定に任せる。
+      if (!reporting) return false;
+      this.reportWheel(ev, dx < 0 ? 8 : 9, this.wheelCols(ev, dx));
+      return true;
+    }
+    if (ev.deltaY === 0) return false;
+    const up = ev.deltaY < 0;
+    if (reporting) {
+      // Shift つきでも報告するので、Shift は行の数に影響させない。
+      this.reportWheel(ev, up ? 6 : 7, this.wheelLines(ev));
       return true;
     }
     const lines = ev.shiftKey ? 0 : this.wheelLines(ev);
@@ -2848,6 +2875,34 @@ export class Terminal {
     if (this.scrollbackLength === 0) return false;
     if (lines !== 0) this.scrollLines(lines);
     return true;
+  }
+
+  /** ホイールを、`n` 回（符号は見ない）、`button`（6〜9）として報告する。 */
+  private reportWheel(ev: WheelInput, button: number, n: number): void {
+    const col = clamp(Math.trunc(ev.col ?? 0), 0, this.cols - 1);
+    const row = clamp(Math.trunc(ev.row ?? 0), 0, this.rows - 1);
+    const x = Math.max(0, Math.floor(ev.x ?? 0));
+    const y = Math.max(0, Math.floor(ev.y ?? 0));
+    const mods = (ev.shiftKey ? 1 : 0) | (ev.altKey ? 2 : 0) | (ev.ctrlKey ? 4 : 0);
+    let sent = false;
+    for (let i = 0; i < Math.abs(n); i++) {
+      sent = this.core.report_mouse(button, 0, col, row, x, y, mods) || sent;
+    }
+    if (sent) this.flush();
+  }
+
+  /** 横のホイールが動かす列の数（左が負）。`wheelLines` と同じ式で、セルの幅を使う。 */
+  private wheelCols(ev: WheelInput, dx: number): number {
+    let amount = dx;
+    if (ev.deltaMode === 0) {
+      const w = this.renderer?.cellSize.width || 1;
+      this.wheelPartialX += amount / w;
+      amount = Math.trunc(this.wheelPartialX);
+      this.wheelPartialX -= amount;
+    } else if (ev.deltaMode === 2) {
+      amount *= this.cols;
+    }
+    return Math.trunc(amount);
   }
 
   /**
@@ -2988,6 +3043,8 @@ export class Terminal {
       const i = this.pointerInput(canvas, e, "move");
       const consumed = this.handleWheel({
         deltaY: e.deltaY,
+        deltaX: e.deltaX,
+        time: e.timeStamp,
         deltaMode: e.deltaMode,
         col: i.col,
         row: i.row,
