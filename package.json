@@ -1,6 +1,6 @@
 {
   "name": "coneko-term",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Terminal building blocks (VT parser and screen model) in Rust, as WebAssembly with TypeScript types",
   "license": "MIT",
   "repository": {
