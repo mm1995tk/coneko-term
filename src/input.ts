@@ -510,3 +510,59 @@ export function detectPlatform(): { isMac: boolean; isWindows: boolean } {
     isWindows: ["Windows", "Win16", "Win32", "WinCE"].includes(platform) || /Windows/.test(ua),
   };
 }
+
+/**
+ * macOS のデスクトップか。iPadOS の Safari も `platform` が `MacIntel` になるので、触れる点が
+ * 無いこと（`maxTouchPoints` が 0）も見る。
+ */
+export function detectMacDesktop(): boolean {
+  const nav = (globalThis as { navigator?: Navigator }).navigator;
+  return detectPlatform().isMac && (nav?.maxTouchPoints ?? 0) === 0;
+}
+
+/**
+ * キーと変換を受ける、見えない `textarea` の `style`。
+ *
+ * macOS のデスクトップでは `opacity: 0` を使わない。WebKit（WKWebView・Safari）は、選択範囲を持つ
+ * 要素が透明（親まで掛け合わせた `opacity` が 0.01 未満）か、見える矩形が空（幅か高さが 0）のとき、
+ * 入力モードの表示（A / あ）などのカーソルの横の表示を隠す。そこで、字・背景・キャレット・枠を
+ * 透明にして見えなくし、大きさは 1px にする。`textarea` は `z-index` が負なので、canvas
+ * （`z-index: auto`）より先に描かれる。canvas は renderer が行ごとに背景の色で塗るので、カーソルの
+ * セルに置いた `textarea` は（変換中の下線なども）canvas の下に隠れる。ホストが `.coneko-term` に
+ * 重なりの基準（stacking context）を作っても、この順は変わらない。
+ *
+ * それ以外（iOS・iPadOS を含む）は `opacity: 0` のまま。iOS・iPadOS の WebKit は同じ判定で、
+ * 隠した入力の要素のキャレットや選択のつまみを出さないようにしている。
+ */
+export function inputTextareaStyle(macDesktop: boolean): Record<string, string> {
+  const common = {
+    position: "absolute",
+    left: "0",
+    top: "0",
+    padding: "0",
+    border: "0",
+    margin: "0",
+    zIndex: "-5",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    resize: "none",
+  };
+  if (!macDesktop) return { ...common, width: "0", height: "0", opacity: "0" };
+  return {
+    ...common,
+    width: "1px",
+    height: "1px",
+    color: "transparent",
+    background: "transparent",
+    caretColor: "transparent",
+    outline: "none",
+    appearance: "none",
+  };
+}
+
+/**
+ * macOS のデスクトップで、見えない `textarea` の選択範囲の色も透明にする CSS。
+ * `style` 属性には `::selection` を書けないので、`<style>` で入れる。
+ */
+export const INPUT_TEXTAREA_SELECTION_CSS =
+  ".coneko-term-input::selection { color: transparent; background: transparent; }";

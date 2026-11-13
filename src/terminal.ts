@@ -10,7 +10,10 @@ import {
   CompositionHelper,
   HostMoveWatcher,
   KeyHandler,
+  detectMacDesktop,
   detectPlatform,
+  INPUT_TEXTAREA_SELECTION_CSS,
+  inputTextareaStyle,
   type CompositionAnchor,
   type CompositionViewLike,
 } from "./input.js";
@@ -1981,13 +1984,20 @@ export class Terminal {
    * `textarea` はいつもカーソルの位置に置く。変換中の字は、カーソルの位置に重ねて見せる。
    */
   private setupInput(doc: Document, el: HTMLElement): void {
-    const textarea = createInputTextarea(doc);
+    const macDesktop = detectMacDesktop();
+    const textarea = createInputTextarea(doc, macDesktop);
     const { element: viewEl, view } = createCompositionView(
       doc,
       this.resolvedTheme.background,
       this.resolvedTheme.foreground,
     );
     el.append(textarea, viewEl);
+    if (macDesktop) {
+      // 欄の要素の中に置くので、Shadow DOM の中で開いたときにも効く
+      const style = doc.createElement("style");
+      style.textContent = INPUT_TEXTAREA_SELECTION_CSS;
+      el.append(style);
+    }
     const composition = new CompositionHelper(
       textarea,
       view,
@@ -3063,8 +3073,8 @@ function stripUndefined<T extends object>(o: T): Partial<T> {
   ) as Partial<T>;
 }
 
-/** キーと変換を受ける、見えない `textarea`。 */
-function createInputTextarea(doc: Document): HTMLTextAreaElement {
+/** キーと変換を受ける、見えない `textarea`（見えなくする方法は `inputTextareaStyle` に書いた）。 */
+function createInputTextarea(doc: Document, macDesktop: boolean): HTMLTextAreaElement {
   const textarea = doc.createElement("textarea");
   textarea.className = "coneko-term-input";
   textarea.setAttribute("aria-label", "Terminal input");
@@ -3074,21 +3084,7 @@ function createInputTextarea(doc: Document): HTMLTextAreaElement {
   textarea.setAttribute("spellcheck", "false");
   textarea.setAttribute("wrap", "off");
   textarea.tabIndex = 0;
-  Object.assign(textarea.style, {
-    position: "absolute",
-    left: "0",
-    top: "0",
-    width: "0",
-    height: "0",
-    padding: "0",
-    border: "0",
-    margin: "0",
-    opacity: "0",
-    zIndex: "-5",
-    whiteSpace: "nowrap",
-    overflow: "hidden",
-    resize: "none",
-  });
+  Object.assign(textarea.style, inputTextareaStyle(macDesktop));
   return textarea;
 }
 
