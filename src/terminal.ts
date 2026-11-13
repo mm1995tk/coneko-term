@@ -915,8 +915,8 @@ export class Terminal {
   private reportButton = 0;
   private wheelPartial = 0;
   private wheelPartialX = 0;
-  /** 今の一続きの動きが決めた軸と、最後のイベントの時刻。 */
-  private wheelGesture?: { axis: "x" | "y"; last: number; against: number };
+  /** 今の一続きの動きが決めた軸と、最後のイベントの時刻と、反対の軸がはっきり大きいイベントが続けて来た回数（軸の切り替えに使う）。 */
+  private wheelGesture?: { axis: "x" | "y"; last: number; otherAxisStreak: number };
 
   /** `dispose` のあとに触ると、分かりやすい例外にする。 */
   private get core(): WasmTerminal {
@@ -2858,17 +2858,17 @@ export class Terminal {
         this.wheelPartial = 0;
         this.wheelPartialX = 0;
       }
-      this.wheelGesture = { axis, last: now, against: 0 };
+      this.wheelGesture = { axis, last: now, otherAxisStreak: 0 };
     } else {
       g.last = now;
       // 反対の軸がはっきり大きいイベントが続けて来たら、軸を切り替える（このイベントから新しい軸）。
       // 間に 1 つでも違うイベントが入れば数え直す。斜めの動きに混ざる反対の軸は、切り替えない。
       const cur = g.axis === "x" ? Math.abs(dx) : Math.abs(ev.deltaY);
       const opp = g.axis === "x" ? Math.abs(ev.deltaY) : Math.abs(dx);
-      g.against = opp > cur * WHEEL_SWITCH_RATIO ? g.against + 1 : 0;
-      if (g.against >= WHEEL_SWITCH_COUNT) {
+      g.otherAxisStreak = opp > cur * WHEEL_SWITCH_RATIO ? g.otherAxisStreak + 1 : 0;
+      if (g.otherAxisStreak >= WHEEL_SWITCH_COUNT) {
         g.axis = g.axis === "x" ? "y" : "x";
-        g.against = 0;
+        g.otherAxisStreak = 0;
         this.wheelPartial = 0;
         this.wheelPartialX = 0;
       }
