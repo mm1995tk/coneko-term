@@ -17,6 +17,20 @@
 //!   知らない値）なら黙って捨てる（仕様: 読み取りにはエラーの状態が無い）。
 //! - `id` は返事にそのまま入るので、`[a-zA-Z0-9_+.-]` 以外の字は取り除く（仕様）。
 //! - 知らない `type` やキーは捨てる。
+//!
+//! xterm の OSC 52（`OSC 52 ; Pc ; Pd`）も、同じイベントにする。OSC 52 で書くプログラム
+//! （Claude Code など）は多く、OSC 5522 だけではその書き込みが届かないため。
+//!
+//! - 書き込み（`Pd` が base64）は、`text/plain` の項目を 1 つ持つ [`crate::Event::ClipboardWrite`]
+//!   にする。OSC 52 には書き込みの返事が無いので、その答えは何も出さない。
+//! - 読み取り（`Pd` が `?`）は、`text/plain` を頼む [`crate::Event::ClipboardRead`] にする。答えは
+//!   OSC 52 の形（`OSC 52 ; Pc ; base64 ST`）で、頼みと同じ終わりの字（BEL か ST）で出す。
+//!   断られた・失敗した・テキストが無いときは、中身の無い返事（`OSC 52 ; Pc ; ST`）にする。
+//! - `Pc` は、`c` があるか空なら主のクリップボード、`c` が無くて `p` か `s` があれば primary
+//!   selection。cut buffer（`0`〜`7`）だけのときは、書き込みは捨て、読み取りには中身の無い返事を
+//!   する。`Pc` に知らない字があれば、シーケンスを捨てる。
+//! - イベントの `id` は、ここで `osc52:` で始まる値を付ける（OSC 5522 の `id` には `:` が
+//!   入らないので、混ざらない）。答えの関数は、この `id` を見て返事の形を選ぶ。
 
 use super::Event;
 
@@ -141,10 +155,30 @@ struct Pending {
     total: usize,
 }
 
-/// 組み立て中の書き込みの置き場（同時に 1 つ）。
+/// 組み立て中の書き込みの置き場（同時に 1 つ）と、答えを待つ OSC 52 の読み取り。
 #[derive(Debug, Default)]
 pub(super) struct Clipboard {
     pending: Option<Pending>,
+    /// 答えを待つ OSC 52 の読み取り（古い順）。
+    osc52_reads: Vec<Osc52Read>,
+    /// OSC 52 のイベントに付けた `id` の通し番号。
+    osc52_seq: u64,
+}
+
+/// OSC 52 のイベントの `id` の頭。OSC 5522 の `id` には `:` が入らない（[`clean_id`]）。
+const OSC52_ID: &str = "osc52:";
+/// 答えを待つ OSC 52 の読み取りの数の上限。超えたら古いものを忘れる（その答えは出さない）。
+const MAX_OSC52_READS: usize = 64;
+const TEXT_PLAIN: &str = "text/plain";
+
+/// 答えを待つ OSC 52 の読み取り。
+#[derive(Debug)]
+struct Osc52Read {
+    id: String,
+    /// 返事に入れる `Pc`。
+    selection: String,
+    /// 頼みが BEL で終わっていたか（返事も同じ字で終える）。
+    bell: bool,
 }
 
 /// 1 つのパケットの鍵。
@@ -197,6 +231,122 @@ impl Clipboard {
     /// 組み立て中のものを捨てる。
     pub(super) fn clear(&mut self) {
         self.pending = None;
+        self.osc52_reads.clear();
+    }
+
+    /// `OSC 52 ;` のあとの `Pc ; Pd` を処理する。`bell` は頼みが BEL で終わっていたか。
+    pub(super) fn osc52(&mut self, rest: &[u8], bell: bool) -> Option<Output> {
+        let sep = rest.iter().position(|&b| b == b';')?;
+        let (pc, pd) = (&rest[..sep], &rest[sep + 1..]);
+        if !pc
+            .iter()
+            .all(|b| matches!(b, b'c' | b'p' | b's' | b'0'..=b'7'))
+        {
+            return None;
+        }
+        // 上で ASCII だけと確かめてある。
+        let pc = std::str::from_utf8(pc).ok()?;
+        let location = if pc.is_empty() || pc.contains('c') {
+            Some(ClipboardLocation::Clipboard)
+        } else if pc.contains(['p', 's']) {
+            Some(ClipboardLocation::Primary)
+        } else {
+            None
+        };
+        if pd == b"?" {
+            let selection = if pc.is_empty() { "c" } else { pc }.to_string();
+            let Some(location) = location else {
+                return Some(Output::Reply(osc52_reply(&selection, b"", bell)));
+            };
+            let id = self.next_osc52_id();
+            if self.osc52_reads.len() >= MAX_OSC52_READS {
+                self.osc52_reads.remove(0);
+            }
+            self.osc52_reads.push(Osc52Read {
+                id: id.clone(),
+                selection,
+                bell,
+            });
+            return Some(Output::Event(Event::ClipboardRead {
+                id,
+                location,
+                request: ClipboardReadRequest::Mimes(vec![TEXT_PLAIN.to_string()]),
+            }));
+        }
+        let location = location?;
+        if pd.len() / 4 * 3 > MAX_WRITE_BYTES {
+            return None;
+        }
+        let data = decode_base64_unpadded(pd)?;
+        let id = self.next_osc52_id();
+        Some(Output::Event(Event::ClipboardWrite(Box::new(
+            ClipboardWrite {
+                id,
+                location,
+                items: vec![ClipboardItem {
+                    mime: TEXT_PLAIN.to_string(),
+                    data,
+                }],
+            },
+        ))))
+    }
+
+    fn next_osc52_id(&mut self) -> String {
+        self.osc52_seq += 1;
+        format!("{OSC52_ID}{}", self.osc52_seq)
+    }
+
+    /// 答えを待つ OSC 52 の読み取りを取り出し、`data` を入れた返事にする。待っていなければ空。
+    fn answer_osc52(&mut self, id: &str, data: &[u8]) -> Vec<u8> {
+        let Some(i) = self.osc52_reads.iter().position(|r| r.id == id) else {
+            return Vec::new();
+        };
+        let r = self.osc52_reads.remove(i);
+        osc52_reply(&r.selection, data, r.bell)
+    }
+
+    /// 書き込みへの返事。OSC 52 の書き込みには返事が無い。
+    pub(super) fn reply_write(
+        &mut self,
+        id: &str,
+        result: Result<(), ClipboardWriteError>,
+    ) -> Vec<u8> {
+        if id.starts_with(OSC52_ID) {
+            return Vec::new();
+        }
+        write_reply(id, result)
+    }
+
+    /// 種類の一覧への返事。OSC 52 は一覧を頼まないので、来たら中身の無い返事にする。
+    pub(super) fn reply_read_types(&mut self, id: &str, mimes: &[String]) -> Vec<u8> {
+        if id.starts_with(OSC52_ID) {
+            return self.answer_osc52(id, b"");
+        }
+        read_types_reply(id, mimes)
+    }
+
+    /// データの読み取りへの返事。OSC 52 には、`text/plain` の項目だけを入れる。
+    pub(super) fn reply_read_data(&mut self, id: &str, items: &[ClipboardItem]) -> Vec<u8> {
+        if id.starts_with(OSC52_ID) {
+            let text = items.iter().find(|i| {
+                i.mime
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .eq_ignore_ascii_case(TEXT_PLAIN)
+            });
+            return self.answer_osc52(id, text.map_or(&[][..], |i| &i.data));
+        }
+        read_data_reply(id, items)
+    }
+
+    /// 読み取りの失敗の返事。OSC 52 では中身の無い返事にする。
+    pub(super) fn reply_read_error(&mut self, id: &str, e: ClipboardReadError) -> Vec<u8> {
+        if id.starts_with(OSC52_ID) {
+            return self.answer_osc52(id, b"");
+        }
+        read_error_reply(id, e)
     }
 
     /// `OSC 5522 ;` のあとの `鍵 ; 中身` を処理する。
@@ -350,6 +500,25 @@ fn read(meta: &Meta, payload: &[u8]) -> Option<Output> {
         location,
         request,
     }))
+}
+
+/// OSC 52 の読み取りへの返事（`ESC ] 52 ; Pc ; base64 ST`）。
+fn osc52_reply(selection: &str, data: &[u8], bell: bool) -> Vec<u8> {
+    let st = if bell { "\x07" } else { "\x1b\\" };
+    format!("\x1b]52;{selection};{}{st}", encode_base64(data)).into_bytes()
+}
+
+/// OSC 52 の base64。詰め物（`=`）を省いたものも受ける（省いて送るプログラムがあるため）。
+fn decode_base64_unpadded(src: &[u8]) -> Option<Vec<u8>> {
+    match src.len() % 4 {
+        0 => decode_base64(src),
+        1 => None,
+        n => {
+            let mut padded = src.to_vec();
+            padded.extend(std::iter::repeat_n(b'=', 4 - n));
+            decode_base64(&padded)
+        }
+    }
 }
 
 fn decode_mime(b64: &str) -> Option<String> {
@@ -808,6 +977,164 @@ mod tests {
         assert_eq!(
             t.take_output(),
             b"\x1b]5522;type=write:status=DONE:id=w\x1b\\\x1b]5522;type=read:status=EPERM:id=r\x1b\\"
+        );
+    }
+}
+
+#[cfg(test)]
+mod osc52_tests {
+    use super::*;
+    use crate::terminal::Terminal;
+
+    fn events(t: &mut Terminal, input: &str) -> Vec<Event> {
+        t.write(input.as_bytes());
+        t.take_events()
+    }
+
+    #[test]
+    fn write_becomes_a_text_plain_clipboard_write() {
+        let mut t = Terminal::new(5, 20);
+        let ev = events(&mut t, "\x1b]52;c;aGVsbG8g5pel5pys\x07");
+        let [Event::ClipboardWrite(w)] = ev.as_slice() else {
+            panic!("expected one write, got {ev:?}");
+        };
+        assert_eq!(w.location, ClipboardLocation::Clipboard);
+        assert_eq!(
+            w.items,
+            vec![ClipboardItem {
+                mime: "text/plain".into(),
+                data: "hello 日本".as_bytes().to_vec(),
+            }]
+        );
+        // OSC 52 には書き込みの返事が無い。
+        let id = w.id.clone();
+        t.clipboard_write_reply(&id, Ok(()));
+        t.clipboard_write_reply(&id, Err(ClipboardWriteError::Enosys));
+        assert_eq!(t.take_output(), b"");
+    }
+
+    #[test]
+    fn write_selection_and_padding() {
+        let mut t = Terminal::new(5, 20);
+        let loc = |t: &mut Terminal, s: &str| match events(t, s).as_slice() {
+            [Event::ClipboardWrite(w)] => Some((w.location, w.items[0].data.clone())),
+            [] => None,
+            other => panic!("{other:?}"),
+        };
+        // ST で終わっても、`Pc` が空でも、主のクリップボード。
+        assert_eq!(
+            loc(&mut t, "\x1b]52;;YWI=\x1b\\"),
+            Some((ClipboardLocation::Clipboard, b"ab".to_vec()))
+        );
+        assert_eq!(
+            loc(&mut t, "\x1b]52;sc;YQ==\x07").map(|l| l.0),
+            Some(ClipboardLocation::Clipboard)
+        );
+        assert_eq!(
+            loc(&mut t, "\x1b]52;p;YQ==\x07").map(|l| l.0),
+            Some(ClipboardLocation::Primary)
+        );
+        assert_eq!(
+            loc(&mut t, "\x1b]52;s;YQ==\x07").map(|l| l.0),
+            Some(ClipboardLocation::Primary)
+        );
+        // 詰め物を省いた base64 も受ける。
+        assert_eq!(
+            loc(&mut t, "\x1b]52;c;YWI\x07"),
+            Some((ClipboardLocation::Clipboard, b"ab".to_vec()))
+        );
+        // cut buffer だけ・知らない字・読めない base64 は捨てる。
+        assert_eq!(loc(&mut t, "\x1b]52;0;YQ==\x07"), None);
+        assert_eq!(loc(&mut t, "\x1b]52;x;YQ==\x07"), None);
+        assert_eq!(loc(&mut t, "\x1b]52;c;Y\x07"), None);
+        assert_eq!(loc(&mut t, "\x1b]52;c;!!!!\x07"), None);
+        assert_eq!(t.take_output(), b"");
+    }
+
+    #[test]
+    fn read_is_answered_in_the_osc52_form() {
+        let mut t = Terminal::new(5, 20);
+        let ev = events(&mut t, "\x1b]52;c;?\x07");
+        let [Event::ClipboardRead {
+            id,
+            location,
+            request,
+        }] = ev.as_slice()
+        else {
+            panic!("expected one read, got {ev:?}");
+        };
+        assert_eq!(*location, ClipboardLocation::Clipboard);
+        assert_eq!(
+            *request,
+            ClipboardReadRequest::Mimes(vec!["text/plain".into()])
+        );
+        let id = id.clone();
+        t.clipboard_read_reply_data(
+            &id,
+            &[
+                ClipboardItem {
+                    mime: "image/png".into(),
+                    data: vec![1, 2],
+                },
+                ClipboardItem {
+                    mime: "text/plain;charset=utf-8".into(),
+                    data: b"ab".to_vec(),
+                },
+            ],
+        );
+        // 頼みと同じ BEL で終える。
+        assert_eq!(t.take_output(), b"\x1b]52;c;YWI=\x07");
+        // 2 度目の答えは出さない。
+        t.clipboard_read_reply_data(
+            &id,
+            &[ClipboardItem {
+                mime: "text/plain".into(),
+                data: b"x".to_vec(),
+            }],
+        );
+        assert_eq!(t.take_output(), b"");
+    }
+
+    #[test]
+    fn refused_or_failed_reads_get_an_empty_reply() {
+        let mut t = Terminal::new(5, 20);
+        for e in [
+            ClipboardReadError::Eperm,
+            ClipboardReadError::Ebusy,
+            ClipboardReadError::Enosys,
+        ] {
+            let ev = events(&mut t, "\x1b]52;p;?\x1b\\");
+            let [Event::ClipboardRead { id, location, .. }] = ev.as_slice() else {
+                panic!("{ev:?}");
+            };
+            assert_eq!(*location, ClipboardLocation::Primary);
+            let id = id.clone();
+            t.clipboard_read_reply_error(&id, e);
+            assert_eq!(t.take_output(), b"\x1b]52;p;\x1b\\");
+        }
+        // テキストが無ければ、中身の無い返事。
+        let ev = events(&mut t, "\x1b]52;;?\x07");
+        let [Event::ClipboardRead { id, .. }] = ev.as_slice() else {
+            panic!("{ev:?}");
+        };
+        let id = id.clone();
+        t.clipboard_read_reply_data(&id, &[]);
+        assert_eq!(t.take_output(), b"\x1b]52;c;\x07");
+        // cut buffer だけの読み取りは、イベントにせず中身の無い返事。
+        assert!(events(&mut t, "\x1b]52;0;?\x07").is_empty());
+        assert_eq!(t.take_output(), b"\x1b]52;0;\x07");
+    }
+
+    #[test]
+    fn osc5522_replies_are_unchanged() {
+        let mut t = Terminal::new(5, 20);
+        t.write(b"\x1b]52;c;?\x07");
+        t.take_events();
+        // OSC 52 の読み取りを待っていても、OSC 5522 の答えはいつもの形。
+        t.clipboard_read_reply_error("r", ClipboardReadError::Eperm);
+        assert_eq!(
+            t.take_output(),
+            b"\x1b]5522;type=read:status=EPERM:id=r\x1b\\"
         );
     }
 }
