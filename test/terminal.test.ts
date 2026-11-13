@@ -408,6 +408,54 @@ test("clipboard (OSC 5522): without a listener, reads and writes are refused", a
   t.dispose();
 });
 
+test("clipboard (OSC 52): a write goes to onClipboardWrite with no reply", async () => {
+  const t = new Terminal();
+  const writes: { id: string; location: string; items: unknown }[] = [];
+  t.onClipboardWrite((w) => writes.push(w));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, `\x1b]52;c;${b64("hello 日本")}\x07`);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]!.location, "clipboard");
+  assert.deepEqual(writes[0]!.items, [
+    { mime: "text/plain", data: new TextEncoder().encode("hello 日本") },
+  ]);
+  t.replyClipboardWrite(writes[0]!.id);
+  assert.deepEqual(out, []);
+  t.dispose();
+});
+
+test("clipboard (OSC 52): a read goes to onClipboardRead and is answered as OSC 52", async () => {
+  const t = new Terminal();
+  const reads: { id: string; location: string; list: boolean; mimes: string[] }[] = [];
+  t.onClipboardRead((r) => reads.push(r));
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, "\x1b]52;c;?\x1b\\\x1b]52;c;?\x07");
+  assert.deepEqual(
+    reads.map(({ location, list, mimes }) => ({ location, list, mimes })),
+    [
+      { location: "clipboard", list: false, mimes: ["text/plain"] },
+      { location: "clipboard", list: false, mimes: ["text/plain"] },
+    ],
+  );
+  t.replyClipboardReadData(reads[0]!.id, [
+    { mime: "text/plain", data: new TextEncoder().encode("hi") },
+  ]);
+  t.replyClipboardReadError(reads[1]!.id, "EPERM");
+  assert.deepEqual(out, ["\x1b]52;c;aGk=\x1b\\", "\x1b]52;c;\x07"]);
+  t.dispose();
+});
+
+test("clipboard (OSC 52): without a listener, a read gets an empty reply", async () => {
+  const t = new Terminal();
+  const out: string[] = [];
+  t.onData((d) => out.push(dec.decode(d)));
+  await write(t, `\x1b]52;c;?\x07\x1b]52;c;${b64("x")}\x07`);
+  assert.equal(out.join(""), "\x1b]52;c;\x07");
+  t.dispose();
+});
+
 const osc72 = (meta: string, payload = "") =>
   `\x1b]72;${meta}${payload ? ";" + payload : ""}\x1b\\`;
 

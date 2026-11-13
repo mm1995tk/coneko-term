@@ -291,7 +291,10 @@ export interface ClipboardItem {
   data: Uint8Array;
 }
 
-/** クリップボードへの書き込み（kitty の clipboard protocol、OSC 5522）。 */
+/**
+ * クリップボードへの書き込み（kitty の clipboard protocol、OSC 5522、または xterm の OSC 52）。
+ * OSC 52 の書き込みは `text/plain` の項目 1 つで、`replyClipboardWrite` の答えは何も送らない（OSC 52 に返事は無い）。
+ */
 export interface ClipboardWriteRequest {
   /** `id`。無ければ空文字列。`replyClipboardWrite` に渡す。 */
   id: string;
@@ -301,7 +304,10 @@ export interface ClipboardWriteRequest {
   items: ClipboardItem[];
 }
 
-/** クリップボードの読み取りの頼み（OSC 5522 の `type=read`）。 */
+/**
+ * クリップボードの読み取りの頼み（OSC 5522 の `type=read`、または OSC 52 の `?`）。
+ * OSC 52 の頼みは `mimes` が `["text/plain"]` で、答えは OSC 52 の形で送る。断る・失敗を知らせる・データが無いときは中身の無い返事になる。
+ */
 export interface ClipboardReadRequest {
   /** `id`。無ければ空文字列。答えに渡す。 */
   id: string;
@@ -1460,7 +1466,7 @@ export class Terminal {
   }
 
   /**
-   * クリップボードへの書き込み（kitty の clipboard protocol、OSC 5522）がそろった。分けて
+   * クリップボードへの書き込み（kitty の clipboard protocol、OSC 5522、または OSC 52）がそろった。分けて
    * 送られたデータは、そろった時点で 1 回だけ呼ぶ。OS のクリップボードに書くかどうかは呼ぶ側が決め、
    * どちらにしても `replyClipboardWrite` で答える。聞き手がいなければ、`EPERM` で答える。
    */
@@ -1469,7 +1475,7 @@ export class Terminal {
   }
 
   /**
-   * クリップボードの読み取りの頼み（OSC 5522 の `type=read`）が来た。読ませるかどうかは呼ぶ側が決め、
+   * クリップボードの読み取りの頼み（OSC 5522 の `type=read`、または OSC 52 の `?`）が来た。読ませるかどうかは呼ぶ側が決め、
    * `replyClipboardReadTypes`・`replyClipboardReadData`・`replyClipboardReadError` のどれかで答える。
    * 聞き手がいなければ、`EPERM`（許されない）で答える。
    */

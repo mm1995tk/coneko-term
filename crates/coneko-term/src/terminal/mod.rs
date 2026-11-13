@@ -134,10 +134,10 @@ pub enum Event {
         /// `i=`（無ければ空）。
         id: String,
     },
-    /// クリップボードへの書き込み（OSC 5522 の `type=write`）がそろった。呼ぶ側は、書き込みを
+    /// クリップボードへの書き込み（OSC 5522 の `type=write`、または OSC 52）がそろった。呼ぶ側は、書き込みを
     /// 許すなら OS のクリップボードへ書き、どちらにしても [`Terminal::clipboard_write_reply`] で答える。
     ClipboardWrite(Box<ClipboardWrite>),
-    /// クリップボードの読み取りの頼み（OSC 5522 の `type=read`）。許すかどうかは呼ぶ側が決め、
+    /// クリップボードの読み取りの頼み（OSC 5522 の `type=read`、または OSC 52 の `?`）。許すかどうかは呼ぶ側が決め、
     /// [`Terminal::clipboard_read_reply_types`]・[`Terminal::clipboard_read_reply_data`]・
     /// [`Terminal::clipboard_read_reply_error`] のどれかで答える。
     ClipboardRead {
@@ -432,25 +432,34 @@ impl Terminal {
     }
 
     /// クリップボードへの書き込み（[`Event::ClipboardWrite`]）に答える。成功なら `Ok(())`
-    /// （`status=DONE`）、書き込みを許さない・できないときはそのエラー。
+    /// （`status=DONE`）、書き込みを許さない・できないときはそのエラー。OSC 52 の書き込み（`id` が
+    /// `osc52:` で始まるもの）には返事が無いので、何も送らない。
     pub fn clipboard_write_reply(&mut self, id: &str, result: Result<(), ClipboardWriteError>) {
-        self.queue_output(&clipboard::write_reply(id, result));
+        let out = self.state.clipboard.reply_write(id, result);
+        self.queue_output(&out);
     }
 
     /// 種類の一覧の頼み（[`ClipboardReadRequest::Types`]）に答える。`mimes` が空なら、データの無い `OK` と `DONE` だけを返す。
+    /// OSC 52 の読み取りには、中身の無い OSC 52 の返事（`OSC 52 ; Pc ;`）を送る。
     pub fn clipboard_read_reply_types(&mut self, id: &str, mimes: &[String]) {
-        self.queue_output(&clipboard::read_types_reply(id, mimes));
+        let out = self.state.clipboard.reply_read_types(id, mimes);
+        self.queue_output(&out);
     }
 
     /// データの頼み（[`ClipboardReadRequest::Mimes`]）に答える。`items` は、頼まれた種類のうち
     /// 渡せるもの。空なら、データの無い `OK` と `DONE` だけを返す。場所が無いときは `clipboard_read_reply_error` の `Enosys`。
+    /// OSC 52 の読み取りには、`text/plain` の項目だけを OSC 52 の形（`OSC 52 ; Pc ; base64`）で送る。
+    /// その項目が無ければ中身の無い返事。
     pub fn clipboard_read_reply_data(&mut self, id: &str, items: &[ClipboardItem]) {
-        self.queue_output(&clipboard::read_data_reply(id, items));
+        let out = self.state.clipboard.reply_read_data(id, items);
+        self.queue_output(&out);
     }
 
     /// 読み取りの頼み（[`Event::ClipboardRead`]）を断る・失敗を知らせる。許さないなら `Eperm`。
+    /// OSC 52 の読み取りには、どのエラーでも中身の無い OSC 52 の返事（`OSC 52 ; Pc ;`）を送る。
     pub fn clipboard_read_reply_error(&mut self, id: &str, error: ClipboardReadError) {
-        self.queue_output(&clipboard::read_error_reply(id, error));
+        let out = self.state.clipboard.reply_read_error(id, error);
+        self.queue_output(&out);
     }
 
     // ---- kitty の drag and drop protocol（OSC 72）----
@@ -1639,6 +1648,11 @@ impl State {
                 self.drop_running_program_status();
             }
             b"5522" => match self.clipboard.osc(&data[sep + 1..]) {
+                Some(clipboard::Output::Event(ev)) => self.events.push(ev),
+                Some(clipboard::Output::Reply(bytes)) => self.output.extend_from_slice(&bytes),
+                None => {}
+            },
+            b"52" => match self.clipboard.osc52(&data[sep + 1..], bell) {
                 Some(clipboard::Output::Event(ev)) => self.events.push(ev),
                 Some(clipboard::Output::Reply(bytes)) => self.output.extend_from_slice(&bytes),
                 None => {}
