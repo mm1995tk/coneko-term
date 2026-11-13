@@ -2840,10 +2840,13 @@ export class Terminal {
     const now = ev.time ?? performance.now();
     const g = this.wheelGesture;
     if (!g || now - g.last >= WHEEL_GESTURE_GAP_MS || now < g.last) {
-      // 一続きの動きの最初。軸を決め直し、端数も持ち越さない。
-      this.wheelGesture = { axis: Math.abs(dx) > Math.abs(ev.deltaY) ? "x" : "y", last: now };
-      this.wheelPartial = 0;
-      this.wheelPartialX = 0;
+      // 一続きの動きの最初。軸を決め直す。軸が変わるときだけ、端数を持ち越さない。
+      const axis = Math.abs(dx) > Math.abs(ev.deltaY) ? "x" : "y";
+      if (axis !== g?.axis) {
+        this.wheelPartial = 0;
+        this.wheelPartialX = 0;
+      }
+      this.wheelGesture = { axis, last: now };
     } else {
       g.last = now;
     }

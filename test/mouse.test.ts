@@ -559,3 +559,13 @@ test("wheel: horizontal delta is ignored when the app does not listen", async ()
   assert.deepEqual(box.out, ["\x1b[B\x1b[B"]);
   t.dispose();
 });
+
+test("wheel: a fraction carries over between gestures on the same axis", async () => {
+  const t = new Terminal({ cols: 20, rows: 5 });
+  const box = collect(t);
+  await write(t, "\x1b[?1000h\x1b[?1006h");
+  t.handleWheel({ deltaY: 0.6, deltaMode: 0, time: 0 });
+  t.handleWheel({ deltaY: 0.6, deltaMode: 0, time: 1000 });
+  assert.deepEqual(box.out, ["\x1b[<65;1;1M"]);
+  t.dispose();
+});
