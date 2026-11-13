@@ -350,11 +350,14 @@ export class CanvasRenderer {
     this.ctx.textBaseline = "alphabetic";
   }
 
-  /** 列と行の数が変わった。 */
+  /**
+   * 列と行の数が変わった。canvas は大きさを変えた瞬間に中身が消えるので、
+   * 次のフレームを待たずに、ここで全部を描き直す（待つと、空の canvas が 1 フレーム見えて点滅する）。
+   */
   resize(): void {
     this.applySize();
     this.needsFull = true;
-    this.requestRender();
+    this.render();
   }
 
   /** 全部を描き直す。 */
