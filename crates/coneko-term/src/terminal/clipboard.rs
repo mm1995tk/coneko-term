@@ -27,8 +27,9 @@
 //!   OSC 52 の形（`OSC 52 ; Pc ; base64 ST`）で、頼みと同じ終わりの字（BEL か ST）で出す。
 //!   断られた・失敗した・テキストが無いときは、中身の無い返事（`OSC 52 ; Pc ; ST`）にする。
 //! - `Pc` は、`c` があるか空なら主のクリップボード、`c` が無くて `p` か `s` があれば primary
-//!   selection。cut buffer（`0`〜`7`）だけのときは、書き込みは捨て、読み取りには中身の無い返事を
-//!   する。`Pc` に知らない字があれば、シーケンスを捨てる。
+//!   selection。secondary selection（`q`）と cut buffer（`0`〜`7`）は扱わず、それだけのときは、
+//!   書き込みは捨て、読み取りには中身の無い返事をする。`Pc` に知らない字があれば、シーケンスを
+//!   捨てる。
 //! - イベントの `id` は、ここで `osc52:` で始まる値を付ける（OSC 5522 の `id` には `:` が
 //!   入らないので、混ざらない）。答えの関数は、この `id` を見て返事の形を選ぶ。
 
@@ -240,7 +241,7 @@ impl Clipboard {
         let (pc, pd) = (&rest[..sep], &rest[sep + 1..]);
         if !pc
             .iter()
-            .all(|b| matches!(b, b'c' | b'p' | b's' | b'0'..=b'7'))
+            .all(|b| matches!(b, b'c' | b'p' | b'q' | b's' | b'0'..=b'7'))
         {
             return None;
         }
@@ -1038,13 +1039,19 @@ mod osc52_tests {
             loc(&mut t, "\x1b]52;s;YQ==\x07").map(|l| l.0),
             Some(ClipboardLocation::Primary)
         );
+        // `q`（secondary selection）が混ざっても、`c` があれば主のクリップボード。
+        assert_eq!(
+            loc(&mut t, "\x1b]52;cq;YQ==\x07").map(|l| l.0),
+            Some(ClipboardLocation::Clipboard)
+        );
         // 詰め物を省いた base64 も受ける。
         assert_eq!(
             loc(&mut t, "\x1b]52;c;YWI\x07"),
             Some((ClipboardLocation::Clipboard, b"ab".to_vec()))
         );
-        // cut buffer だけ・知らない字・読めない base64 は捨てる。
+        // secondary selection・cut buffer だけ・知らない字・読めない base64 は捨てる。
         assert_eq!(loc(&mut t, "\x1b]52;0;YQ==\x07"), None);
+        assert_eq!(loc(&mut t, "\x1b]52;q;YQ==\x07"), None);
         assert_eq!(loc(&mut t, "\x1b]52;x;YQ==\x07"), None);
         assert_eq!(loc(&mut t, "\x1b]52;c;Y\x07"), None);
         assert_eq!(loc(&mut t, "\x1b]52;c;!!!!\x07"), None);
