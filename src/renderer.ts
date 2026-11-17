@@ -311,6 +311,7 @@ export class CanvasRenderer {
    */
   measure(): void {
     const ctx = this.ctx;
+    const previousDpr = this.dpr;
     this.dpr = this.env.devicePixelRatio();
     const size = this.options.fontSize * this.dpr;
     ctx.font = this.font(false, false);
@@ -322,7 +323,8 @@ export class CanvasRenderer {
     const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? size * 0.2;
     const charH = Math.max(1, Math.ceil(ascent + descent));
     const height = Math.max(1, Math.floor(charH * this.options.lineHeight));
-    const changed = width !== this.cellW || height !== this.cellH;
+    const changed =
+      previousDpr !== this.dpr || width !== this.cellW || height !== this.cellH;
     this.cellW = width;
     this.cellH = height;
     this.descent = Math.ceil(descent);

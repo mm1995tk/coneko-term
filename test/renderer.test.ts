@@ -168,7 +168,7 @@ test("viewport: scrollLines is clamped, and onScroll reports changes", async () 
 type Call = [string, ...unknown[]];
 
 /** 呼び出しを記録する Canvas 2D の代わり。 */
-function fakeCanvas() {
+function fakeCanvas(scaleMetrics = false) {
   const calls: Call[] = [];
   const state: Record<string, unknown> = {};
   const ctx = new Proxy(
@@ -176,11 +176,16 @@ function fakeCanvas() {
     {
       get(_t, prop: string) {
         if (prop === "measureText") {
-          return (text: string) => ({
-            width: text.length * 9,
-            fontBoundingBoxAscent: 12,
-            fontBoundingBoxDescent: 4,
-          });
+          return (text: string) => {
+            const scale = scaleMetrics
+              ? Number.parseFloat(String(state.font)) / 16
+              : 1;
+            return {
+              width: text.length * 9 * scale,
+              fontBoundingBoxAscent: 12 * scale,
+              fontBoundingBoxDescent: 4 * scale,
+            };
+          };
         }
         if (prop in state) return state[prop];
         return (...args: unknown[]) => calls.push([prop, ...args]);
@@ -201,11 +206,15 @@ function fakeCanvas() {
   return { canvas: canvas as unknown as HTMLCanvasElement, calls, raw: canvas };
 }
 
-function setup(t: Terminal, dpr = 1) {
-  const fake = fakeCanvas();
+function setup(
+  t: Terminal,
+  dpr: number | (() => number) = 1,
+  scaleMetrics = false,
+) {
+  const fake = fakeCanvas(scaleMetrics);
   const frames: (() => void)[] = [];
   const env = {
-    devicePixelRatio: () => dpr,
+    devicePixelRatio: () => (typeof dpr === "function" ? dpr() : dpr),
     requestFrame: (cb: () => void) => frames.push(cb),
     cancelFrame: () => {},
   };
@@ -242,6 +251,240 @@ test("renderer: measures the cell and sizes the canvas in device pixels", () => 
   assert.equal(fake.raw.style.width, "45px");
   assert.equal(fake.raw.style.height, "32px");
   t.dispose();
+});
+
+/** 倍率だけを変え、resize や resolution の通知を出さないウィンドウ。 */
+function watchDpr(t: Terminal, renderer: CanvasRenderer, dpr: () => number) {
+  let id = 0;
+  const frames = new Map<number, FrameRequestCallback>();
+  const win = {
+    // WebKit の resolution 通知が来ない条件。購読しても通知を発生させない。
+    matchMedia: () => ({ addEventListener() {}, removeEventListener() {} }),
+    get devicePixelRatio() {
+      return dpr();
+    },
+    requestAnimationFrame(cb: FrameRequestCallback) {
+      frames.set(++id, cb);
+      return id;
+    },
+    cancelAnimationFrame(id: number) {
+      frames.delete(id);
+    },
+  };
+  const terminal = t as unknown as {
+    watchDevicePixelRatio(doc: Document, renderer: CanvasRenderer): () => void;
+    cleanups: (() => void)[];
+  };
+  const stop = terminal.watchDevicePixelRatio(
+    { defaultView: win } as unknown as Document,
+    renderer,
+  );
+  terminal.cleanups.push(stop);
+  return {
+    frames,
+    tick() {
+      const pending = [...frames.values()];
+      frames.clear();
+      for (const cb of pending) cb(0);
+    },
+  };
+}
+
+/** 欄に合わせて fit する、通知の無い倍率変更の共通セットアップ。 */
+async function setupZoom() {
+  let dpr = 1;
+  const t = new Terminal({ cols: 20, rows: 4, scrollback: 0 });
+  const { r, fake, flush } = setup(t, () => dpr, true);
+  const host = {
+    get clientWidth() {
+      return 180 / dpr;
+    },
+    get clientHeight() {
+      return 64 / dpr;
+    },
+    ownerDocument: { defaultView: { getComputedStyle: () => ({}) } },
+  };
+  (t as unknown as { host: unknown }).host = host;
+  const watcher = watchDpr(t, r, () => dpr);
+  r.onCellSizeChange(() => t.fit());
+  await write(t, "ab\x1b[2 q");
+  t.setFocused(true);
+  flush();
+  return {
+    t,
+    r,
+    fake,
+    host,
+    watcher,
+    zoomTo(ratio: number) {
+      dpr = ratio;
+      fake.calls.length = 0;
+      watcher.tick();
+    },
+  };
+}
+
+test("zoom: silent DPR changes update density and fit before the frame ends", async (context) => {
+  const { t, r, fake, host, watcher, zoomTo } = await setupZoom();
+  context.after(() => t.dispose());
+  for (const ratio of [1, 1.25, 2, 1]) {
+    zoomTo(ratio);
+    assert.deepEqual(
+      { cols: t.cols, rows: t.rows },
+      proposeDimensions({
+        width: host.clientWidth,
+        height: host.clientHeight,
+        cellWidth: r.cellSize.width,
+        cellHeight: r.cellSize.height,
+        scrollbarWidth: 0,
+      }),
+    );
+    assert.equal(
+      fake.raw.width / (Number.parseFloat(fake.raw.style.width) * ratio),
+      1,
+    );
+    assert.equal(
+      fake.raw.height / (Number.parseFloat(fake.raw.style.height) * ratio),
+      1,
+    );
+    if (ratio !== 1 || fake.calls.length) {
+      assert.ok(
+        fake.calls.some((c) => c[0] === "fillText" && c[1] === "a"),
+        "redraw before the frame ends",
+      );
+    }
+  }
+  fake.calls.length = 0;
+  watcher.tick();
+  assert.equal(fake.calls.length, 0, "unchanged DPR does not measure or draw");
+});
+
+test("zoom: glyphs, cursor and selection use the same device cells", async (context) => {
+  const { t, r, fake, zoomTo } = await setupZoom();
+  context.after(() => t.dispose());
+  for (const ratio of [1, 1.25, 2, 1]) {
+    zoomTo(ratio);
+    t.selectAll();
+    fake.calls.length = 0;
+    r.render();
+    const { width: w, height: h } = r.deviceCellSize;
+    assert.ok(
+      fake.calls.some(
+        (c) => c[0] === "set font" && c[1] === `${16 * ratio}px mono`,
+      ),
+    );
+    assert.ok(
+      fake.calls.some((c) => c[0] === "fillText" && c[1] === "b" && c[2] === w),
+    );
+    let color: unknown;
+    const rects = fake.calls.filter((c) => {
+      if (c[0] === "set fillStyle") color = c[1];
+      return (
+        c[0] === "fillRect" && (color === "#00ff00" || color === "#ffffff4d")
+      );
+    });
+    assert.ok(
+      rects.some(
+        (c) => c[1] === 2 * w && c[2] === 0 && c[3] === w && c[4] === h,
+      ),
+      "cursor uses device cells",
+    );
+    const span = t.selectionSpan(0)!;
+    assert.ok(
+      rects.some(
+        (c) => c[1] === span[0] * w && c[3] === (span[1] - span[0]) * w,
+      ),
+      "selection uses device cells",
+    );
+  }
+});
+
+test("zoom: pointer coordinates follow CSS cells after silent DPR changes", async (context) => {
+  const { t, r, zoomTo } = await setupZoom();
+  context.after(() => t.dispose());
+  for (const ratio of [1, 1.25, 2, 1]) {
+    zoomTo(ratio);
+    const pointer = (
+      t as unknown as {
+        pointerInput(
+          canvas: unknown,
+          event: unknown,
+          type: string,
+        ): { col: number; row: number };
+      }
+    ).pointerInput(
+      { getBoundingClientRect: () => ({ left: 10, top: 20 }) },
+      {
+        clientX: 10 + 2.5 * r.cellSize.width,
+        clientY: 20 + 1.5 * r.cellSize.height,
+      },
+      "move",
+    );
+    assert.deepEqual(
+      { col: pointer.col, row: pointer.row },
+      { col: 2, row: 1 },
+    );
+  }
+});
+
+test("zoom: dispose cancels the monitor and queued callbacks cannot restart it", () => {
+  let dpr = 1;
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { r } = setup(t, () => dpr, true);
+  const watcher = watchDpr(t, r, () => dpr);
+  const queued = [...watcher.frames.values()];
+  t.dispose();
+  assert.equal(watcher.frames.size, 0, "dispose cancels the monitor");
+  dpr = 2;
+  for (const cb of queued) cb(0);
+  assert.equal(
+    watcher.frames.size,
+    0,
+    "a queued callback cannot restart a disposed monitor",
+  );
+});
+
+test("zoom: saved zoom and silent display density changes use the current DPR", () => {
+  let dpr = 2;
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { r, fake } = setup(t, () => dpr, true);
+  const watcher = watchDpr(t, r, () => dpr);
+  assert.equal(fake.raw.width, 180);
+  assert.equal(fake.raw.style.width, "90px");
+  for (const ratio of [1, 2, 1.5]) {
+    dpr = ratio;
+    watcher.tick();
+    assert.equal(fake.raw.width, t.cols * r.deviceCellSize.width);
+    assert.equal(
+      fake.raw.width / Number.parseFloat(fake.raw.style.width),
+      ratio,
+    );
+  }
+  t.dispose();
+});
+
+test("zoom: CSS cell size changes notify listeners even when device cells round to the same size", () => {
+  let dpr = 1;
+  const t = new Terminal({ cols: 10, rows: 4 });
+  // 固定のデバイス寸法で、DPR だけが変わる場合を再現する。
+  const { r } = setup(t, () => dpr);
+  const sizes: unknown[] = [];
+  r.onCellSizeChange((size) => sizes.push(size));
+  dpr = 1.01;
+  r.measure();
+  assert.deepEqual(sizes, [{ width: 9 / dpr, height: 16 / dpr }]);
+  t.dispose();
+});
+
+test("zoom: disposal during a cell size callback does not restart the monitor", () => {
+  let dpr = 1;
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { r } = setup(t, () => dpr, true);
+  const watcher = watchDpr(t, r, () => dpr);
+  r.onCellSizeChange(() => t.dispose());
+  dpr = 2;
+  watcher.tick();
+  assert.equal(watcher.frames.size, 0);
 });
 
 test("renderer: draws once per frame, and only the changed rows afterwards", async () => {
