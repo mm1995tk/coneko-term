@@ -2161,19 +2161,28 @@ export class Terminal {
     renderer: CanvasRenderer,
   ): () => void {
     const win = doc.defaultView;
-    if (!win?.matchMedia) return () => {};
-    let mq: MediaQueryList | undefined;
-    const watch = () => {
-      mq?.removeEventListener("change", onChange);
-      mq = win.matchMedia(`(resolution: ${win.devicePixelRatio}dppx)`);
-      mq.addEventListener("change", onChange);
+    if (!win) return () => {};
+    let dpr = win.devicePixelRatio || 1;
+    let stopped = false;
+    // WebKit はページの拡大で DPR が変わっても resolution の change を出さないことがある。
+    // 通知には頼らず、描画前に値を比べる。背景タブでは rAF と一緒に監視も休む。
+    const check = () => {
+      if (stopped || this.disposed) return;
+      const next = win.devicePixelRatio || 1;
+      if (next !== dpr) {
+        dpr = next;
+        renderer.measure();
+        if (stopped || this.disposed) return;
+        // measure は canvas を空にすることがあるので、このフレーム中に描き直す。
+        renderer.render();
+      }
+      if (!stopped && !this.disposed) frame = win.requestAnimationFrame(check);
     };
-    const onChange = () => {
-      watch();
-      if (!this.disposed) renderer.measure();
+    let frame = win.requestAnimationFrame(check);
+    return () => {
+      stopped = true;
+      win.cancelAnimationFrame(frame);
     };
-    watch();
-    return () => mq?.removeEventListener("change", onChange);
   }
 
   private renderOptions() {
