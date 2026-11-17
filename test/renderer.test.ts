@@ -290,7 +290,8 @@ function watchDpr(t: Terminal, renderer: CanvasRenderer, dpr: () => number) {
   };
 }
 
-test("zoom: silent DPR changes update density, fit, glyphs, cursor, selection and pointer coordinates", async () => {
+/** 欄に合わせて fit する、通知の無い倍率変更の共通セットアップ。 */
+async function setupZoom() {
   let dpr = 1;
   const t = new Terminal({ cols: 20, rows: 4, scrollback: 0 });
   const { r, fake, flush } = setup(t, () => dpr, true);
@@ -309,10 +310,25 @@ test("zoom: silent DPR changes update density, fit, glyphs, cursor, selection an
   await write(t, "ab\x1b[2 q");
   t.setFocused(true);
   flush();
+  return {
+    t,
+    r,
+    fake,
+    host,
+    watcher,
+    zoomTo(ratio: number) {
+      dpr = ratio;
+      fake.calls.length = 0;
+      watcher.tick();
+    },
+  };
+}
+
+test("zoom: silent DPR changes update density and fit before the frame ends", async (context) => {
+  const { t, r, fake, host, watcher, zoomTo } = await setupZoom();
+  context.after(() => t.dispose());
   for (const ratio of [1, 1.25, 2, 1]) {
-    dpr = ratio;
-    fake.calls.length = 0;
-    watcher.tick();
+    zoomTo(ratio);
     assert.deepEqual(
       t.fit(),
       proposeDimensions({
@@ -324,11 +340,11 @@ test("zoom: silent DPR changes update density, fit, glyphs, cursor, selection an
       }),
     );
     assert.equal(
-      fake.raw.width / (Number.parseFloat(fake.raw.style.width) * dpr),
+      fake.raw.width / (Number.parseFloat(fake.raw.style.width) * ratio),
       1,
     );
     assert.equal(
-      fake.raw.height / (Number.parseFloat(fake.raw.style.height) * dpr),
+      fake.raw.height / (Number.parseFloat(fake.raw.style.height) * ratio),
       1,
     );
     if (ratio !== 1 || fake.calls.length) {
@@ -337,13 +353,24 @@ test("zoom: silent DPR changes update density, fit, glyphs, cursor, selection an
         "redraw before the frame ends",
       );
     }
+  }
+  fake.calls.length = 0;
+  watcher.tick();
+  assert.equal(fake.calls.length, 0, "unchanged DPR does not measure or draw");
+});
+
+test("zoom: glyphs, cursor and selection use the same device cells", async (context) => {
+  const { t, r, fake, zoomTo } = await setupZoom();
+  context.after(() => t.dispose());
+  for (const ratio of [1, 1.25, 2, 1]) {
+    zoomTo(ratio);
     t.selectAll();
     fake.calls.length = 0;
     r.render();
     const { width: w, height: h } = r.deviceCellSize;
     assert.ok(
       fake.calls.some(
-        (c) => c[0] === "set font" && c[1] === `${16 * dpr}px mono`,
+        (c) => c[0] === "set font" && c[1] === `${16 * ratio}px mono`,
       ),
     );
     assert.ok(
@@ -369,6 +396,14 @@ test("zoom: silent DPR changes update density, fit, glyphs, cursor, selection an
       ),
       "selection uses device cells",
     );
+  }
+});
+
+test("zoom: pointer coordinates follow CSS cells after silent DPR changes", async (context) => {
+  const { t, r, zoomTo } = await setupZoom();
+  context.after(() => t.dispose());
+  for (const ratio of [1, 1.25, 2, 1]) {
+    zoomTo(ratio);
     const pointer = (
       t as unknown as {
         pointerInput(
@@ -390,9 +425,13 @@ test("zoom: silent DPR changes update density, fit, glyphs, cursor, selection an
       { col: 2, row: 1 },
     );
   }
-  fake.calls.length = 0;
-  watcher.tick();
-  assert.equal(fake.calls.length, 0, "unchanged DPR does not measure or draw");
+});
+
+test("zoom: dispose cancels the monitor and queued callbacks cannot restart it", () => {
+  let dpr = 1;
+  const t = new Terminal({ cols: 10, rows: 4 });
+  const { r } = setup(t, () => dpr, true);
+  const watcher = watchDpr(t, r, () => dpr);
   const queued = [...watcher.frames.values()];
   t.dispose();
   assert.equal(watcher.frames.size, 0, "dispose cancels the monitor");
