@@ -330,7 +330,7 @@ test("zoom: silent DPR changes update density and fit before the frame ends", as
   for (const ratio of [1, 1.25, 2, 1]) {
     zoomTo(ratio);
     assert.deepEqual(
-      t.fit(),
+      { cols: t.cols, rows: t.rows },
       proposeDimensions({
         width: host.clientWidth,
         height: host.clientHeight,
