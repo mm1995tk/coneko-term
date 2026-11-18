@@ -68,18 +68,19 @@ export function proposeDimensions(
   };
 }
 
+/** ASCII の印字できる字（0x20〜0x7e）。 */
+const PRINTABLE_ASCII = Array.from({ length: 0x7f - 0x20 }, (_, i) =>
+  String.fromCharCode(0x20 + i),
+);
+
 /**
  * セルの幅を決めるための字の幅（デバイスピクセル）。ASCII の印字できる字（0x20〜0x7e）の
  * 送り幅のうち、いちばん広いもの。kitty の `calc_cell_width`（kitty/freetype.c）と
  * `cell_metrics`（kitty/core_text.m）と同じ字の範囲にそろえている。
  */
 export function widestAsciiAdvance(advance: (text: string) => number): number {
-  let widest = 0;
-  for (let cp = 0x20; cp < 0x7f; cp++) {
-    const w = advance(String.fromCharCode(cp));
-    if (w > widest) widest = w;
-  }
-  return widest;
+  // 測れない字（NaN）は飛ばす
+  return Math.max(0, ...PRINTABLE_ASCII.map(advance).filter(Number.isFinite));
 }
 
 /**
