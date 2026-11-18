@@ -69,8 +69,23 @@ export function proposeDimensions(
 }
 
 /**
+ * セルの幅を決めるための字の幅（デバイスピクセル）。ASCII の印字できる字（0x20〜0x7e）の
+ * 送り幅のうち、いちばん広いもの。kitty の `calc_cell_width`（kitty/freetype.c）と
+ * `cell_metrics`（kitty/core_text.m）と同じ字の範囲にそろえている。
+ */
+export function widestAsciiAdvance(advance: (text: string) => number): number {
+  let widest = 0;
+  for (let cp = 0x20; cp < 0x7f; cp++) {
+    const w = advance(String.fromCharCode(cp));
+    if (w > widest) widest = w;
+  }
+  return widest;
+}
+
+/**
  * セルの幅（デバイスピクセル）。字の幅の実測値を切り上げる。丸めると、たとえば
- * 13.2px が 13px になって字が詰まる。実測できないとき（0 や NaN）は文字の大きさの 0.6 倍。
+ * 13.2px が 13px になって字が詰まる。kitty も字の送り幅を切り上げて整数のセル幅にする。
+ * 実測できないとき（0 や NaN）は文字の大きさの 0.6 倍。
  */
 export function cellWidthFor(measured: number, fontSize: number): number {
   const w = Math.ceil(measured - 1e-6) || Math.round(fontSize * 0.6);
@@ -316,9 +331,11 @@ export class CanvasRenderer {
     const size = this.options.fontSize * this.dpr;
     ctx.font = this.font(false, false);
     ctx.textBaseline = "alphabetic";
-    const sample = ctx.measureText("W".repeat(32));
     const m = ctx.measureText("Mg");
-    const width = cellWidthFor(sample.width / 32, size);
+    const width = cellWidthFor(
+      widestAsciiAdvance((text) => ctx.measureText(text).width),
+      size,
+    );
     const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? size * 0.8;
     const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? size * 0.2;
     const charH = Math.max(1, Math.ceil(ascent + descent));

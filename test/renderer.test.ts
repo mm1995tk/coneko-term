@@ -11,7 +11,11 @@ import {
   SCROLLBAR_WIDTH,
   Terminal,
 } from "../dist/index.js";
-import { cellWidthFor, Scrollbar } from "../dist/renderer.js";
+import {
+  cellWidthFor,
+  Scrollbar,
+  widestAsciiAdvance,
+} from "../dist/renderer.js";
 
 before(async () => {
   await init(
@@ -826,6 +830,27 @@ test("cell width: rounds the measured glyph width up, so letters do not crowd", 
   assert.equal(cellWidthFor(13, 22), 13);
   assert.equal(cellWidthFor(13.0000001, 22), 13);
   assert.equal(cellWidthFor(0.3, 1), 1);
+});
+
+test("cell width: takes the widest ASCII advance, as kitty does", () => {
+  const seen: string[] = [];
+  const widest = widestAsciiAdvance((text) => {
+    seen.push(text);
+    return text === "m" ? 13.6 : text === "i" ? 5 : 13.2;
+  });
+  assert.equal(widest, 13.6);
+  assert.equal(cellWidthFor(widest, 22), 14);
+  // 0x20（空白）から 0x7e（~）まで。0x7f（DEL）は字が無いので測らない
+  assert.equal(seen.length, 95);
+  assert.equal(seen[0], " ");
+  assert.equal(seen.at(-1), "~");
+});
+
+test("cell width: JetBrains Mono 11px at devicePixelRatio 2 is 14, as in kitty", () => {
+  // Chromium の Canvas で測った JetBrains Mono 2.304 の 22px の送り幅（#109 の再現検証）。
+  // kitty（macOS）も 11pt・倍率 2 で 22px の字を作り、ceil(13.2) = 14 にする
+  const widest = widestAsciiAdvance(() => 13.200042724609375);
+  assert.equal(cellWidthFor(widest, 22), 14);
 });
 
 test("cell width: falls back to 0.6 em when the width cannot be measured", () => {
