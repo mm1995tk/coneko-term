@@ -846,11 +846,51 @@ test("cell width: takes the widest ASCII advance, as kitty does", () => {
   assert.equal(seen.at(-1), "~");
 });
 
-test("cell width: JetBrains Mono 11px at devicePixelRatio 2 is 14, as in kitty", () => {
-  // Chromium の Canvas で測った JetBrains Mono 2.304 の 22px の送り幅（#109 の再現検証）。
-  // kitty（macOS）も 11pt・倍率 2 で 22px の字を作り、ceil(13.2) = 14 にする
-  const widest = widestAsciiAdvance(() => 13.200042724609375);
-  assert.equal(cellWidthFor(widest, 22), 14);
+test("cell width: the renderer sizes cells by the widest ASCII glyph", () => {
+  // W は 13.2、m だけ 14.4 の送り幅を返す Canvas。W だけを測ると 14、m まで測ると 15
+  const advance = (ch: string) => (ch === "m" ? 14.4 : 13.2);
+  const ctx = new Proxy(
+    {},
+    {
+      get(_t, prop: string) {
+        if (prop === "measureText") {
+          return (text: string) => ({
+            width: [...text].reduce((sum, ch) => sum + advance(ch), 0),
+            fontBoundingBoxAscent: 22,
+            fontBoundingBoxDescent: 7,
+          });
+        }
+        return () => {};
+      },
+      set: () => true,
+    },
+  );
+  const canvas = {
+    width: 0,
+    height: 0,
+    style: {},
+    getContext: () => ctx,
+  } as unknown as HTMLCanvasElement;
+  const t = new Terminal({ cols: 4, rows: 2 });
+  const palette = new Palette(
+    Array.from({ length: 16 }, () => "#111111"),
+    "#ffffff",
+    "#000000",
+    "#00ff00",
+  );
+  const r = new CanvasRenderer(
+    canvas,
+    t,
+    { fontFamily: "mono", fontSize: 11, lineHeight: 1, palette },
+    {
+      devicePixelRatio: () => 2,
+      requestFrame: () => 0,
+      cancelFrame: () => {},
+    },
+  );
+  assert.equal(r.deviceCellSize.width, 15);
+  r.dispose();
+  t.dispose();
 });
 
 test("cell width: falls back to 0.6 em when the width cannot be measured", () => {
