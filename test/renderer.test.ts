@@ -171,8 +171,13 @@ test("viewport: scrollLines is clamped, and onScroll reports changes", async () 
 
 type Call = [string, ...unknown[]];
 
-/** 呼び出しを記録する Canvas 2D の代わり。 */
-function fakeCanvas(scaleMetrics = false) {
+/**
+ * 呼び出しを記録する Canvas 2D の代わり。`advance` は 1 字の送り幅（既定はどの字も 9）。
+ */
+function fakeCanvas(
+  scaleMetrics = false,
+  advance: (ch: string) => number = () => 9,
+) {
   const calls: Call[] = [];
   const state: Record<string, unknown> = {};
   const ctx = new Proxy(
@@ -185,7 +190,8 @@ function fakeCanvas(scaleMetrics = false) {
               ? Number.parseFloat(String(state.font)) / 16
               : 1;
             return {
-              width: text.length * 9 * scale,
+              width:
+                text.split("").reduce((sum, ch) => sum + advance(ch), 0) * scale,
               fontBoundingBoxAscent: 12 * scale,
               fontBoundingBoxDescent: 4 * scale,
             };
@@ -214,8 +220,9 @@ function setup(
   t: Terminal,
   dpr: number | (() => number) = 1,
   scaleMetrics = false,
+  advance?: (ch: string) => number,
 ) {
-  const fake = fakeCanvas(scaleMetrics);
+  const fake = fakeCanvas(scaleMetrics, advance);
   const frames: (() => void)[] = [];
   const env = {
     devicePixelRatio: () => (typeof dpr === "function" ? dpr() : dpr),
@@ -848,48 +855,9 @@ test("cell width: takes the widest ASCII advance, as kitty does", () => {
 
 test("cell width: the renderer sizes cells by the widest ASCII glyph", () => {
   // W は 13.2、m だけ 14.4 の送り幅を返す Canvas。W だけを測ると 14、m まで測ると 15
-  const advance = (ch: string) => (ch === "m" ? 14.4 : 13.2);
-  const ctx = new Proxy(
-    {},
-    {
-      get(_t, prop: string) {
-        if (prop === "measureText") {
-          return (text: string) => ({
-            width: [...text].reduce((sum, ch) => sum + advance(ch), 0),
-            fontBoundingBoxAscent: 22,
-            fontBoundingBoxDescent: 7,
-          });
-        }
-        return () => {};
-      },
-      set: () => true,
-    },
-  );
-  const canvas = {
-    width: 0,
-    height: 0,
-    style: {},
-    getContext: () => ctx,
-  } as unknown as HTMLCanvasElement;
   const t = new Terminal({ cols: 4, rows: 2 });
-  const palette = new Palette(
-    Array.from({ length: 16 }, () => "#111111"),
-    "#ffffff",
-    "#000000",
-    "#00ff00",
-  );
-  const r = new CanvasRenderer(
-    canvas,
-    t,
-    { fontFamily: "mono", fontSize: 11, lineHeight: 1, palette },
-    {
-      devicePixelRatio: () => 2,
-      requestFrame: () => 0,
-      cancelFrame: () => {},
-    },
-  );
+  const { r } = setup(t, 2, false, (ch) => (ch === "m" ? 14.4 : 13.2));
   assert.equal(r.deviceCellSize.width, 15);
-  r.dispose();
   t.dispose();
 });
 
