@@ -248,7 +248,7 @@ function setup(
 test("renderer: measures the cell and sizes the canvas in device pixels", () => {
   const t = new Terminal({ cols: 10, rows: 4 });
   const { r, fake } = setup(t, 2);
-  // 幅は 'W' x 32 を 32 で割った 9、高さは 12 + 4
+  // 幅は ASCII の字の送り幅の最大値 9、高さは 12 + 4
   assert.deepEqual(r.cellSize, { width: 4.5, height: 8 });
   assert.equal(fake.raw.width, 90);
   assert.equal(fake.raw.height, 64);
