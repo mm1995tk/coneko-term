@@ -76,7 +76,9 @@ const PRINTABLE_ASCII = Array.from({ length: 0x7f - 0x20 }, (_, i) =>
 /**
  * セルの幅を決めるための字の幅（デバイスピクセル）。ASCII の印字できる字（0x20〜0x7e）の
  * 送り幅のうち、いちばん広いもの。kitty の `calc_cell_width`（kitty/freetype.c）と
- * `cell_metrics`（kitty/core_text.m）と同じ字の範囲にそろえている。
+ * `cell_metrics`（kitty/core_text.m）と同じ字の範囲にそろえている。kitty は 0x7f まで
+ * 回すが、0x7f（DEL）には字が無く、kitty は字の無いものを飛ばす。Canvas では字の有無を
+ * 判定できず、無い字は別のフォントで測られてしまうので、ここでは 0x7e で止める。
  */
 export function widestAsciiAdvance(advance: (text: string) => number): number {
   // 測れない字（NaN）は飛ばす
