@@ -68,9 +68,27 @@ export function proposeDimensions(
   };
 }
 
+/** ASCII の印字できる字（0x20〜0x7e）。 */
+const PRINTABLE_ASCII = Array.from({ length: 0x7f - 0x20 }, (_, i) =>
+  String.fromCharCode(0x20 + i),
+);
+
+/**
+ * セルの幅を決めるための字の幅（デバイスピクセル）。ASCII の印字できる字（0x20〜0x7e）の
+ * 送り幅のうち、いちばん広いもの。kitty の `calc_cell_width`（kitty/freetype.c）と
+ * `cell_metrics`（kitty/core_text.m）と同じ字の範囲にそろえている。kitty は 0x7f まで
+ * 回すが、0x7f（DEL）には字が無く、kitty は字の無いものを飛ばす。Canvas では字の有無を
+ * 判定できず、無い字は別のフォントで測られてしまうので、ここでは 0x7e で止める。
+ */
+export function widestAsciiAdvance(advance: (text: string) => number): number {
+  // 測れない字（NaN）は飛ばす
+  return Math.max(0, ...PRINTABLE_ASCII.map(advance).filter(Number.isFinite));
+}
+
 /**
  * セルの幅（デバイスピクセル）。字の幅の実測値を切り上げる。丸めると、たとえば
- * 13.2px が 13px になって字が詰まる。実測できないとき（0 や NaN）は文字の大きさの 0.6 倍。
+ * 13.2px が 13px になって字が詰まる。kitty も字の送り幅を切り上げて整数のセル幅にする。
+ * 実測できないとき（0 や NaN）は文字の大きさの 0.6 倍。
  */
 export function cellWidthFor(measured: number, fontSize: number): number {
   const w = Math.ceil(measured - 1e-6) || Math.round(fontSize * 0.6);
@@ -316,9 +334,11 @@ export class CanvasRenderer {
     const size = this.options.fontSize * this.dpr;
     ctx.font = this.font(false, false);
     ctx.textBaseline = "alphabetic";
-    const sample = ctx.measureText("W".repeat(32));
     const m = ctx.measureText("Mg");
-    const width = cellWidthFor(sample.width / 32, size);
+    const width = cellWidthFor(
+      widestAsciiAdvance((text) => ctx.measureText(text).width),
+      size,
+    );
     const ascent = m.fontBoundingBoxAscent ?? m.actualBoundingBoxAscent ?? size * 0.8;
     const descent = m.fontBoundingBoxDescent ?? m.actualBoundingBoxDescent ?? size * 0.2;
     const charH = Math.max(1, Math.ceil(ascent + descent));

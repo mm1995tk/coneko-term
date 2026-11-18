@@ -11,7 +11,11 @@ import {
   SCROLLBAR_WIDTH,
   Terminal,
 } from "../dist/index.js";
-import { cellWidthFor, Scrollbar } from "../dist/renderer.js";
+import {
+  cellWidthFor,
+  Scrollbar,
+  widestAsciiAdvance,
+} from "../dist/renderer.js";
 
 before(async () => {
   await init(
@@ -167,8 +171,13 @@ test("viewport: scrollLines is clamped, and onScroll reports changes", async () 
 
 type Call = [string, ...unknown[]];
 
-/** 呼び出しを記録する Canvas 2D の代わり。 */
-function fakeCanvas(scaleMetrics = false) {
+/**
+ * 呼び出しを記録する Canvas 2D の代わり。`advance` は 1 字の送り幅（既定はどの字も 9）。
+ */
+function fakeCanvas(
+  scaleMetrics = false,
+  advance: (ch: string) => number = () => 9,
+) {
   const calls: Call[] = [];
   const state: Record<string, unknown> = {};
   const ctx = new Proxy(
@@ -181,7 +190,8 @@ function fakeCanvas(scaleMetrics = false) {
               ? Number.parseFloat(String(state.font)) / 16
               : 1;
             return {
-              width: text.length * 9 * scale,
+              width:
+                text.split("").reduce((sum, ch) => sum + advance(ch), 0) * scale,
               fontBoundingBoxAscent: 12 * scale,
               fontBoundingBoxDescent: 4 * scale,
             };
@@ -210,8 +220,9 @@ function setup(
   t: Terminal,
   dpr: number | (() => number) = 1,
   scaleMetrics = false,
+  advance?: (ch: string) => number,
 ) {
-  const fake = fakeCanvas(scaleMetrics);
+  const fake = fakeCanvas(scaleMetrics, advance);
   const frames: (() => void)[] = [];
   const env = {
     devicePixelRatio: () => (typeof dpr === "function" ? dpr() : dpr),
@@ -244,7 +255,7 @@ function setup(
 test("renderer: measures the cell and sizes the canvas in device pixels", () => {
   const t = new Terminal({ cols: 10, rows: 4 });
   const { r, fake } = setup(t, 2);
-  // 幅は 'W' x 32 を 32 で割った 9、高さは 12 + 4
+  // 幅は ASCII の字の送り幅の最大値 9、高さは 12 + 4
   assert.deepEqual(r.cellSize, { width: 4.5, height: 8 });
   assert.equal(fake.raw.width, 90);
   assert.equal(fake.raw.height, 64);
@@ -826,6 +837,28 @@ test("cell width: rounds the measured glyph width up, so letters do not crowd", 
   assert.equal(cellWidthFor(13, 22), 13);
   assert.equal(cellWidthFor(13.0000001, 22), 13);
   assert.equal(cellWidthFor(0.3, 1), 1);
+});
+
+test("cell width: takes the widest ASCII advance, as kitty does", () => {
+  const seen: string[] = [];
+  const widest = widestAsciiAdvance((text) => {
+    seen.push(text);
+    return text === "m" ? 13.6 : text === "i" ? 5 : 13.2;
+  });
+  assert.equal(widest, 13.6);
+  assert.equal(cellWidthFor(widest, 22), 14);
+  // 0x20（空白）から 0x7e（~）まで。0x7f（DEL）は字が無いので測らない
+  assert.equal(seen.length, 95);
+  assert.equal(seen[0], " ");
+  assert.equal(seen.at(-1), "~");
+});
+
+test("cell width: the renderer sizes cells by the widest ASCII glyph", () => {
+  // W は 13.2、m だけ 14.4 の送り幅を返す Canvas。W だけを測ると 14、m まで測ると 15
+  const t = new Terminal({ cols: 4, rows: 2 });
+  const { r } = setup(t, 2, false, (ch) => (ch === "m" ? 14.4 : 13.2));
+  assert.equal(r.deviceCellSize.width, 15);
+  t.dispose();
 });
 
 test("cell width: falls back to 0.6 em when the width cannot be measured", () => {
