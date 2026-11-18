@@ -391,15 +391,63 @@ fn expected_after_redraw() -> Vec<String> {
 fn prompt_is_redrawn_by_the_shell_instead_of_reflowed() {
     let mut t = shell_term(true);
     t.resize(24, 60);
-    // 組み直さず、プロンプトの始まりから下は空。上の `ls` は組み直される
-    assert_eq!(logical_lines(&t), ls_lines());
+    // 上の `ls` は組み直される（3 行ずつ）
+    assert_eq!(row_text(&t, 0), format!("ls0:{}", "x".repeat(56)));
+    // 組み直さず、プロンプトの始まりから下も、行の数を変えずに前の中身を残す（60 列に切り詰める）
+    assert_eq!(row_text(&t, 15), prompt1()[..60]);
+    assert_eq!(row_text(&t, 16), prompt1()[100..]);
+    assert_eq!(row_text(&t, 17), "%");
+    assert_eq!(t.screen().row(15).cells().len(), 60);
     // カーソルは、始まりから同じ段目（2 段目）に残る
     let c = t.screen().cursor();
     assert_eq!(c.y, 5 * 3 + 2);
+    assert_eq!(c.x, 2);
     // シェルが描き直すと、プロンプトの 1 行目は 1 回だけ出る
     w(&mut t, &zsh_redraw(2, true));
     assert_eq!(logical_lines(&t), expected_after_redraw());
     assert_eq!(t.screen().scrollback_len(), 0);
+}
+
+#[test]
+fn prompt_keeps_its_contents_when_widened() {
+    let mut t = shell_term(true);
+    t.resize(24, 140);
+    // `ls` は 1 行ずつになる。プロンプトの行は組み直さず、空白で延ばす（行の数は 3 行のまま）
+    assert_eq!(row_text(&t, 4), format!("ls4:{}", "x".repeat(130)));
+    assert_eq!(row_text(&t, 5), prompt1()[..100]);
+    assert_eq!(row_text(&t, 6), prompt1()[100..]);
+    assert_eq!(row_text(&t, 7), "%");
+    assert_eq!(t.screen().row(5).cells().len(), 140);
+    let c = t.screen().cursor();
+    assert_eq!(c.y, 5 + 2);
+    assert_eq!(c.x, 2);
+    // 描き直しのあと、切れ端は残らない
+    w(&mut t, &zsh_redraw(2, true));
+    assert_eq!(logical_lines(&t), expected_after_redraw());
+    assert_eq!(t.screen().scrollback_len(), 0);
+}
+
+#[test]
+fn prompt_keeps_its_contents_when_resized_again_before_the_redraw() {
+    // ドラッグの間は、シェルの描き直しが届く前にまた幅が変わる
+    let mut t = shell_term(true);
+    t.resize(24, 60);
+    t.resize(24, 40);
+    assert_eq!(row_text(&t, 5 * 4), prompt1()[..40]);
+    assert_eq!(row_text(&t, 5 * 4 + 2), "%");
+    t.resize(24, 100);
+    w(&mut t, &zsh_redraw(2, true));
+    assert_eq!(logical_lines(&t), expected_after_redraw());
+}
+
+#[test]
+fn wide_char_cut_at_the_right_edge_is_dropped_from_the_kept_prompt() {
+    let mut t = term(8, 20);
+    w(&mut t, "\x1b]133;C\x07\x1b]133;A\x07$ ");
+    w(&mut t, "ab\u{3042}\u{3044}\x1b]133;B\x07");
+    // 「$ ab」の 4 列のあとに、全角 2 字が 4〜7 列に入る。5 列にすると「あ」が半分切れる
+    t.resize(8, 5);
+    assert_eq!(row_text(&t, 0), "$ ab");
 }
 
 #[test]
@@ -416,14 +464,14 @@ fn prompt_does_not_pile_up_when_narrowed_step_by_step() {
 }
 
 #[test]
-fn only_the_lines_from_the_prompt_start_are_cleared() {
+fn only_the_lines_from_the_prompt_start_are_kept_not_reflowed() {
     let mut t = term(8, 20);
     w(
         &mut t,
         "\x1b]133;C\x07out\r\n\x1b]133;A\x07$ \x1b]133;B\x07",
     );
     t.resize(8, 10);
-    assert_eq!(logical_lines(&t), ["out"]);
+    assert_eq!(logical_lines(&t), ["out", "$"]);
     assert_eq!(t.screen().cursor().y, 1);
 }
 
@@ -463,10 +511,11 @@ fn shell_that_never_sends_osc_133_c_is_reflowed_as_before() {
 
 #[test]
 fn alt_screen_does_not_change_the_primary_prompt_rule() {
-    // 全画面のプログラムを動かしている間も、主画面のプロンプトは空にされる（シェルが描き直す前提）
+    // 全画面のプログラムを動かしている間も、主画面のプロンプトは組み直されず、切り詰めて残る（シェルが描き直す前提）
     let mut t = shell_term(true);
     w(&mut t, "\x1b[?1049h");
     t.resize(24, 60);
     w(&mut t, "\x1b[?1049l");
-    assert_eq!(logical_lines(&t), ls_lines());
+    assert_eq!(logical_lines(&t)[..5], ls_lines()[..]);
+    assert_eq!(row_text(&t, 15), prompt1()[..60]);
 }

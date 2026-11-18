@@ -105,9 +105,10 @@ impl Buffer {
         }
 
         // カーソルがプロンプトか入力の行にあるときは、プロンプトの始まりから下を組み直さず、
-        // 空にしてシェルに描き直させる。シェルは幅が変わると、始まりまで上へ戻って `\e[J` で消し、
-        // プロンプトを書き直す。上へ戻る段数は端末が組み直したことを知らずに決まっているので、
-        // 組み直すと増えた行が切れ端として上に残る。カーソルは始まりから同じ段目に置く。
+        // 行の数を変えずに新しい幅へ切り詰めるか延ばして、シェルに描き直させる。シェルは幅が変わると、
+        // 始まりまで上へ戻って `\e[J` で消し、プロンプトを書き直す。上へ戻る段数は端末が組み直したことを
+        // 知らずに決まっているので、組み直すと増えた行が切れ端として上に残る。
+        // 空にはしない（描き直しが届くまで、前の中身が見え続ける）。カーソルは始まりから同じ段目に置く。
         let redraw = prompt_start(&old, view_start, tracked[0].abs);
 
         let mut out: VecDeque<Line> = VecDeque::with_capacity(n);
@@ -123,7 +124,7 @@ impl Buffer {
         }
 
         if let Some(s) = redraw {
-            blank_for_redraw(&mut out, s, n, cols, &mut tracked);
+            keep_for_redraw(&mut out, old.drain(s..), s, cols, &mut tracked);
         }
 
         // 行が足りなければ下に空行を足す
@@ -159,18 +160,23 @@ impl Buffer {
     }
 }
 
-/// プロンプトから下（元の `from..n` 行ぶん）を空行にして `out` の末尾に足す。`tracked` のうちその範囲にあるものは、
+/// プロンプトから下（元の `from` 行目から）を組み直さず、1 行ずつ `cols` 列に切り詰めるか延ばして
+/// `out` の末尾に足す。行の数は変わらない。`tracked` のうちその範囲にあるものは、
 /// 始まりからの段目をそのまま残して新しい位置を決める。
-fn blank_for_redraw(
+fn keep_for_redraw(
     out: &mut VecDeque<Line>,
+    lines: impl Iterator<Item = Line>,
     from: usize,
-    n: usize,
     cols: usize,
     tracked: &mut [Tracked],
 ) {
     let at = out.len();
-    for _ in from..n {
-        out.push_back(Line::blank(cols, Default::default()));
+    for mut line in lines {
+        line.resize(cols);
+        // 切り詰めた行どうしは続きではないので、折り返しの印は外す。
+        // 入力・プロンプトの印は残す（描き直しが届く前にまた幅が変わっても、同じように扱う）
+        line.wrapped = false;
+        out.push_back(line);
     }
     for t in tracked.iter_mut().filter(|t| t.abs >= from) {
         t.result = Some((at + t.abs - from, t.x.min(cols - 1), false));
